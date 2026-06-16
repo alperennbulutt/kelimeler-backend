@@ -3,6 +3,7 @@ package handlers
 import (
 	"kelimeler-backend/internal/auth"
 	"kelimeler-backend/internal/middleware"
+	"kelimeler-backend/internal/models"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -10,7 +11,9 @@ import (
 // RegisterRoutes, tüm API route'larını mount eder.
 func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService) {
 	api.Get("/health", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"status": "ok"})
+		var dict int64
+		h.DB.Model(&models.DictionaryWord{}).Count(&dict)
+		return c.JSON(fiber.Map{"status": "ok", "dictionaryWords": dict})
 	})
 
 	guard := middleware.RequireAuth(ts)

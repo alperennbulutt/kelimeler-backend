@@ -3,6 +3,7 @@ package db
 import (
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"kelimeler-backend/internal/models"
@@ -79,11 +80,26 @@ func SeedDictionaryIfEmpty(gdb *gorm.DB, seedPath string) {
 		return
 	}
 	log.Printf("db: dictionary_words boş, seed yükleniyor (%d byte)...", len(data))
-	if err := gdb.Exec(string(data)).Error; err != nil {
-		log.Printf("db: seed yükleme hatası: %v", err)
+
+	// pg_dump --column-inserts çıktısı: her INSERT tek satır.
+	// Her statement'ı ayrı çalıştır (prepared-statement uyumlu), hepsini tek transaction'da.
+	tx := gdb.Begin()
+	n := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(strings.ToUpper(line), "INSERT INTO") {
+			continue
+		}
+		if err := tx.Exec(line).Error; err != nil {
+			tx.Rollback()
+			log.Printf("db: seed hatası (%d. INSERT): %v", n+1, err)
+			return
+		}
+		n++
+	}
+	if err := tx.Commit().Error; err != nil {
+		log.Printf("db: seed commit hatası: %v", err)
 		return
 	}
-	var newCount int64
-	gdb.Model(&models.DictionaryWord{}).Count(&newCount)
-	log.Printf("db: seed tamamlandı, %d kelime yüklendi", newCount)
+	log.Printf("db: seed tamamlandı, %d kelime yüklendi", n)
 }
