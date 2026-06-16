@@ -26,6 +26,8 @@ func main() {
 	if err := db.Migrate(database); err != nil {
 		log.Fatalf("db migrate başarısız: %v", err)
 	}
+	// İlk açılışta (boş DB) imaja gömülü kelime sözlüğünü yükle.
+	db.SeedDictionaryIfEmpty(database, "/seed/dictionary_words.sql")
 
 	tokens := auth.NewTokenService(cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
 
