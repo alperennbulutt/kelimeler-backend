@@ -14,7 +14,10 @@ import (
 
 // Connect, PostgreSQL'e bağlanır ve *gorm.DB döndürür.
 func Connect(dsn string) (*gorm.DB, error) {
-	gdb, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+	gdb, err := gorm.Open(postgres.New(postgres.Config{
+		DSN:                  dsn,
+		PreferSimpleProtocol: true, // çoklu-statement seed Exec'i için gerekli
+	}), &gorm.Config{
 		Logger: gormlogger.Default.LogMode(gormlogger.Warn),
 		NowFunc: func() time.Time {
 			return time.Now().UTC()
