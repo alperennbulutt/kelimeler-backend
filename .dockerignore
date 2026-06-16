@@ -1,0 +1,10 @@
+# Sırlar — image'a ASLA girmesin
+.env
+.env.*
+/secrets/
+service-account.json
+
+# Derleme çıktıları, vcs, loglar
+/bin/
+.git
+*.log

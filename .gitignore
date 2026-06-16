@@ -1,0 +1,10 @@
+# Derleme çıktıları
+/bin/
+
+# Ortam ve sırlar
+.env
+/secrets/
+service-account.json
+
+# Loglar
+*.log

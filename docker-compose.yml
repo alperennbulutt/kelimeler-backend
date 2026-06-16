@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: kelimeler
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      # Host 5432'de native bir Postgres olabilir; çakışmayı önlemek için 5434.
+      - "5434:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d kelimeler"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      # docker ağı içinde Postgres host'u "db"dir.
+      DATABASE_URL: postgres://postgres:postgres@db:5432/kelimeler?sslmode=disable
+    ports:
+      - "8080:8080"
+    volumes:
+      # import-dictionary aracının service-account JSON'ına erişimi için.
+      - ./secrets:/secrets:ro
+
+volumes:
+  pgdata:
