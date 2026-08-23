@@ -97,6 +97,24 @@ flutter build ipa --release --dart-define=API_BASE_URL=https://<coolify-domain>/
 
 ---
 
+## Gizlilik politikası sayfası
+
+Mağaza listelemesi için gereken herkese açık politika sayfası, ayrı bir statik
+site kaynağı yerine bu uygulamanın içinden servis edilir:
+
+- `https://<domain>/privacy` (ayrıca `/privacy-policy`, `/gizlilik`; kök adres `/privacy`'ye yönlenir)
+- Kaynak: `internal/web/privacy-policy.html`, `go:embed` ile binary'ye gömülür.
+
+Metni güncellerken **üç kopyayı birlikte güncelle**, aksi halde birbirinden ayrışırlar:
+
+1. `backend/internal/web/privacy-policy.html` (yayınlanan sayfa)
+2. Flutter reposundaki `docs/privacy-policy.html`
+3. Uygulama içi sayfa: `lib/features/legal/presentation/privacy_policy_page.dart`
+
+Sayfanın başındaki "Son Güncelleme" tarihini de değiştirmeyi unutma.
+
+---
+
 ## Notlar
 
 - **Güncelleme:** `git push` → Coolify otomatik yeniden deploy eder (webhook).
