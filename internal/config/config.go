@@ -27,12 +27,44 @@ type Config struct {
 	AppleClientID string
 	AppleIssuer   string
 
+	// Apple hesap silme (token revoke) için gereken kimlik bilgileri.
+	// Üçü birden verilmezse revoke devre dışı kalır; hesap silme yine çalışır.
+	AppleTeamID     string
+	AppleKeyID      string
+	ApplePrivateKey string
+
 	// Sadece import-dictionary aracı kullanır.
 	FirebaseProjectID      string
 	FirebaseServiceAccount string
 
 	// AppConstants.isTestMode karşılığı: tüm grupları kilitsiz açar.
 	TestModeUnlockAll bool
+
+	// --- Gözlemlenebilirlik ---
+
+	// Boşsa hata raporlama devre dışı kalır.
+	SentryDSN     string
+	SentryRelease string
+
+	// --- Güvenlik ---
+
+	// CORS'a izin verilen origin listesi. Boşsa production'da tarayıcı
+	// kaynaklı istekler reddedilir (mobil istemci CORS'tan etkilenmez).
+	CORSAllowedOrigins []string
+
+	// Auth uçlarına dakikada izin verilen istek sayısı (IP başına).
+	AuthRateLimit       int
+	AuthRateLimitWindow time.Duration
+
+	// Genel uçlara dakikada izin verilen istek sayısı (IP başına).
+	APIRateLimit       int
+	APIRateLimitWindow time.Duration
+
+	// HTTP sunucu zaman aşımları ve gövde sınırı.
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+	IdleTimeout  time.Duration
+	BodyLimit    int
 }
 
 // Load, .env dosyasını (varsa) yükler ve Config'i döndürür.
@@ -52,9 +84,29 @@ func Load() *Config {
 		GoogleClientIDs:        getList("GOOGLE_CLIENT_IDS"),
 		AppleClientID:          getEnv("APPLE_CLIENT_ID", ""),
 		AppleIssuer:            getEnv("APPLE_ISSUER", "https://appleid.apple.com"),
+		AppleTeamID:            getEnv("APPLE_TEAM_ID", ""),
+		AppleKeyID:             getEnv("APPLE_KEY_ID", ""),
+		ApplePrivateKey:        getEnv("APPLE_PRIVATE_KEY", ""),
 		FirebaseProjectID:      getEnv("FIREBASE_PROJECT_ID", ""),
 		FirebaseServiceAccount: getEnv("FIREBASE_SERVICE_ACCOUNT", ""),
 		TestModeUnlockAll:      getBool("TEST_MODE_UNLOCK_ALL", false),
+
+		SentryDSN:     getEnv("SENTRY_DSN", ""),
+		SentryRelease: getEnv("SENTRY_RELEASE", ""),
+
+		CORSAllowedOrigins: getList("CORS_ALLOWED_ORIGINS"),
+
+		// Parola deneme saldırılarını yavaşlatacak kadar sıkı, gerçek
+		// kullanıcıyı engellemeyecek kadar gevşek.
+		AuthRateLimit:       getInt("AUTH_RATE_LIMIT", 10),
+		AuthRateLimitWindow: getDuration("AUTH_RATE_LIMIT_WINDOW", time.Minute),
+		APIRateLimit:        getInt("API_RATE_LIMIT", 120),
+		APIRateLimitWindow:  getDuration("API_RATE_LIMIT_WINDOW", time.Minute),
+
+		ReadTimeout:  getDuration("READ_TIMEOUT", 15*time.Second),
+		WriteTimeout: getDuration("WRITE_TIMEOUT", 30*time.Second),
+		IdleTimeout:  getDuration("IDLE_TIMEOUT", 60*time.Second),
+		BodyLimit:    getInt("BODY_LIMIT_BYTES", 1<<20), // 1 MiB
 	}
 
 	if cfg.JWTSecret == "dev-secret-change-me" && cfg.AppEnv == "production" {
@@ -103,4 +155,18 @@ func getBool(key string, def bool) bool {
 		}
 	}
 	return def
+}
+
+// getInt, tam sayı ortam değişkenini okur; geçersiz/eksikse varsayılana döner.
+func getInt(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		log.Printf("config: %s sayıya çevrilemedi (%q), varsayılan %d kullanılıyor", key, v, def)
+		return def
+	}
+	return n
 }

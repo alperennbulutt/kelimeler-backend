@@ -9,7 +9,10 @@ import (
 )
 
 // RegisterRoutes, tüm API route'larını mount eder.
-func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService) {
+//
+// authLimit, parola/sosyal giriş uçlarına uygulanan sıkı hız sınırıdır;
+// deneme saldırılarını yavaşlatmak için genel sınırdan ayrıdır.
+func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService, authLimit fiber.Handler) {
 	api.Get("/health", func(c *fiber.Ctx) error {
 		var dict int64
 		h.DB.Model(&models.DictionaryWord{}).Count(&dict)
@@ -19,12 +22,13 @@ func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService) {
 	guard := middleware.RequireAuth(ts)
 
 	// --- Auth (yetkilendirme gerektirmeyen) ---
+	// Kimlik üreten uçlar sıkı hız sınırına tabidir.
 	a := api.Group("/auth")
-	a.Post("/register", h.Register)
-	a.Post("/login", h.Login)
-	a.Post("/google", h.GoogleAuth)
-	a.Post("/apple", h.AppleAuth)
-	a.Post("/refresh", h.Refresh)
+	a.Post("/register", authLimit, h.Register)
+	a.Post("/login", authLimit, h.Login)
+	a.Post("/google", authLimit, h.GoogleAuth)
+	a.Post("/apple", authLimit, h.AppleAuth)
+	a.Post("/refresh", authLimit, h.Refresh)
 	a.Post("/logout", h.Logout)
 
 	// --- Auth (yetkilendirme gerektiren) ---
@@ -56,10 +60,17 @@ func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService) {
 	users.Put("/me/current-group", h.SetCurrentGroup)
 	users.Post("/me/advance-group", h.AdvanceGroup)
 	users.Get("/me/usage", h.GetDailyUsage)
-	users.Post("/me/usage/reset", h.ResetDailyUsage)
 	users.Post("/me/usage/group-started", h.IncrementUsage("groups_started_today_count"))
 	users.Post("/me/usage/group-unlocked-by-ad", h.IncrementUsage("groups_unlocked_by_ad_today"))
 	users.Post("/me/usage/review-ad-pass", h.IncrementUsage("review_ad_pass_count_today"))
+	// Reklam no-fill toleransı: sınırı sunucu zorlar, dolduysa 429 döner.
+	users.Post("/me/usage/no-fill-pass", h.GrantNoFillPass)
+
+	// Sayaç sıfırlama yalnızca geliştirme/test ortamında açıktır: production'da
+	// kullanıcının kendi günlük limitlerini sıfırlayabilmesi gating'i anlamsız kılar.
+	if h.Cfg.AppEnv != "production" {
+		users.Post("/me/usage/reset", h.ResetDailyUsage)
+	}
 
 	// --- Map ---
 	mp := api.Group("/map", guard)

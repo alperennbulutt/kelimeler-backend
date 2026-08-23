@@ -14,3 +14,11 @@ func NeedsReset(lastResetMillis int64) bool {
 	y2, m2, d2 := last.Date()
 	return y1 != y2 || m1 != m2 || d1 != d2
 }
+
+// MaxNoFillPassesPerDay, reklam hiç yüklenemediğinde (no-fill) bir kullanıcıya
+// gün içinde kaç kez reklamsız geçiş verileceğini sınırlar.
+//
+// Amaç: AdMob'un gerçekten envanter döndürmediği anlarda kullanıcıyı bloke
+// etmemek, ama uçak modu / reklam engelleyici ile sınırsız ücretsiz kullanımı
+// da mümkün kılmamak. Sunucu tarafında zorlanır; istemciden değiştirilemez.
+const MaxNoFillPassesPerDay = 2

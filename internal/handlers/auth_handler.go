@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"context"
 	"errors"
+	"log"
 	"strings"
 	"time"
 
@@ -67,10 +69,18 @@ func (h *Handlers) Register(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return apiErr(fiber.StatusBadRequest, "invalid_request", "geçersiz istek")
 	}
-	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
-	if req.Email == "" || len(req.Password) < 6 {
-		return apiErr(fiber.StatusBadRequest, "invalid_request", "email ve en az 6 karakterli parola gerekli")
+	req.Email = dto.NormalizeEmail(req.Email)
+	if err := dto.ValidateEmail(req.Email); err != nil {
+		return apiErr(fiber.StatusBadRequest, "invalid_email", err.Error())
 	}
+	if err := dto.ValidatePassword(req.Password); err != nil {
+		return apiErr(fiber.StatusBadRequest, "weak_password", err.Error())
+	}
+	displayNameInput, err := dto.NormalizeDisplayName(req.DisplayName)
+	if err != nil {
+		return apiErr(fiber.StatusBadRequest, "invalid_display_name", err.Error())
+	}
+	req.DisplayName = displayNameInput
 
 	var count int64
 	h.DB.Model(&models.User{}).Where("email = ?", req.Email).Count(&count)
@@ -122,7 +132,7 @@ func (h *Handlers) Login(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return apiErr(fiber.StatusBadRequest, "invalid_request", "geçersiz istek")
 	}
-	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
+	req.Email = dto.NormalizeEmail(req.Email)
 
 	var user models.User
 	if err := h.DB.Where("email = ?", req.Email).First(&user).Error; err != nil {
@@ -181,11 +191,37 @@ func (h *Handlers) AppleAuth(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	h.storeAppleRefreshToken(context.Background(), user.ID, si.Subject, req.AuthorizationCode)
+
 	resp, err := h.issueTokens(user)
 	if err != nil {
 		return err
 	}
 	return c.JSON(resp)
+}
+
+// storeAppleRefreshToken, authorization code'u Apple refresh token'a çevirip
+// kimlik satırına yazar. Hesap silinirken revoke için gereklidir.
+//
+// Bilinçli olarak "best effort": başarısız olursa girişi bozmaz, yalnızca log'lar.
+// Revoke yapılamaması kullanıcıyı uygulamadan dışlamaktan iyidir; eksiklik
+// hesap silme sırasında ayrıca raporlanır.
+func (h *Handlers) storeAppleRefreshToken(ctx context.Context, userID, subject, code string) {
+	if h.AppleRevoker == nil || code == "" {
+		return
+	}
+
+	refreshToken, err := h.AppleRevoker.ExchangeCode(ctx, code)
+	if err != nil {
+		log.Printf("apple: authorization code refresh token'a çevrilemedi (user=%s): %v", userID, err)
+		return
+	}
+
+	if err := h.DB.Model(&models.AuthIdentity{}).
+		Where("user_id = ? AND provider = ? AND provider_subject = ?", userID, "apple", subject).
+		Update("apple_refresh_token", refreshToken).Error; err != nil {
+		log.Printf("apple: refresh token saklanamadı (user=%s): %v", userID, err)
+	}
 }
 
 // authenticateSocial: provider+subject ile bul; yoksa email ile eşle/oluştur ve kimliği bağla.
@@ -312,7 +348,13 @@ func (h *Handlers) LinkApple(c *fiber.Ctx) error {
 	if err != nil {
 		return apiErr(fiber.StatusUnauthorized, "invalid_apple_token", "Apple token doğrulanamadı")
 	}
-	return h.linkProvider(c, middleware.UserID(c), "apple", si)
+	userID := middleware.UserID(c)
+	if err := h.linkProvider(c, userID, "apple", si); err != nil {
+		return err
+	}
+	// Bağlama başarılıysa revoke için refresh token'ı da al.
+	h.storeAppleRefreshToken(context.Background(), userID, si.Subject, req.AuthorizationCode)
+	return nil
 }
 
 func (h *Handlers) linkProvider(c *fiber.Ctx, userID, provider string, si *auth.SocialIdentity) error {
@@ -355,9 +397,40 @@ func (h *Handlers) UnlinkProvider(provider string) fiber.Handler {
 }
 
 // DeleteAccount: kullanıcıyı siler; FK CASCADE tüm ilişkili veriyi temizler.
+//
+// Silmeden önce Apple token'ı iptal edilir: Apple, "Sign in with Apple" sunan
+// uygulamalardan hesap silinirken revoke çağrısı yapılmasını şart koşar.
+// Revoke başarısız olsa bile silme sürdürülür — kullanıcının silme hakkını
+// üçüncü taraf bir servisin erişilebilirliğine bağlamayız.
 func (h *Handlers) DeleteAccount(c *fiber.Ctx) error {
-	if err := h.DB.Delete(&models.User{}, "id = ?", middleware.UserID(c)).Error; err != nil {
+	userID := middleware.UserID(c)
+	h.revokeAppleAccess(context.Background(), userID)
+
+	if err := h.DB.Delete(&models.User{}, "id = ?", userID).Error; err != nil {
 		return err
 	}
 	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// revokeAppleAccess, kullanıcının Apple kimliği varsa uygulamanın erişimini iptal eder.
+func (h *Handlers) revokeAppleAccess(ctx context.Context, userID string) {
+	if h.AppleRevoker == nil {
+		return
+	}
+
+	var identity models.AuthIdentity
+	err := h.DB.Where("user_id = ? AND provider = ?", userID, "apple").First(&identity).Error
+	if err != nil {
+		return // Apple ile bağlı değil
+	}
+	if identity.AppleRefreshToken == nil || *identity.AppleRefreshToken == "" {
+		log.Printf("apple: revoke atlandı, saklı refresh token yok (user=%s)", userID)
+		return
+	}
+
+	if err := h.AppleRevoker.Revoke(ctx, *identity.AppleRefreshToken); err != nil {
+		log.Printf("apple: token iptal edilemedi (user=%s): %v", userID, err)
+		return
+	}
+	log.Printf("apple: token iptal edildi (user=%s)", userID)
 }

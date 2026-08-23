@@ -20,7 +20,11 @@ func (h *Handlers) UpdateProfile(c *fiber.Ctx) error {
 		return apiErr(fiber.StatusBadRequest, "invalid_request", "geçersiz istek")
 	}
 	if req.DisplayName != nil {
-		h.DB.Model(&models.User{}).Where("id = ?", userID).Update("display_name", *req.DisplayName)
+		name, err := dto.NormalizeDisplayName(*req.DisplayName)
+		if err != nil {
+			return apiErr(fiber.StatusBadRequest, "invalid_display_name", err.Error())
+		}
+		h.DB.Model(&models.User{}).Where("id = ?", userID).Update("display_name", name)
 	}
 	return h.respondUser(c, userID)
 }
@@ -78,15 +82,20 @@ func (h *Handlers) AdvanceGroup(c *fiber.Ctx) error {
 // --- Günlük kullanım ---
 
 func usageDTO(u *models.User) dto.DailyUsageDTO {
+	remaining := services.MaxNoFillPassesPerDay - u.NoFillPassesToday
+	if remaining < 0 {
+		remaining = 0
+	}
 	return dto.DailyUsageDTO{
 		GroupsStartedTodayCount: u.GroupsStartedTodayCount,
 		GroupsUnlockedByAdToday: u.GroupsUnlockedByAdToday,
 		ReviewAdPassCountToday:  u.ReviewAdPassCountToday,
+		NoFillPassesToday:       u.NoFillPassesToday,
+		NoFillPassesRemaining:   remaining,
 		LastResetDate:           u.LastResetDate,
 	}
 }
 
-// GetDailyUsage: GET /users/me/usage — gün değiştiyse sıfırlar (needsReset).
 func (h *Handlers) GetDailyUsage(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	var user models.User
@@ -114,6 +123,7 @@ func (h *Handlers) resetUsage(userID string) {
 		"groups_started_today_count":  0,
 		"groups_unlocked_by_ad_today": 0,
 		"review_ad_pass_count_today":  0,
+		"no_fill_passes_today":        0,
 		"last_reset_date":             time.Now().UnixMilli(),
 	})
 }
@@ -137,4 +147,40 @@ func (h *Handlers) IncrementUsage(column string) fiber.Handler {
 		h.DB.First(&user, "id = ?", userID)
 		return c.JSON(usageDTO(&user))
 	}
+}
+
+// GrantNoFillPass: POST /users/me/usage/no-fill-pass
+//
+// Reklam hiç yüklenemediğinde (no-fill) istemci bu geçişi ister. Günlük sınır
+// (services.MaxNoFillPassesPerDay) dolmuşsa 429 döner ve istemci akışı bloke
+// eder. Sınır sunucuda tutulur; istemci taraflı bir bayrakla aşılamaz.
+//
+// Artırım koşullu UPDATE ile yapılır: eşzamanlı istekler sınırı aşamaz.
+func (h *Handlers) GrantNoFillPass(c *fiber.Ctx) error {
+	userID := middleware.UserID(c)
+
+	var user models.User
+	if err := h.DB.First(&user, "id = ?", userID).Error; err != nil {
+		return apiErr(fiber.StatusNotFound, "user_not_found", "kullanıcı bulunamadı")
+	}
+	if services.NeedsReset(user.LastResetDate) {
+		h.resetUsage(userID)
+	}
+
+	res := h.DB.Model(&models.User{}).
+		Where("id = ? AND no_fill_passes_today < ?", userID, services.MaxNoFillPassesPerDay).
+		Updates(map[string]any{
+			"no_fill_passes_today": gorm.Expr("no_fill_passes_today + 1"),
+			"last_reset_date":      time.Now().UnixMilli(),
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return apiErr(fiber.StatusTooManyRequests, "no_fill_limit_reached",
+			"reklamsız geçiş hakkın bugünlük doldu")
+	}
+
+	h.DB.First(&user, "id = ?", userID)
+	return c.JSON(usageDTO(&user))
 }

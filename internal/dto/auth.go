@@ -21,6 +21,10 @@ type GoogleAuthRequest struct {
 type AppleAuthRequest struct {
 	IdentityToken string `json:"identityToken"`
 	FullName      string `json:"fullName"`
+
+	// Hesap silinirken Apple'a revoke gönderebilmek için refresh token'a
+	// çevrilir. İstemci göndermezse revoke yapılamaz, giriş yine çalışır.
+	AuthorizationCode string `json:"authorizationCode"`
 }
 
 type RefreshRequest struct {

@@ -45,6 +45,8 @@ type DailyUsageDTO struct {
 	GroupsStartedTodayCount int   `json:"groupsStartedTodayCount"`
 	GroupsUnlockedByAdToday int   `json:"groupsUnlockedByAdToday"`
 	ReviewAdPassCountToday  int   `json:"reviewAdPassCountToday"`
+	NoFillPassesToday       int   `json:"noFillPassesToday"`
+	NoFillPassesRemaining   int   `json:"noFillPassesRemaining"`
 	LastResetDate           int64 `json:"lastResetDate"`
 }
 

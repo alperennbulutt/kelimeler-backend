@@ -17,10 +17,15 @@ type User struct {
 	TotalLearned            int     `gorm:"not null;default:0" json:"totalLearned"`
 
 	// Günlük kullanım sayaçları (her gün 00:00'da sıfırlanır).
-	GroupsStartedTodayCount int   `gorm:"not null;default:0" json:"groupsStartedTodayCount"`
-	GroupsUnlockedByAdToday int   `gorm:"not null;default:0" json:"groupsUnlockedByAdToday"`
-	ReviewAdPassCountToday  int   `gorm:"not null;default:0" json:"reviewAdPassCountToday"`
-	LastResetDate           int64 `gorm:"not null;default:0" json:"lastResetDate"` // unix millis
+	GroupsStartedTodayCount int `gorm:"not null;default:0" json:"groupsStartedTodayCount"`
+	GroupsUnlockedByAdToday int `gorm:"not null;default:0" json:"groupsUnlockedByAdToday"`
+	ReviewAdPassCountToday  int `gorm:"not null;default:0" json:"reviewAdPassCountToday"`
+
+	// Reklam hiç yüklenemediğinde (no-fill) verilen tolerans geçişleri.
+	// Günlük üst sınırı services.MaxNoFillPassesPerDay belirler.
+	NoFillPassesToday int `gorm:"not null;default:0" json:"noFillPassesToday"`
+
+	LastResetDate int64 `gorm:"not null;default:0" json:"lastResetDate"` // unix millis
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`

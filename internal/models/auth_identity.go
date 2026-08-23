@@ -20,6 +20,11 @@ type AuthIdentity struct {
 	// Sağlayıcının bildirdiği email.
 	Email *string `gorm:"type:citext" json:"email,omitempty"`
 
+	// Apple'ın refresh token'ı, yalnızca provider='apple' için dolu.
+	// Hesap silinirken Apple'a revoke isteği göndermek için saklanır;
+	// istemciye asla dönülmez.
+	AppleRefreshToken *string `json:"-"`
+
 	CreatedAt time.Time `json:"createdAt"`
 
 	// CASCADE: kullanıcı silinince kimlikleri de silinir.
