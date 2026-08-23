@@ -9,6 +9,7 @@ import (
 	"kelimeler-backend/internal/db"
 	"kelimeler-backend/internal/handlers"
 	"kelimeler-backend/internal/middleware"
+	"kelimeler-backend/internal/web"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -47,6 +48,21 @@ func main() {
 	app.Use(recover.New())
 	app.Use(logger.New())
 	app.Use(cors.New())
+
+	// Gizlilik politikası: mağaza listelemelerinden ve uygulama içinden açılan
+	// herkese açık sayfa. Binary'ye gömülü olduğu için ayrı bir statik site
+	// kaynağına gerek yok.
+	privacy := func(c *fiber.Ctx) error {
+		c.Type("html", "utf-8")
+		c.Set(fiber.HeaderCacheControl, "public, max-age=3600")
+		return c.Send(web.PrivacyPolicyHTML)
+	}
+	app.Get("/privacy", privacy)
+	app.Get("/privacy-policy", privacy)
+	app.Get("/gizlilik", privacy)
+	app.Get("/", func(c *fiber.Ctx) error {
+		return c.Redirect("/privacy", fiber.StatusFound)
+	})
 
 	api := app.Group("/api/v1")
 	handlers.RegisterRoutes(api, h, tokens)
