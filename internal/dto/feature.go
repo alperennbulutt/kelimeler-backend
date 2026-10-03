@@ -41,13 +41,31 @@ type SetCurrentGroupRequest struct {
 	TotalWords  *int    `json:"totalWords"`
 }
 
+// UnlockGroupRequest, group-started ve group-unlocked-by-ad uçlarının isteğe
+// bağlı gövdesidir. Gövde verilmezse uç yalnızca sayacı artırır.
+type UnlockGroupRequest struct {
+	Level string `json:"level"`
+	Group int    `json:"group"`
+}
+
+// ReviewAdPassRequest, review-ad-pass ucunun isteğe bağlı gövdesidir: geçilen
+// reklam kapısının cevap eşiği (30, 60 ya da 90). Gövde verilmezse uç yalnızca
+// sayacı artırır.
+type ReviewAdPassRequest struct {
+	Checkpoint int `json:"checkpoint"`
+}
+
+// DailyUsageDTO alanlarında omitempty yoktur: istemci bir alanın yokluğunu
+// "sunucu bu sayacı tutmuyor" diye yorumlar, 0 ve boş dizi de gönderilmelidir.
 type DailyUsageDTO struct {
-	GroupsStartedTodayCount int   `json:"groupsStartedTodayCount"`
-	GroupsUnlockedByAdToday int   `json:"groupsUnlockedByAdToday"`
-	ReviewAdPassCountToday  int   `json:"reviewAdPassCountToday"`
-	NoFillPassesToday       int   `json:"noFillPassesToday"`
-	NoFillPassesRemaining   int   `json:"noFillPassesRemaining"`
-	LastResetDate           int64 `json:"lastResetDate"`
+	GroupsStartedTodayCount int      `json:"groupsStartedTodayCount"`
+	GroupsUnlockedByAdToday int      `json:"groupsUnlockedByAdToday"`
+	ReviewAdPassCountToday  int      `json:"reviewAdPassCountToday"`
+	ReviewAnswersToday      int      `json:"reviewAnswersToday"`
+	UnlockedGroupsToday     []string `json:"unlockedGroupsToday"` // "SEVIYE:GRUP", ör. "A1:3"
+	NoFillPassesToday       int      `json:"noFillPassesToday"`
+	NoFillPassesRemaining   int      `json:"noFillPassesRemaining"`
+	LastResetDate           int64    `json:"lastResetDate"`
 }
 
 type CurrentGroupDTO struct {

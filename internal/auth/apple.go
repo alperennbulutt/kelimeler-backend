@@ -50,11 +50,9 @@ func (v *AppleVerifier) Verify(identityToken string) (*SocialIdentity, error) {
 		return nil, errors.New("apple sub yok")
 	}
 
-	si := &SocialIdentity{Subject: sub}
-	if email, ok := claims["email"].(string); ok {
-		si.Email = email
-	}
-	return si, nil
+	// Apple, kurum/okul tarafından yönetilen Apple hesaplarında e-postayı
+	// doğrulamayabilir ve bunu email_verified ile bildirir; Google ile aynı kural.
+	return &SocialIdentity{Subject: sub, Email: verifiedEmail(claims)}, nil
 }
 
 // audienceContains, aud claim'i (string veya []any olabilir) hedefi içeriyor mu?

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"time"
 
 	"kelimeler-backend/internal/dto"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // UpdateProfile: PATCH /users/me {displayName?}
@@ -90,63 +92,182 @@ func usageDTO(u *models.User) dto.DailyUsageDTO {
 		GroupsStartedTodayCount: u.GroupsStartedTodayCount,
 		GroupsUnlockedByAdToday: u.GroupsUnlockedByAdToday,
 		ReviewAdPassCountToday:  u.ReviewAdPassCountToday,
+		ReviewAnswersToday:      u.ReviewAnswersToday,
+		UnlockedGroupsToday:     services.SplitUnlockedGroups(u.UnlockedGroupsToday),
 		NoFillPassesToday:       u.NoFillPassesToday,
 		NoFillPassesRemaining:   remaining,
 		LastResetDate:           u.LastResetDate,
 	}
 }
 
-func (h *Handlers) GetDailyUsage(c *fiber.Ctx) error {
-	userID := middleware.UserID(c)
+// respondUsage, kullanıcının güncel günlük kullanım durumunu döner.
+func (h *Handlers) respondUsage(c *fiber.Ctx, userID string) error {
 	var user models.User
 	if err := h.DB.First(&user, "id = ?", userID).Error; err != nil {
-		return apiErr(fiber.StatusNotFound, "user_not_found", "kullanıcı bulunamadı")
-	}
-	if services.NeedsReset(user.LastResetDate) {
-		h.resetUsage(userID)
-		h.DB.First(&user, "id = ?", userID)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return apiErr(fiber.StatusNotFound, "user_not_found", "kullanıcı bulunamadı")
+		}
+		return err
 	}
 	return c.JSON(usageDTO(&user))
+}
+
+// usageResetValues, gün dönümünde sıfırlanan kolonların tek kaynağıdır.
+// Yeni bir günlük sayaç buraya eklenmezse hiç sıfırlanmaz ve kullanıcı ertesi
+// gün dünkü kotayla karşılaşır.
+func usageResetValues(now time.Time) map[string]any {
+	return map[string]any{
+		"groups_started_today_count":  0,
+		"groups_unlocked_by_ad_today": 0,
+		"review_ad_pass_count_today":  0,
+		"no_fill_passes_today":        0,
+		"review_answers_today":        0,
+		"unlocked_groups_today":       "",
+		"last_reset_date":             now.UnixMilli(),
+	}
+}
+
+// resetUsageIfStale, last_reset_date now'ın kullanım gününden önceyse günlük
+// sayaçları sıfırlar; aynı gün içindeyse hiçbir şey yapmaz.
+//
+// "Gün değişti mi" koşulu UPDATE'in içindedir. Ayrı bir SELECT ile bakılıp
+// koşulsuz sıfırlansaydı, bayat değeri aynı anda okuyan iki istekten ikincisi
+// birincinin artırımını silerdi. Burada ikinci istek satır kilidini bekler,
+// koşul güncel satırda yeniden değerlendirilir ve satıra dokunulmaz.
+func resetUsageIfStale(tx *gorm.DB, userID string, now time.Time) error {
+	return tx.Model(&models.User{}).
+		Where("id = ? AND last_reset_date < ?", userID, services.UsageDayStart(now).UnixMilli()).
+		Updates(usageResetValues(now)).Error
+}
+
+// usageTouchedAt, sayaç artıran UPDATE'lerin last_reset_date'e yazdığı ifadedir.
+//
+// Tarih yalnızca ileri gider. Gece yarısından hemen önce başlayan bir istek,
+// yeni günün sıfırlamasından sonra commit olabilir; kendi (dünkü) "now" değerini
+// düz yazsaydı tarihi düne çeker, sonraki istek günü ikinci kez sıfırlar ve
+// arada yazılan artırımlar silinirdi.
+func usageTouchedAt(now time.Time) clause.Expr {
+	return gorm.Expr("GREATEST(last_reset_date, ?)", now.UnixMilli())
+}
+
+func (h *Handlers) GetDailyUsage(c *fiber.Ctx) error {
+	userID := middleware.UserID(c)
+	if err := resetUsageIfStale(h.DB, userID, time.Now()); err != nil {
+		return err
+	}
+	return h.respondUsage(c, userID)
 }
 
 // ResetDailyUsage: POST /users/me/usage/reset
 func (h *Handlers) ResetDailyUsage(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
-	h.resetUsage(userID)
-	var user models.User
-	h.DB.First(&user, "id = ?", userID)
-	return c.JSON(usageDTO(&user))
+	h.DB.Model(&models.User{}).Where("id = ?", userID).Updates(usageResetValues(time.Now()))
+	return h.respondUsage(c, userID)
 }
 
-func (h *Handlers) resetUsage(userID string) {
-	h.DB.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
-		"groups_started_today_count":  0,
-		"groups_unlocked_by_ad_today": 0,
-		"review_ad_pass_count_today":  0,
-		"no_fill_passes_today":        0,
-		"last_reset_date":             time.Now().UnixMilli(),
-	})
-}
-
-// IncrementUsage, belirtilen sayaç kolonunu atomik artırır (gün değiştiyse önce sıfırlar).
-func (h *Handlers) IncrementUsage(column string) fiber.Handler {
-	return func(c *fiber.Ctx) error {
-		userID := middleware.UserID(c)
-		var user models.User
-		if err := h.DB.First(&user, "id = ?", userID).Error; err != nil {
-			return apiErr(fiber.StatusNotFound, "user_not_found", "kullanıcı bulunamadı")
-		}
-		now := time.Now().UnixMilli()
-		if services.NeedsReset(user.LastResetDate) {
-			h.resetUsage(userID)
-		}
-		h.DB.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
-			column:            gorm.Expr(column + " + 1"),
-			"last_reset_date": now,
-		})
-		h.DB.First(&user, "id = ?", userID)
-		return c.JSON(usageDTO(&user))
+// incrementUsage, belirtilen sayaç kolonunu atomik artırır (gün değiştiyse önce sıfırlar).
+func (h *Handlers) incrementUsage(c *fiber.Ctx, column string) error {
+	userID := middleware.UserID(c)
+	now := time.Now()
+	if err := resetUsageIfStale(h.DB, userID, now); err != nil {
+		return err
 	}
+
+	// İstemci "kayıt yazılamadıysa içeriği açma" kararını bu yanıta dayandırır;
+	// yazılamayan bir artırım başarı gibi dönmemelidir.
+	res := h.DB.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
+		column:            gorm.Expr(column + " + 1"),
+		"last_reset_date": usageTouchedAt(now),
+	})
+	if res.Error != nil {
+		return res.Error
+	}
+	return h.respondUsage(c, userID)
+}
+
+// UnlockGroup: POST /users/me/usage/group-started ve /group-unlocked-by-ad
+// Gövde (isteğe bağlı): {"level":"A1","group":3}
+//
+// Grup "bugün açılanlar" kümesinde değilse kümeye eklenir ve sayaç bir artar;
+// zaten kümedeyse hiçbir şey değişmez. Böylece yanıtı kaybolan bir isteği
+// yeniden denemek ya da aynı gruba gün içinde tekrar girmek, hakkı ikinci kez
+// tüketmez.
+//
+// Gövde göndermeyen (ya da geçersiz gönderen) istemcilerde uç yalnızca sayacı
+// artırır.
+func (h *Handlers) UnlockGroup(column string) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		var req dto.UnlockGroupRequest
+		if err := c.BodyParser(&req); err != nil {
+			return h.incrementUsage(c, column)
+		}
+		key, ok := services.UnlockedGroupKey(req.Level, req.Group)
+		if !ok {
+			return h.incrementUsage(c, column)
+		}
+
+		userID := middleware.UserID(c)
+		now := time.Now()
+		if err := resetUsageIfStale(h.DB, userID, now); err != nil {
+			return err
+		}
+
+		// "Kümede yoksa ekle + artır" tek koşullu UPDATE'tir: aynı anahtarla
+		// eşzamanlı gelen isteklerden yalnızca biri satırı değiştirir.
+		//
+		// concat_ws değişken sayıda ve her tipte argüman alır; parametrenin tipi
+		// açıkça verilmezse PostgreSQL onu yalnızca değer sorgu metnine gömülü
+		// gittiğinde (basit protokol) çözebilir, hazırlanan sorguda çözemez.
+		res := h.DB.Model(&models.User{}).
+			Where("id = ? AND NOT (? = ANY(string_to_array(unlocked_groups_today, ',')))", userID, key).
+			Updates(map[string]any{
+				column:                  gorm.Expr(column + " + 1"),
+				"unlocked_groups_today": gorm.Expr("concat_ws(',', NULLIF(unlocked_groups_today, ''), ?::text)", key),
+				"last_reset_date":       usageTouchedAt(now),
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		return h.respondUsage(c, userID)
+	}
+}
+
+// RecordReviewAdPass: POST /users/me/usage/review-ad-pass
+// Gövde (isteğe bağlı): {"checkpoint": 30 | 60 | 90}
+//
+// Sayaç "bugün kaç reklam kapısı geçildi" bilgisidir ve istemci sıradaki kapıyı
+// ondan hesaplar. Gövdedeki kapıyla sayaç en az o kapının sırasına çekilir;
+// zaten oradaysa değişmez. Böylece yanıtı kaybolan bir isteği yeniden denemek
+// aynı kapıyı ikinci kez saymaz ve sıradaki kapıyı atlatmaz.
+//
+// Gövde göndermeyen (ya da geçersiz gönderen) istemcilerde uç yalnızca sayacı
+// artırır.
+func (h *Handlers) RecordReviewAdPass(c *fiber.Ctx) error {
+	const column = "review_ad_pass_count_today"
+
+	var req dto.ReviewAdPassRequest
+	if err := c.BodyParser(&req); err != nil {
+		return h.incrementUsage(c, column)
+	}
+	passes, ok := services.ReviewAdPassesForCheckpoint(req.Checkpoint)
+	if !ok {
+		return h.incrementUsage(c, column)
+	}
+
+	userID := middleware.UserID(c)
+	now := time.Now()
+	if err := resetUsageIfStale(h.DB, userID, now); err != nil {
+		return err
+	}
+
+	res := h.DB.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
+		column:            gorm.Expr("GREATEST("+column+", ?)", passes),
+		"last_reset_date": usageTouchedAt(now),
+	})
+	if res.Error != nil {
+		return res.Error
+	}
+	return h.respondUsage(c, userID)
 }
 
 // GrantNoFillPass: POST /users/me/usage/no-fill-pass
@@ -163,15 +284,16 @@ func (h *Handlers) GrantNoFillPass(c *fiber.Ctx) error {
 	if err := h.DB.First(&user, "id = ?", userID).Error; err != nil {
 		return apiErr(fiber.StatusNotFound, "user_not_found", "kullanıcı bulunamadı")
 	}
-	if services.NeedsReset(user.LastResetDate) {
-		h.resetUsage(userID)
+	now := time.Now()
+	if err := resetUsageIfStale(h.DB, userID, now); err != nil {
+		return err
 	}
 
 	res := h.DB.Model(&models.User{}).
 		Where("id = ? AND no_fill_passes_today < ?", userID, services.MaxNoFillPassesPerDay).
 		Updates(map[string]any{
 			"no_fill_passes_today": gorm.Expr("no_fill_passes_today + 1"),
-			"last_reset_date":      time.Now().UnixMilli(),
+			"last_reset_date":      usageTouchedAt(now),
 		})
 	if res.Error != nil {
 		return res.Error
@@ -181,6 +303,5 @@ func (h *Handlers) GrantNoFillPass(c *fiber.Ctx) error {
 			"reklamsız geçiş hakkın bugünlük doldu")
 	}
 
-	h.DB.First(&user, "id = ?", userID)
-	return c.JSON(usageDTO(&user))
+	return h.respondUsage(c, userID)
 }

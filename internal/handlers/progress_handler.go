@@ -3,6 +3,7 @@ package handlers
 import (
 	"fmt"
 	"strconv"
+	"time"
 
 	"kelimeler-backend/internal/dto"
 	"kelimeler-backend/internal/middleware"
@@ -10,6 +11,7 @@ import (
 	"kelimeler-backend/internal/services"
 
 	"github.com/gofiber/fiber/v2"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -68,6 +70,8 @@ func (h *Handlers) LearnWord(c *fiber.Ctx) error {
 }
 
 // Swipe: POST /progress/swipe {wordId, direction} — box matematiği sunucuda.
+// Tekrar cevapları (swipe öncesi kutu 2..5) günlük review_answers_today
+// sayacına da yazılır; yanıt gövdesi yalnızca kelime ilerlemesidir.
 func (h *Handlers) Swipe(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	var req dto.SwipeRequest
@@ -80,6 +84,11 @@ func (h *Handlers) Swipe(c *fiber.Ctx) error {
 		return apiErr(fiber.StatusNotFound, "not_found", "kelime ilerlemesi bulunamadı")
 	}
 
+	// Cevabın tekrar sayılıp sayılmayacağı swipe ÖNCESİ kutuya bağlıdır; aşağıdaki
+	// mutasyon kutuyu değiştirir (öğrenme ekranının 1 → 2 swipe'ı sonradan
+	// bakılırsa tekrar cevabı gibi görünür).
+	preBox := wp.Box
+
 	switch req.Direction {
 	case "right":
 		services.OnRightSwipe(&wp)
@@ -89,7 +98,26 @@ func (h *Handlers) Swipe(c *fiber.Ctx) error {
 		return apiErr(fiber.StatusBadRequest, "invalid_request", "direction 'right' veya 'left' olmalı")
 	}
 
-	if err := h.DB.Save(&wp).Error; err != nil {
+	// İlerleme ve günlük tekrar sayacı birlikte yazılır: kelime ilerleyip cevap
+	// sayılmazsa kapı gevşer, cevap sayılıp kelime ilerlemezse aynı kelime
+	// yeniden gelir ve iki kez sayılır.
+	now := time.Now()
+	err := h.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(&wp).Error; err != nil {
+			return err
+		}
+		if !services.CountsAsReviewAnswer(preBox) {
+			return nil
+		}
+		if err := resetUsageIfStale(tx, userID, now); err != nil {
+			return err
+		}
+		return tx.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
+			"review_answers_today": gorm.Expr("review_answers_today + 1"),
+			"last_reset_date":      usageTouchedAt(now),
+		}).Error
+	})
+	if err != nil {
 		return err
 	}
 	h.syncTotalLearned(userID)

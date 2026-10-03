@@ -10,7 +10,7 @@ import (
 // SocialIdentity, Google/Apple gibi sağlayıcılardan doğrulanmış kimlik bilgisi.
 type SocialIdentity struct {
 	Subject string // sağlayıcının stabil kullanıcı id'si (sub)
-	Email   string
+	Email   string // yalnızca sağlayıcı doğrulamışsa dolu (bkz. verifiedEmail)
 	Name    string
 }
 
@@ -28,14 +28,40 @@ func VerifyGoogleIDToken(ctx context.Context, token string, allowedAudiences []s
 			lastErr = err
 			continue
 		}
-		si := &SocialIdentity{Subject: payload.Subject}
-		if email, ok := payload.Claims["email"].(string); ok {
-			si.Email = email
-		}
-		if name, ok := payload.Claims["name"].(string); ok {
-			si.Name = name
-		}
-		return si, nil
+		return googleIdentity(payload.Subject, payload.Claims), nil
 	}
 	return nil, lastErr
+}
+
+// googleIdentity, doğrulanmış bir Google token'ının claim'lerinden kimliği çıkarır.
+func googleIdentity(subject string, claims map[string]any) *SocialIdentity {
+	si := &SocialIdentity{Subject: subject, Email: verifiedEmail(claims)}
+	if name, ok := claims["name"].(string); ok {
+		si.Name = name
+	}
+	return si
+}
+
+// verifiedEmail, token'daki e-postayı yalnızca sağlayıcı onu doğrulamışsa
+// (email_verified) döndürür; aksi halde boş döner.
+//
+// Giriş akışı kullanıcıyı e-postayla eşler: doğrulanmamış bir adres taşınırsa,
+// o adresin gerçek sahibinin hesabına başkası bağlanabilir. E-posta boş kalınca
+// akış sağlayıcıya özgü yer tutucu adrese düşer ve eşleme yapılmaz.
+//
+// Google claim'i boolean, Apple ise boolean ya da "true"/"false" metni olarak
+// gönderir.
+func verifiedEmail(claims map[string]any) string {
+	email, _ := claims["email"].(string)
+	switch verified := claims["email_verified"].(type) {
+	case bool:
+		if verified {
+			return email
+		}
+	case string:
+		if verified == "true" {
+			return email
+		}
+	}
+	return ""
 }

@@ -24,11 +24,23 @@ func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService, authLi
 	// --- Auth (yetkilendirme gerektirmeyen) ---
 	// Kimlik üreten uçlar sıkı hız sınırına tabidir.
 	a := api.Group("/auth")
-	a.Post("/register", authLimit, h.Register)
-	a.Post("/login", authLimit, h.Login)
 	a.Post("/google", authLimit, h.GoogleAuth)
 	a.Post("/apple", authLimit, h.AppleAuth)
-	a.Post("/refresh", authLimit, h.Refresh)
+
+	// Parola ile kayıt/giriş yalnızca geliştirme/test ortamında açıktır: mobil
+	// istemci yalnızca Google/Apple girişi sunar ve kayıtta e-posta sahipliği
+	// doğrulanmaz. Production'da açık kalsaydı herkes başkasının adresiyle hesap
+	// açıp o adresin sahibinden önce hesaba yerleşebilirdi.
+	if h.Cfg.AppEnv != "production" {
+		a.Post("/register", authLimit, h.Register)
+		a.Post("/login", authLimit, h.Login)
+	}
+
+	// Yenileme sıkı sınıra değil yalnızca genel API sınırına tabidir: uygulama
+	// açılışlarının çoğu buradan geçer ve aynı IP'yi paylaşan (CGNAT) kullanıcılar
+	// sıkı sınırı birlikte doldurur. Refresh token uzun ve rastgele bir değerdir;
+	// deneme yanılmayla bulunamayacağı için sıkı sınırın koruyacağı bir şey yoktur.
+	a.Post("/refresh", h.Refresh)
 	a.Post("/logout", h.Logout)
 
 	// --- Auth (yetkilendirme gerektiren) ---
@@ -60,9 +72,12 @@ func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService, authLi
 	users.Put("/me/current-group", h.SetCurrentGroup)
 	users.Post("/me/advance-group", h.AdvanceGroup)
 	users.Get("/me/usage", h.GetDailyUsage)
-	users.Post("/me/usage/group-started", h.IncrementUsage("groups_started_today_count"))
-	users.Post("/me/usage/group-unlocked-by-ad", h.IncrementUsage("groups_unlocked_by_ad_today"))
-	users.Post("/me/usage/review-ad-pass", h.IncrementUsage("review_ad_pass_count_today"))
+	// Grup açma uçları gövdedeki {level, group} ile idempotenttir: aynı grup gün
+	// içinde yalnızca bir kez sayılır.
+	users.Post("/me/usage/group-started", h.UnlockGroup("groups_started_today_count"))
+	users.Post("/me/usage/group-unlocked-by-ad", h.UnlockGroup("groups_unlocked_by_ad_today"))
+	// Gövdedeki {checkpoint} ile idempotenttir: aynı reklam kapısı bir kez sayılır.
+	users.Post("/me/usage/review-ad-pass", h.RecordReviewAdPass)
 	// Reklam no-fill toleransı: sınırı sunucu zorlar, dolduysa 429 döner.
 	users.Post("/me/usage/no-fill-pass", h.GrantNoFillPass)
 

@@ -1,4 +1,4 @@
-.PHONY: run build import-dictionary db-up up down logs test test-integration vet check tidy fmt backup backup-verify
+.PHONY: run build import-dictionary db-up up down logs test test-integration vet check tidy fmt sync-web backup backup-verify
 
 # Lokal geliştirme: sadece Postgres'i docker'da çalıştır, server'ı go run ile çalıştır.
 db-up:
@@ -46,6 +46,24 @@ tidy:
 
 fmt:
 	gofmt -w .
+
+# Herkese açık sayfaların (gizlilik politikası, hesap silme) kaynağı Flutter
+# reposundaki docs/ klasörüdür; internal/web/ altındaki kopyalar binary'ye gömülür.
+# Önce iki kaynağın da varlığına bakılır ki eksikte yarım kopya kalmasın.
+WEB_DOCS_DIR ?= ../kutularla_kelimeler/docs
+WEB_PAGES := privacy-policy.html account-deletion.html
+sync-web:
+	@for f in $(WEB_PAGES); do \
+		if [ ! -f "$(WEB_DOCS_DIR)/$$f" ]; then \
+			echo "sync-web: kaynak bulunamadı: $(WEB_DOCS_DIR)/$$f" >&2; \
+			echo "sync-web: Flutter reposu bu deponun yanında değilse: make sync-web WEB_DOCS_DIR=/yol/kutularla_kelimeler/docs" >&2; \
+			exit 1; \
+		fi; \
+	done
+	@for f in $(WEB_PAGES); do \
+		cp "$(WEB_DOCS_DIR)/$$f" "internal/web/$$f" || exit 1; \
+		echo "sync-web: $(WEB_DOCS_DIR)/$$f -> internal/web/$$f"; \
+	done
 
 # --- Yedekleme (bkz. BACKUP.md) ---
 

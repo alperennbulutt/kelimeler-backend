@@ -35,3 +35,34 @@ func ErrorHandler(c *fiber.Ctx, err error) error {
 		"error": "beklenmeyen bir hata oluştu",
 	})
 }
+
+// StatusFor, ErrorHandler'ın verilen hata için yazacağı HTTP durum kodudur.
+func StatusFor(err error) int {
+	if apiErr, ok := err.(*APIError); ok {
+		return apiErr.Status
+	}
+	if fe, ok := err.(*fiber.Error); ok {
+		return fe.Code
+	}
+	return fiber.StatusInternalServerError
+}
+
+// WriteErrorStatus, zincirden dönen hatanın (ya da panic'in) durum kodunu yanıta
+// erkenden yazar; gövdeyi yine ErrorHandler üretir.
+//
+// Hata, zincirin en dışındaki katmanda yanıta çevrilir. Daha içte çalışan bir
+// middleware (Sentry) durum kodunu o andan önce okur ve hatalı isteği 200
+// olarak görür; bu middleware onun hemen içine konur.
+func WriteErrorStatus(c *fiber.Ctx) error {
+	defer func() {
+		if r := recover(); r != nil {
+			c.Status(fiber.StatusInternalServerError)
+			panic(r)
+		}
+	}()
+	err := c.Next()
+	if err != nil {
+		c.Status(StatusFor(err))
+	}
+	return err
+}

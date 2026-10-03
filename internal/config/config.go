@@ -40,6 +40,10 @@ type Config struct {
 	// AppConstants.isTestMode karşılığı: tüm grupları kilitsiz açar.
 	TestModeUnlockAll bool
 
+	// Günlük kullanım sayaçlarının gün sınırını belirleyen IANA saat dilimi adı
+	// (sayaçlar bu dilimin gece yarısında sıfırlanır).
+	UsageTimezone string
+
 	// --- Gözlemlenebilirlik ---
 
 	// Boşsa hata raporlama devre dışı kalır.
@@ -48,15 +52,20 @@ type Config struct {
 
 	// --- Güvenlik ---
 
-	// CORS'a izin verilen origin listesi. Boşsa production'da tarayıcı
-	// kaynaklı istekler reddedilir (mobil istemci CORS'tan etkilenmez).
+	// CORS'a izin verilen origin listesi. Boşsa production'da hiçbir origin'e
+	// izin verilmez: yanıtlara CORS başlığı yazılmaz, tarayıcı başka origin'den
+	// gelen isteğin yanıtını okutmaz (mobil istemci CORS'tan etkilenmez).
 	CORSAllowedOrigins []string
 
-	// Auth uçlarına dakikada izin verilen istek sayısı (IP başına).
+	// Kimlik üreten auth uçlarına dakikada izin verilen istek sayısı (IP başına).
 	AuthRateLimit       int
 	AuthRateLimitWindow time.Duration
 
 	// Genel uçlara dakikada izin verilen istek sayısı (IP başına).
+	//
+	// Sınır kullanıcı değil IP başınadır: mobil operatörler çok sayıda kullanıcıyı
+	// tek IP arkasına koyar (CGNAT) ve bir tekrar seansı dakikada onlarca istek
+	// üretir. Dar bir sınır kötüye kullanımı değil gerçek kullanıcıları düşürür.
 	APIRateLimit       int
 	APIRateLimitWindow time.Duration
 
@@ -90,6 +99,7 @@ func Load() *Config {
 		FirebaseProjectID:      getEnv("FIREBASE_PROJECT_ID", ""),
 		FirebaseServiceAccount: getEnv("FIREBASE_SERVICE_ACCOUNT", ""),
 		TestModeUnlockAll:      getBool("TEST_MODE_UNLOCK_ALL", false),
+		UsageTimezone:          getEnv("USAGE_TIMEZONE", "Europe/Istanbul"),
 
 		SentryDSN:     getEnv("SENTRY_DSN", ""),
 		SentryRelease: getEnv("SENTRY_RELEASE", ""),
@@ -98,9 +108,9 @@ func Load() *Config {
 
 		// Parola deneme saldırılarını yavaşlatacak kadar sıkı, gerçek
 		// kullanıcıyı engellemeyecek kadar gevşek.
-		AuthRateLimit:       getInt("AUTH_RATE_LIMIT", 10),
+		AuthRateLimit:       getPositiveInt("AUTH_RATE_LIMIT", 10),
 		AuthRateLimitWindow: getDuration("AUTH_RATE_LIMIT_WINDOW", time.Minute),
-		APIRateLimit:        getInt("API_RATE_LIMIT", 120),
+		APIRateLimit:        getPositiveInt("API_RATE_LIMIT", 600),
 		APIRateLimitWindow:  getDuration("API_RATE_LIMIT_WINDOW", time.Minute),
 
 		ReadTimeout:  getDuration("READ_TIMEOUT", 15*time.Second),
@@ -166,6 +176,20 @@ func getInt(key string, def int) int {
 	n, err := strconv.Atoi(v)
 	if err != nil {
 		log.Printf("config: %s sayıya çevrilemedi (%q), varsayılan %d kullanılıyor", key, v, def)
+		return def
+	}
+	return n
+}
+
+// getPositiveInt, getInt gibi okur ama 0 ve negatif değerleri de reddeder.
+//
+// Hız sınırları için kullanılır: Fiber'ın limiter'ı Max <= 0 görünce sınırı
+// kapatmaz, sessizce kendi varsayılanına (dakikada 5 istek) çeker ve API
+// neredeyse kullanılamaz hale gelir.
+func getPositiveInt(key string, def int) int {
+	n := getInt(key, def)
+	if n <= 0 {
+		log.Printf("config: uyarı: %s pozitif olmalı (%d verildi), varsayılan %d kullanılıyor", key, n, def)
 		return def
 	}
 	return n

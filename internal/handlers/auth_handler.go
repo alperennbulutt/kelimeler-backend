@@ -28,29 +28,50 @@ func (h *Handlers) linkedProviders(userID string) []string {
 	return providers
 }
 
-// issueTokens, access + refresh token üretir ve refresh hash'ini DB'ye yazar.
-func (h *Handlers) issueTokens(user *models.User) (*dto.AuthResponse, error) {
+// tokenPair, bir oturum için üretilen access + refresh token çiftidir.
+type tokenPair struct {
+	access  string
+	refresh string
+}
+
+// newTokenPair, access + refresh token üretir ve refresh hash'ini taşıyan
+// satırı hazırlar. Satırı yazmak çağırana kalır: rotasyon onu eski token'ın
+// iptaliyle aynı transaction'da yazar.
+func (h *Handlers) newTokenPair(user *models.User) (tokenPair, *models.RefreshToken, error) {
 	access, err := h.Tokens.GenerateAccessToken(user.ID, user.Email)
 	if err != nil {
-		return nil, err
+		return tokenPair{}, nil, err
 	}
 	refresh, err := auth.GenerateRefreshToken()
 	if err != nil {
-		return nil, err
+		return tokenPair{}, nil, err
 	}
-	rt := models.RefreshToken{
+	row := &models.RefreshToken{
 		UserID:    user.ID,
 		TokenHash: auth.HashToken(refresh),
 		ExpiresAt: time.Now().Add(h.Tokens.RefreshTTL()),
 	}
-	if err := h.DB.Create(&rt).Error; err != nil {
+	return tokenPair{access: access, refresh: refresh}, row, nil
+}
+
+func (h *Handlers) authResponse(user *models.User, pair tokenPair) *dto.AuthResponse {
+	return &dto.AuthResponse{
+		AccessToken:  pair.access,
+		RefreshToken: pair.refresh,
+		User:         dto.NewUserDTO(user, h.linkedProviders(user.ID)),
+	}
+}
+
+// issueTokens, access + refresh token üretir ve refresh hash'ini DB'ye yazar.
+func (h *Handlers) issueTokens(user *models.User) (*dto.AuthResponse, error) {
+	pair, row, err := h.newTokenPair(user)
+	if err != nil {
 		return nil, err
 	}
-	return &dto.AuthResponse{
-		AccessToken:  access,
-		RefreshToken: refresh,
-		User:         dto.NewUserDTO(user, h.linkedProviders(user.ID)),
-	}, nil
+	if err := h.DB.Create(row).Error; err != nil {
+		return nil, err
+	}
+	return h.authResponse(user, pair), nil
 }
 
 func (h *Handlers) respondUser(c *fiber.Ctx, userID string) error {
@@ -225,6 +246,9 @@ func (h *Handlers) storeAppleRefreshToken(ctx context.Context, userID, subject, 
 }
 
 // authenticateSocial: provider+subject ile bul; yoksa email ile eşle/oluştur ve kimliği bağla.
+//
+// E-postayla bulunan hesabın 'password' kimliği ya da aynı sağlayıcının başka
+// bir kimliği varsa bağlama yapılmaz, 409 döner (bkz. aşağıdaki gerekçeler).
 func (h *Handlers) authenticateSocial(provider string, si *auth.SocialIdentity, displayName string) (*models.User, error) {
 	var identity models.AuthIdentity
 	err := h.DB.Where("provider = ? AND provider_subject = ?", provider, si.Subject).First(&identity).Error
@@ -241,7 +265,8 @@ func (h *Handlers) authenticateSocial(provider string, si *auth.SocialIdentity, 
 
 	email := strings.ToLower(strings.TrimSpace(si.Email))
 	if email == "" {
-		// Apple "hide my email" / sonraki girişlerde email vermeyebilir.
+		// Sağlayıcı email vermeyebilir (Apple sonraki girişlerde) ya da verdiği
+		// adres doğrulanmamış olabilir; ikisinde de e-postayla eşleme yapılmaz.
 		email = provider + "_" + si.Subject + "@users.kelimeler.local"
 	}
 
@@ -262,6 +287,36 @@ func (h *Handlers) authenticateSocial(provider string, si *auth.SocialIdentity, 
 			}
 		} else if findErr != nil {
 			return findErr
+		} else {
+			// 'password' kimliği e-posta sahipliği kanıtlanmadan açılır. Böyle bir
+			// hesaba sosyal kimliği sessizce bağlamak, adresi önceden kaydeden
+			// kişiye adresin gerçek sahibinin hesabına parolayla girme yolu
+			// bırakır. Reddedilir; hesaba ve verisine dokunulmaz.
+			var passwordIdentities int64
+			if err := tx.Model(&models.AuthIdentity{}).
+				Where("user_id = ? AND provider = ?", user.ID, "password").
+				Count(&passwordIdentities).Error; err != nil {
+				return err
+			}
+			if passwordIdentities > 0 {
+				return apiErr(fiber.StatusConflict, "email_in_use",
+					"bu email parola ile kayıtlı bir hesaba ait")
+			}
+
+			// Hesapta bu sağlayıcının başka bir kimliği (farklı subject) varsa
+			// ikincisi eklenemez (uq_user_provider). Kısıta çarpıp 500 dönmek
+			// yerine hesaba dokunmadan reddedilir. Eski kimliği yenisiyle
+			// değiştirmek, adresi devralan kişiye hesabı vermek olurdu.
+			var sameProvider int64
+			if err := tx.Model(&models.AuthIdentity{}).
+				Where("user_id = ? AND provider = ?", user.ID, provider).
+				Count(&sameProvider).Error; err != nil {
+				return err
+			}
+			if sameProvider > 0 {
+				return apiErr(fiber.StatusConflict, "email_in_use",
+					"bu email aynı sağlayıcının başka bir hesabına bağlı")
+			}
 		}
 		sub := si.Subject
 		return tx.Create(&models.AuthIdentity{
@@ -277,7 +332,15 @@ func (h *Handlers) authenticateSocial(provider string, si *auth.SocialIdentity, 
 	return &user, nil
 }
 
+// errRefreshTokenUsed, rotasyon sırasında token'ın başka bir istekçe çoktan
+// iptal edildiğini bildirir.
+var errRefreshTokenUsed = errors.New("refresh token zaten kullanılmış")
+
 // Refresh: refresh token'ı doğrular, rotasyonla yeni çift üretir.
+//
+// 401 yalnızca token'ın kendisi reddedildiğinde döner: istemci 401'i kesin ret
+// sayıp saklı token'ları siler. Veritabanına ulaşılamaması gibi geçici hatalar
+// 500 döner ki istemci oturumu koruyup yeniden denesin.
 func (h *Handlers) Refresh(c *fiber.Ctx) error {
 	var req dto.RefreshRequest
 	if err := c.BodyParser(&req); err != nil || req.RefreshToken == "" {
@@ -285,25 +348,54 @@ func (h *Handlers) Refresh(c *fiber.Ctx) error {
 	}
 	var rt models.RefreshToken
 	if err := h.DB.Where("token_hash = ?", auth.HashToken(req.RefreshToken)).First(&rt).Error; err != nil {
-		return apiErr(fiber.StatusUnauthorized, "invalid_refresh_token", "geçersiz refresh token")
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return apiErr(fiber.StatusUnauthorized, "invalid_refresh_token", "geçersiz refresh token")
+		}
+		return err
 	}
 	if rt.RevokedAt != nil || time.Now().After(rt.ExpiresAt) {
 		return apiErr(fiber.StatusUnauthorized, "invalid_refresh_token", "refresh token süresi dolmuş")
 	}
 	var user models.User
 	if err := h.DB.First(&user, "id = ?", rt.UserID).Error; err != nil {
-		return apiErr(fiber.StatusUnauthorized, "invalid_refresh_token", "kullanıcı yok")
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return apiErr(fiber.StatusUnauthorized, "invalid_refresh_token", "kullanıcı yok")
+		}
+		return err
 	}
 
-	now := time.Now()
-	rt.RevokedAt = &now
-	h.DB.Save(&rt)
-
-	resp, err := h.issueTokens(&user)
+	// Çift, hiçbir şey iptal edilmeden önce üretilir: üretim hatası eski token'ı
+	// geçerli bırakmalıdır.
+	pair, row, err := h.newTokenPair(&user)
 	if err != nil {
 		return err
 	}
-	return c.JSON(resp)
+
+	// İptal ile yeni satır birlikte yazılır. Ayrı yazılsalardı, iptalden sonra
+	// başarısız olan bir yazım istemciye geçici hata (500) döner ama oturumu
+	// sunucuda yok etmiş olurdu; yeniden deneme 401 alır ve kullanıcı çıkış
+	// yapmış sayılırdı.
+	txErr := h.DB.Transaction(func(tx *gorm.DB) error {
+		// İptal koşulludur: aynı token'la eşzamanlı gelen isteklerden yalnızca
+		// biri satırı değiştirir ve yeni çift alır.
+		res := tx.Model(&models.RefreshToken{}).
+			Where("id = ? AND revoked_at IS NULL", rt.ID).
+			Update("revoked_at", time.Now())
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return errRefreshTokenUsed
+		}
+		return tx.Create(row).Error
+	})
+	if errors.Is(txErr, errRefreshTokenUsed) {
+		return apiErr(fiber.StatusUnauthorized, "invalid_refresh_token", "refresh token süresi dolmuş")
+	}
+	if txErr != nil {
+		return txErr
+	}
+	return c.JSON(h.authResponse(&user, pair))
 }
 
 // Me: oturum sahibinin profilini döndürür.
