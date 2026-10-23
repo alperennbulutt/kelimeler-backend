@@ -135,15 +135,8 @@ func run() (err error) {
 
 	api := app.Group("/api/v1")
 
-	// Genel hız sınırı: tüm API uçları için IP başına.
-	api.Use(limiter.New(limiter.Config{
-		Max:        cfg.APIRateLimit,
-		Expiration: cfg.APIRateLimitWindow,
-		LimitReached: func(c *fiber.Ctx) error {
-			return middleware.NewAPIError(fiber.StatusTooManyRequests,
-				"rate_limited", "çok fazla istek gönderdiniz, lütfen biraz bekleyin")
-		},
-	}))
+	// Genel hız sınırı: tüm API uçları için kullanıcı ya da IP başına.
+	api.Use(apiLimiter(cfg, tokens))
 
 	handlers.RegisterRoutes(api, h, tokens, authLimiter(cfg))
 
@@ -206,9 +199,17 @@ func newApp(cfg *config.Config, accessLog io.Writer) *fiber.App {
 		// Devasa gövdelerle bellek şişirmeyi engeller (en büyük istek birkaç KB'dır).
 		BodyLimit: cfg.BodyLimit,
 
-		// Coolify/nginx arkasında gerçek istemci IP'si için; rate limit
+		// Coolify/Traefik arkasında gerçek istemci IP'si için; rate limit
 		// doğru IP'yi görmezse tüm trafiği tek proxy IP'sine sayar.
-		ProxyHeader: fiber.HeaderXForwardedFor,
+		//
+		// Başlık yalnızca bağlantı güvenilen bir proxy'den geliyorsa okunur:
+		// doğrudan bağlanan biri her isteğe farklı X-Forwarded-For yazıp hız
+		// sınırını atlatamaz. IP doğrulaması, "a, b" gibi zincirlerde ham
+		// metin yerine ilk geçerli adresin anahtar olmasını sağlar.
+		ProxyHeader:             cfg.ProxyHeader,
+		EnableTrustedProxyCheck: true,
+		TrustedProxies:          cfg.TrustedProxies,
+		EnableIPValidation:      true,
 	})
 
 	// Fiber'da ilk kaydedilen middleware en dışta çalışır; bir panic ise en içten
@@ -268,6 +269,37 @@ func corsConfig(cfg *config.Config) (corsCfg cors.Config, ok bool) {
 	// Geliştirme kolaylığı: lokalde her origin'e izin ver.
 	log.Println("cors: geliştirme modu, tüm origin'lere izin veriliyor")
 	return cors.Config{AllowOrigins: "*"}, true
+}
+
+// apiLimiter, tüm API uçlarına uygulanan genel hız sınırıdır (API_RATE_LIMIT).
+func apiLimiter(cfg *config.Config, tokens *auth.TokenService) fiber.Handler {
+	return limiter.New(limiter.Config{
+		Max:          cfg.APIRateLimit,
+		Expiration:   cfg.APIRateLimitWindow,
+		KeyGenerator: rateLimitKey(tokens),
+		LimitReached: func(c *fiber.Ctx) error {
+			return middleware.NewAPIError(fiber.StatusTooManyRequests,
+				"rate_limited", "çok fazla istek gönderdiniz, lütfen biraz bekleyin")
+		},
+	})
+}
+
+// rateLimitKey, geçerli bir access token taşıyan isteği kullanıcısına, diğerlerini
+// istemci IP'sine sayar.
+//
+// Kimliği doğrulanmış uçlarda IP anahtarı, aynı operatör IP'sini paylaşan (CGNAT)
+// kullanıcıların sınırı birlikte doldurması demekti. Token imzası doğrulandığı
+// için uydurma bir token yeni bir kova açamaz; geçersiz ya da süresi dolmuş token
+// IP kovasına düşer.
+func rateLimitKey(tokens *auth.TokenService) func(*fiber.Ctx) string {
+	return func(c *fiber.Ctx) string {
+		if raw, ok := strings.CutPrefix(c.Get(fiber.HeaderAuthorization), "Bearer "); ok {
+			if claims, err := tokens.ParseAccessToken(raw); err == nil && claims.Subject != "" {
+				return "user:" + claims.Subject
+			}
+		}
+		return "ip:" + c.IP()
+	}
 }
 
 // authLimiter, kimlik üreten uçlar (Google/Apple girişi; production dışında

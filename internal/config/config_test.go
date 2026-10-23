@@ -217,3 +217,37 @@ func TestFromEnv_GateEnforcement(t *testing.T) {
 		})
 	}
 }
+
+func TestFromEnv_TrustedProxies(t *testing.T) {
+	cases := []struct {
+		name    string
+		value   string
+		want    []string
+		wantErr bool
+	}{
+		{"varsayilan ozel aglar", "", DefaultTrustedProxies, false},
+		{"CIDR ve IP", "10.0.1.0/24, 172.18.0.5", []string{"10.0.1.0/24", "172.18.0.5"}, false},
+		{"IPv6", "fd00::/8", []string{"fd00::/8"}, false},
+		{"gecersiz", "10.0.0.0/8,traefik", nil, true},
+		{"gecersiz CIDR", "10.0.0.0/33", nil, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("APP_ENV", "development")
+			t.Setenv("TRUSTED_PROXIES", c.value)
+			cfg, err := FromEnv()
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("FromEnv() hata vermedi, TrustedProxies = %q", cfg.TrustedProxies)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("FromEnv() = %v", err)
+			}
+			if !slices.Equal(cfg.TrustedProxies, c.want) {
+				t.Errorf("TrustedProxies = %q, beklenen %q", cfg.TrustedProxies, c.want)
+			}
+		})
+	}
+}

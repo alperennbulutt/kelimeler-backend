@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -37,6 +38,14 @@ const (
 // DefaultGateEnforcement, GATE_ENFORCEMENT verilmezse kullanılır: yayındaki
 // istemciyi bozmadan ihlalleri görünür kılar.
 const DefaultGateEnforcement = GateLog
+
+// DefaultTrustedProxies, TRUSTED_PROXIES verilmezse güvenilen proxy adresleridir:
+// özel ağlar ve loopback. Coolify'nin Traefik'i container'a docker ağından
+// (özel bir adresten) bağlanır; internetten doğrudan gelen bir bağlantı bu
+// aralıklarda olamaz, dolayısıyla başlığı uyduramaz.
+var DefaultTrustedProxies = []string{
+	"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "::1/128", "fc00::/7",
+}
 
 // MinJWTSecretBytes, production'da kabul edilen en kısa JWT_SECRET uzunluğudur
 // (HS256 anahtarı en az özet boyu kadar olmalı).
@@ -107,15 +116,23 @@ type Config struct {
 	// gelen isteğin yanıtını okutmaz (mobil istemci CORS'tan etkilenmez).
 	CORSAllowedOrigins []string
 
+	// İstemci IP'sinin okunduğu başlık (varsayılan X-Forwarded-For). Başlığa
+	// yalnızca isteği TrustedProxies'teki bir adres ilettiyse güvenilir; aksi
+	// halde bağlantının karşı ucu istemci sayılır, böylece doğrudan bağlanan
+	// biri başlığı uydurarak hız sınırını atlatamaz.
+	ProxyHeader    string
+	TrustedProxies []string
+
 	// Kimlik üreten auth uçlarına dakikada izin verilen istek sayısı (IP başına).
 	AuthRateLimit       int
 	AuthRateLimitWindow time.Duration
 
-	// Genel uçlara dakikada izin verilen istek sayısı (IP başına).
+	// Genel uçlara dakikada izin verilen istek sayısı. Geçerli access token
+	// taşıyan istekler kullanıcı başına, diğerleri IP başına sayılır.
 	//
-	// Sınır kullanıcı değil IP başınadır: mobil operatörler çok sayıda kullanıcıyı
-	// tek IP arkasına koyar (CGNAT) ve bir tekrar seansı dakikada onlarca istek
-	// üretir. Dar bir sınır kötüye kullanımı değil gerçek kullanıcıları düşürür.
+	// Mobil operatörler çok sayıda kullanıcıyı tek IP arkasına koyar (CGNAT) ve
+	// bir tekrar seansı dakikada onlarca istek üretir; IP başına dar bir sınır
+	// kötüye kullanımı değil gerçek kullanıcıları düşürürdü.
 	APIRateLimit       int
 	APIRateLimitWindow time.Duration
 
@@ -177,6 +194,9 @@ func FromEnv() (*Config, error) {
 
 		CORSAllowedOrigins: getList("CORS_ALLOWED_ORIGINS"),
 
+		ProxyHeader:    getEnv("PROXY_HEADER", "X-Forwarded-For"),
+		TrustedProxies: getListOr("TRUSTED_PROXIES", DefaultTrustedProxies),
+
 		// Parola deneme saldırılarını yavaşlatacak kadar sıkı, gerçek
 		// kullanıcıyı engellemeyecek kadar gevşek.
 		AuthRateLimit:       getPositiveInt("AUTH_RATE_LIMIT", 10),
@@ -216,6 +236,15 @@ func (c *Config) Validate() error {
 	case GateOff, GateLog, GateEnforce:
 	default:
 		return fmt.Errorf(`GATE_ENFORCEMENT=%q geçersiz: "off", "log" ya da "enforce" olmalı`, c.GateEnforcement)
+	}
+
+	for _, p := range c.TrustedProxies {
+		if _, _, err := net.ParseCIDR(p); err == nil {
+			continue
+		}
+		if net.ParseIP(p) == nil {
+			return fmt.Errorf("TRUSTED_PROXIES: %q geçerli bir IP ya da CIDR değil", p)
+		}
 	}
 
 	if c.IsProduction() {
@@ -273,6 +302,15 @@ func getList(key string) []string {
 		}
 	}
 	return out
+}
+
+// getListOr, getList gibi okur; değişken tanımsız ya da boşsa def'in bir
+// kopyasını döner.
+func getListOr(key string, def []string) []string {
+	if l := getList(key); len(l) > 0 {
+		return l
+	}
+	return append([]string(nil), def...)
 }
 
 func getDuration(key string, def time.Duration) time.Duration {
