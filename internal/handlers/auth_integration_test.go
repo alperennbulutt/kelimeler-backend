@@ -387,16 +387,7 @@ func TestRefresh_VeritabaniHatasi500Doner(t *testing.T) {
 	token := testRefreshToken(t, gdb, u.ID, time.Now().Add(time.Hour), nil)
 
 	// Kapalı havuz her sorguda hata verir: ulaşılamayan veritabanının karşılığı.
-	kopuk, err := db.Connect(os.Getenv("TEST_DATABASE_URL"))
-	if err != nil {
-		t.Fatalf("ikinci bağlantı açılamadı: %v", err)
-	}
-	sqlDB, err := kopuk.DB()
-	if err != nil {
-		t.Fatalf("havuz alınamadı: %v", err)
-	}
-	sqlDB.Close()
-	app := refreshApp(New(kopuk, &config.Config{AppEnv: "test"}, testTokens(), nil))
+	app := refreshApp(New(kopukDB(t), &config.Config{AppEnv: "test"}, testTokens(), nil))
 
 	// İstemci 401'i kesin ret sayıp saklı token'ları siler; geçici bir hata
 	// kullanıcıyı oturumdan düşürmemeli.
@@ -1318,5 +1309,49 @@ func TestAuthenticateSocial_GorunenAdTemizlenirVeKisaltilir(t *testing.T) {
 				t.Errorf("saklanan displayName = %q, beklenen %q", stored, c.want)
 			}
 		})
+	}
+}
+
+// Apple iptali başarısız olsa da (ya da saklı token yoksa) bağlantı kaldırılır:
+// kullanıcının isteği üçüncü taraf bir servise bağlanmaz.
+func TestUnlinkApple_IptalBasarisizOlsaDaKaldirilir(t *testing.T) {
+	for _, c := range []struct{ name, stored string }{
+		{"iptal başarısız", "sakli"},
+		{"saklı token yok", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			gdb := testDB(t)
+			u := testUser(t, gdb)
+			testIdentity(t, gdb, u, "google")
+			testAppleIdentity(t, gdb, u, c.stored)
+			revoker, fake := testAppleRevoker(t)
+			fake.failToken["sakli"] = true
+			h := New(gdb, &config.Config{AppEnv: "test"}, testTokens(), nil).WithAppleRevoker(revoker)
+
+			status, body := send(t, authApp(h), unlinkRequest(t, h, u, "apple"))
+			if status != fiber.StatusOK {
+				t.Fatalf("status = %d, beklenen 200 (body: %v)", status, body)
+			}
+			if n := identityCount(t, gdb, u.ID, "apple"); n != 0 {
+				t.Errorf("apple kimliği kaldırılmadı (%d satır)", n)
+			}
+		})
+	}
+}
+
+// Son kimlik reddedildiğinde Apple'a gidilmez: kimlik yerinde kaldığı için
+// token'ı iptal etmek, hâlâ bağlı hesabın Apple erişimini koparırdı.
+func TestUnlinkApple_SonKimlikseTokenIptalEdilmez(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	testAppleIdentity(t, gdb, u, "sakli")
+	revoker, fake := testAppleRevoker(t)
+	h := New(gdb, &config.Config{AppEnv: "test"}, testTokens(), nil).WithAppleRevoker(revoker)
+
+	if status, body := send(t, authApp(h), unlinkRequest(t, h, u, "apple")); status != fiber.StatusBadRequest {
+		t.Fatalf("status = %d, beklenen 400 (body: %v)", status, body)
+	}
+	if _, revoked := fake.snapshot(); len(revoked) != 0 {
+		t.Errorf("reddedilen kaldırmada token iptal edildi: %v", revoked)
 	}
 }
