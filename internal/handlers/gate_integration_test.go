@@ -401,3 +401,149 @@ func TestReviewGate_DunkuSayacBugunuKapatmaz(t *testing.T) {
 		t.Errorf("ihlal yazıldı: %v", got)
 	}
 }
+
+// --- Harita kilidi (POST /progress/learn) ---
+
+// hepsiBugunAcik, verilen grupları bugün açılmış yazar: kapının bu kısmı
+// geçilir, yalnızca harita kilidi sınanır.
+func hepsiBugunAcik(t *testing.T, gdb *gorm.DB, userID string, keys ...string) {
+	t.Helper()
+	setUsage(t, gdb, userID, map[string]any{
+		"groups_started_today_count":  1,
+		"groups_unlocked_by_ad_today": len(keys) - 1,
+		"unlocked_groups_today":       strings.Join(keys, ","),
+	})
+}
+
+func TestMapLockGate_SiraliKilit(t *testing.T) {
+	kayit := kapiRaporunuYakala(t)
+	gdb, u, app := newGateTest(t, config.GateEnforce)
+	a1 := testLevel(t, gdb, "A1", 2, 2)
+	hepsiBugunAcik(t, gdb, u.ID, "A1:1", "A1:2")
+
+	// 1. grup bitmeden 2. grup haritada kilitli.
+	status, body := send(t, app, learnRequest(fiber.Map{"wordId": a1[1][0].ID}))
+	if status != fiber.StatusForbidden || gateCode(body) != "gate_required" {
+		t.Fatalf("kilitli grup status = %d code = %v, beklenen 403 gate_required", status, gateCode(body))
+	}
+	if got := progressRowCount(t, gdb, u.ID, a1[1][0].ID); got != 0 {
+		t.Error("kilitli gruba kelime yazıldı")
+	}
+	if l := kayit.ihlaller(); len(l) != 1 || !strings.Contains(l[0], "reason=map_locked") {
+		t.Errorf("ihlal satırları = %v, beklenen tek map_locked", l)
+	}
+
+	// 1. grup bitince 2. grup açılır.
+	for _, w := range a1[0] {
+		if status, body := send(t, app, learnRequest(fiber.Map{"wordId": w.ID})); status != fiber.StatusOK {
+			t.Fatalf("1. grup %s status = %d (%v)", w.ID, status, body)
+		}
+	}
+	if status, body := send(t, app, learnRequest(fiber.Map{"wordId": a1[1][0].ID})); status != fiber.StatusOK {
+		t.Fatalf("1. grup bitince 2. grup status = %d (%v)", status, body)
+	}
+	// Başlanmış grubun sonraki kelimesi ucuz yoldan geçer.
+	if status, body := send(t, app, learnRequest(fiber.Map{"wordId": a1[1][1].ID})); status != fiber.StatusOK {
+		t.Fatalf("başlanmış grubun 2. kelimesi status = %d (%v)", status, body)
+	}
+}
+
+func TestMapLockGate_OncekiSeviyeBitmeden(t *testing.T) {
+	kapiRaporunuYakala(t)
+	gdb, u, app := newGateTest(t, config.GateEnforce)
+	testLevel(t, gdb, "A1", 1)
+	a2 := testLevel(t, gdb, "A2", 2)
+	hepsiBugunAcik(t, gdb, u.ID, "A2:1")
+
+	// Başlanmamış grup (computeLevelGroups yolu).
+	if status, _ := send(t, app, learnRequest(fiber.Map{"wordId": a2[0][0].ID})); status != fiber.StatusForbidden {
+		t.Fatalf("A1 bitmeden A2 status = %d, beklenen 403", status)
+	}
+	// Eski bir kayıtla başlanmış grup (ucuz yol) da önceki seviyeyi bekler.
+	setProgress(t, gdb, u.ID, a2[0][1], 3, nil)
+	if status, _ := send(t, app, learnRequest(fiber.Map{"wordId": a2[0][0].ID})); status != fiber.StatusForbidden {
+		t.Fatalf("başlanmış A2 grubu, A1 bitmeden status = %d, beklenen 403", status)
+	}
+
+	// Seviye rozeti önceki seviyeyi tamamlanmış sayar.
+	if err := gdb.Create(&models.EarnedBadge{UserID: u.ID, BadgeID: "level_A1", EarnedAt: time.Now()}).Error; err != nil {
+		t.Fatalf("rozet yazılamadı: %v", err)
+	}
+	if status, body := send(t, app, learnRequest(fiber.Map{"wordId": a2[0][0].ID})); status != fiber.StatusOK {
+		t.Fatalf("rozetten sonra status = %d (%v)", status, body)
+	}
+}
+
+func TestMapLockGate_LogKipindeTekSatir(t *testing.T) {
+	kayit := kapiRaporunuYakala(t)
+	gdb, u, app := newGateTest(t, config.GateLog)
+	a1 := testLevel(t, gdb, "A1", 1, 1, 1)
+	hepsiBugunAcik(t, gdb, u.ID, "A1:2")
+
+	// Bugün açık ama haritada kilitli: kabul edilir, map_locked raporlanır.
+	if status, body := send(t, app, learnRequest(fiber.Map{"wordId": a1[1][0].ID})); status != fiber.StatusOK {
+		t.Fatalf("status = %d (%v)", status, body)
+	}
+	// Hem bugün açılmamış hem kilitli: tek satır, group_not_unlocked.
+	if status, body := send(t, app, learnRequest(fiber.Map{"wordId": a1[2][0].ID})); status != fiber.StatusOK {
+		t.Fatalf("status = %d (%v)", status, body)
+	}
+	l := kayit.ihlaller()
+	if len(l) != 2 || !strings.Contains(l[0], "reason=map_locked") || !strings.Contains(l[1], "reason=group_not_unlocked") {
+		t.Errorf("ihlal satırları = %v", l)
+	}
+}
+
+func TestMapLockGate_TestModuKilidiAcar(t *testing.T) {
+	kayit := kapiRaporunuYakala(t)
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	h := New(gdb, &config.Config{AppEnv: "test", GateEnforcement: config.GateEnforce, TestModeUnlockAll: true}, nil, nil)
+	app := gateApp(h, u.ID)
+	a1 := testLevel(t, gdb, "A1", 1, 1)
+
+	if status, body := send(t, app, learnRequest(fiber.Map{"wordId": a1[1][0].ID})); status != fiber.StatusOK {
+		t.Fatalf("status = %d (%v)", status, body)
+	}
+	if l := kayit.ihlaller(); len(l) != 0 {
+		t.Errorf("ihlal yazıldı: %v", l)
+	}
+}
+
+func TestMapLockGate_HaritaIleAyniKarar(t *testing.T) {
+	// Grupların hepsi bugün açıkken öğrenme, haritanın açık gösterdiği her
+	// grupta kabul, kilitli gösterdiğinde ret almalı: dürüst istemci yalnızca
+	// haritada açık gruba girer.
+	cases := []struct {
+		level string
+		group int
+		word  func(levels map[string][][]models.DictionaryWord) models.DictionaryWord
+	}{
+		{"A1", 2, func(l map[string][][]models.DictionaryWord) models.DictionaryWord { return l["A1"][1][1] }},
+		{"A1", 3, func(l map[string][][]models.DictionaryWord) models.DictionaryWord { return l["A1"][2][1] }},
+		{"A2", 1, func(l map[string][][]models.DictionaryWord) models.DictionaryWord { return l["A2"][0][0] }},
+		{"A2", 2, func(l map[string][][]models.DictionaryWord) models.DictionaryWord { return l["A2"][1][0] }},
+	}
+	for _, c := range cases {
+		t.Run(fmt.Sprintf("%s:%d", c.level, c.group), func(t *testing.T) {
+			kapiRaporunuYakala(t)
+			gdb, u, app := newGateTest(t, config.GateEnforce)
+			levels := mapScenario(t, gdb, u.ID)
+			hepsiBugunAcik(t, gdb, u.ID, "A1:1", "A1:2", "A1:3", "A2:1", "A2:2")
+
+			unlocked := false
+			for _, g := range levelGroups(t, app, c.level) {
+				if g.GroupNumber == c.group {
+					unlocked = g.IsUnlocked
+				}
+			}
+			status, body := send(t, app, learnRequest(fiber.Map{"wordId": c.word(levels).ID}))
+			if unlocked && status != fiber.StatusOK {
+				t.Errorf("haritada açık grup reddedildi: %d (%v)", status, body)
+			}
+			if !unlocked && status != fiber.StatusForbidden {
+				t.Errorf("haritada kilitli grup kabul edildi: %d (%v)", status, body)
+			}
+		})
+	}
+}

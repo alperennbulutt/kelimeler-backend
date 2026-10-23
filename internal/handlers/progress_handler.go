@@ -58,8 +58,8 @@ func (h *Handlers) GetProgressForGroup(c *fiber.Ctx) error {
 // Yalnızca kutu 1'deki eski (Firestore'dan gelen) kayıtlar kutu 2'ye alınır.
 //
 // Yeni yazım reklam kapısından geçer (sözleşme K4, bkz. learnGate): grup bugün
-// açılmamışsa GATE_ENFORCEMENT=enforce'ta 403 gate_required döner, log'da
-// ihlal raporlanıp yazılır.
+// açılmamışsa ya da haritada kilitliyse GATE_ENFORCEMENT=enforce'ta 403
+// gate_required döner, log'da ihlal raporlanıp yazılır.
 func (h *Handlers) LearnWord(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	var req dto.LearnRequest
@@ -87,9 +87,13 @@ func (h *Handlers) LearnWord(c *fiber.Ctx) error {
 	services.LearnNewWord(&wp)
 
 	now := time.Now()
+	mapLocked, err := h.learnMapLocked(userID, &word)
+	if err != nil {
+		return err
+	}
 	var resp models.WordProgress
-	err := h.DB.Transaction(func(tx *gorm.DB) error {
-		if err := h.learnGate(c, tx, userID, &word, now); err != nil {
+	err = h.DB.Transaction(func(tx *gorm.DB) error {
+		if err := h.learnGate(c, tx, userID, &word, mapLocked, now); err != nil {
 			return err
 		}
 
@@ -174,7 +178,31 @@ func (h *Handlers) applyGate(c *fiber.Ctx, v services.GateViolation, allowed boo
 	return nil
 }
 
+// learnMapLocked, kelimenin grubu haritada kilitliyse true döner (bkz.
+// groupLockedOnMap). Kapı kapalıysa ya da kelimenin zaten ilerlemesi varsa
+// (yazım olmayacak) hiç bakılmaz.
+//
+// Transaction'dan önce çalışır: kilit durumu yalnızca açılma yönünde değişir
+// (grup tamamlanması kalıcıdır), yazımdan önce bakmak yarış açmaz; transaction
+// içinde h.DB'yi kullanmak ise havuzdan ikinci bir bağlantı bekletirdi.
+func (h *Handlers) learnMapLocked(userID string, word *models.DictionaryWord) (bool, error) {
+	if h.gateMode() == config.GateOff {
+		return false, nil
+	}
+	var existing []models.WordProgress
+	if err := h.DB.Select("box").Where("user_id = ? AND word_id = ?", userID, word.ID).
+		Limit(1).Find(&existing).Error; err != nil {
+		return false, err
+	}
+	if len(existing) > 0 && existing[0].Box >= 2 {
+		return false, nil
+	}
+	return h.groupLockedOnMap(userID, word.Level, word.Grp)
+}
+
 // learnGate, kelimenin öğrenme yazımının kapısını tx içinde denetler.
+// mapLocked, grubun haritada kilitli olduğunu söyler (learnMapLocked); bu da
+// ihlaldir (neden map_locked, kod yine gate_required).
 //
 // Kapı yalnızca YENİ yazımda sorulur: kelimenin zaten ilerlemesi varsa
 // (kutu 2+) learn isteği hiçbir şey yazmaz (yinelenen istek, ikinci cihaz,
@@ -185,7 +213,7 @@ func (h *Handlers) applyGate(c *fiber.Ctx, v services.GateViolation, allowed boo
 // Kullanıcı satırı paylaşımlı kilitlenir: aynı kullanıcının learn'leri
 // birbirini beklemez, ama karar ile yazım arasında "bugün açılan gruplar"
 // değişemez.
-func (h *Handlers) learnGate(c *fiber.Ctx, tx *gorm.DB, userID string, word *models.DictionaryWord, now time.Time) error {
+func (h *Handlers) learnGate(c *fiber.Ctx, tx *gorm.DB, userID string, word *models.DictionaryWord, mapLocked bool, now time.Time) error {
 	if h.gateMode() == config.GateOff || (h.Cfg != nil && h.Cfg.TestModeUnlockAll) {
 		return nil
 	}
@@ -217,9 +245,14 @@ func (h *Handlers) learnGate(c *fiber.Ctx, tx *gorm.DB, userID string, word *mod
 			allowed = services.KeylessSlotCovers(slots, learned, state.UnlockedGroups, key)
 		}
 	}
+	// Bir istek tek ihlal satırı üretir; bugün açılmamış grup önce gelir.
+	reason := services.GateReasonGroupNotUnlocked
+	if allowed && mapLocked {
+		allowed, reason = false, services.GateReasonMapLocked
+	}
 	return h.applyGate(c, services.GateViolation{
 		Kind:   services.GateKindLearn,
-		Reason: services.GateReasonGroupNotUnlocked,
+		Reason: reason,
 		UserID: userID,
 		WordID: word.ID,
 		Level:  word.Level,
