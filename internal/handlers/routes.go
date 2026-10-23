@@ -60,7 +60,7 @@ func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService, authLi
 	// istemci yalnızca Google/Apple girişi sunar ve kayıtta e-posta sahipliği
 	// doğrulanmaz. Production'da açık kalsaydı herkes başkasının adresiyle hesap
 	// açıp o adresin sahibinden önce hesaba yerleşebilirdi.
-	if h.Cfg.AppEnv != "production" {
+	if !h.Cfg.IsProduction() {
 		a.Post("/register", authLimit, h.Register)
 		a.Post("/login", authLimit, h.Login)
 	}
@@ -112,7 +112,7 @@ func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService, authLi
 
 	// Sayaç sıfırlama yalnızca geliştirme/test ortamında açıktır: production'da
 	// kullanıcının kendi günlük limitlerini sıfırlayabilmesi gating'i anlamsız kılar.
-	if h.Cfg.AppEnv != "production" {
+	if !h.Cfg.IsProduction() {
 		users.Post("/me/usage/reset", h.ResetDailyUsage)
 	}
 

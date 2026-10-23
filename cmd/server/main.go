@@ -334,7 +334,7 @@ func corsConfig(cfg *config.Config) (corsCfg cors.Config, ok bool) {
 		}, true
 	}
 
-	if cfg.AppEnv == "production" {
+	if cfg.IsProduction() {
 		log.Println("cors: CORS_ALLOWED_ORIGINS tanımlı değil — hiçbir origin'e CORS izni verilmeyecek")
 		return cors.Config{}, false
 	}

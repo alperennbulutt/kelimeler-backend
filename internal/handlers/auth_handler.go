@@ -54,7 +54,7 @@ func (h *Handlers) usableSignInMethod(provider string) bool {
 	case "google", "apple":
 		return true
 	case "password":
-		return h.Cfg == nil || h.Cfg.AppEnv != "production"
+		return h.Cfg == nil || !h.Cfg.IsProduction()
 	}
 	return false
 }
@@ -880,7 +880,7 @@ func reportAppleRevokeFailure(step, userID string, err error) {
 // yapılandırılmamışsa açılışta yüksek sesle uyarır (log + Sentry) ve true
 // döner. Bu durumda hesap silme Apple'ın şart koştuğu iptali yapamaz.
 func (h *Handlers) WarnIfAppleRevokeDisabled() bool {
-	if h.Cfg == nil || h.Cfg.AppEnv != "production" || h.Cfg.AppleClientID == "" || h.AppleRevoker != nil {
+	if h.Cfg == nil || !h.Cfg.IsProduction() || h.Cfg.AppleClientID == "" || h.AppleRevoker != nil {
 		return false
 	}
 	err := errors.New("APPLE_TEAM_ID/APPLE_KEY_ID/APPLE_PRIVATE_KEY eksik ya da geçersiz: " +
