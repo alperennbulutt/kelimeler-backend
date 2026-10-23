@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -246,5 +247,110 @@ func TestStatsSummary_HaftalikVeriVeSeriTRGunuyle(t *testing.T) {
 	}
 	if _, ok := weekly["2026-10-13"]; ok {
 		t.Errorf("weeklyLoginData 11. günü (2026-10-13) içermemeli: %v", weekly)
+	}
+}
+
+// yeniRozetler, özet yanıtındaki newlyEarnedBadges kimliklerini döner.
+func yeniRozetler(t *testing.T, body map[string]any) []string {
+	t.Helper()
+
+	raw, ok := body["newlyEarnedBadges"].([]any)
+	if !ok {
+		t.Fatalf("newlyEarnedBadges yok ya da dizi değil (body: %v)", body)
+	}
+	ids := make([]string, 0, len(raw))
+	for _, b := range raw {
+		ids = append(ids, b.(map[string]any)["id"].(string))
+	}
+	return ids
+}
+
+// ozetTabloKilidiAltinda, earned_badges'i SHARE kipinde kilitleyip n özet
+// isteği başlatır; hepsi rozet INSERT'ünde beklemeye geçince kilidi bırakır ve
+// yanıt gövdelerini döner. SHARE kilidi okumayı engellemez, yazmayı engeller:
+// böylece bütün istekler aynı "önceden kazanılan" kümesini görmüş olur.
+func ozetTabloKilidiAltinda(t *testing.T, gdb *gorm.DB, app *fiber.App, n int) []map[string]any {
+	t.Helper()
+
+	kilit := gdb.Begin()
+	if err := kilit.Exec("LOCK TABLE earned_badges IN SHARE MODE").Error; err != nil {
+		kilit.Rollback()
+		t.Fatalf("tablo kilitlenemedi: %v", err)
+	}
+
+	type sonuc struct {
+		status int
+		body   map[string]any
+	}
+	done := make(chan sonuc, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			res, err := app.Test(httptest.NewRequest(http.MethodGet, "/stats/summary", nil), -1)
+			if err != nil {
+				done <- sonuc{}
+				return
+			}
+			defer res.Body.Close()
+			var body map[string]any
+			_ = json.NewDecoder(res.Body).Decode(&body)
+			done <- sonuc{res.StatusCode, body}
+		}()
+	}
+
+	var bekleyen int64
+	for son := time.Now().Add(10 * time.Second); bekleyen < int64(n) && time.Now().Before(son); {
+		time.Sleep(10 * time.Millisecond)
+		gdb.Raw(`SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&bekleyen)
+	}
+	if err := kilit.Commit().Error; err != nil {
+		t.Errorf("tablo kilidi bırakılamadı: %v", err)
+	}
+	if bekleyen < int64(n) {
+		t.Errorf("yalnızca %d/%d istek kilitte bekledi; yarış sıralaması kurulamadı", bekleyen, n)
+	}
+
+	bodies := make([]map[string]any, 0, n)
+	for i := 0; i < n; i++ {
+		r := <-done
+		if r.status != fiber.StatusOK {
+			t.Fatalf("GET /stats/summary status = %d (body: %v)", r.status, r.body)
+		}
+		bodies = append(bodies, r.body)
+	}
+	return bodies
+}
+
+func TestStatsSummary_YeniRozetEszamanliIsteklerdeBirKezDoner(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	app := statsApp(New(gdb, &config.Config{AppEnv: "test"}, nil, nil), u.ID)
+
+	// first_day her kullanıcıda ilk özet çağrısında kazanılır.
+	sayi := 0
+	for _, body := range ozetTabloKilidiAltinda(t, gdb, app, 3) {
+		for _, id := range yeniRozetler(t, body) {
+			if id == "first_day" {
+				sayi++
+			}
+		}
+	}
+	if sayi != 1 {
+		t.Errorf("first_day %d yanıtta yeni döndü, beklenen 1", sayi)
+	}
+
+	var satir int64
+	gdb.Raw("SELECT count(*) FROM earned_badges WHERE user_id = ? AND badge_id = 'first_day'", u.ID).Scan(&satir)
+	if satir != 1 {
+		t.Errorf("first_day için %d satır var, beklenen 1", satir)
+	}
+
+	// Sonraki çağrı artık yeni rozet döndürmez.
+	status, body := get(t, app, "/stats/summary")
+	if status != fiber.StatusOK {
+		t.Fatalf("GET /stats/summary status = %d (body: %v)", status, body)
+	}
+	if ids := yeniRozetler(t, body); len(ids) != 0 {
+		t.Errorf("ikinci çağrıda yeni rozet döndü: %v", ids)
 	}
 }

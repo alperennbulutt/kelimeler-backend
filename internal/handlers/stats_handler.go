@@ -3,6 +3,7 @@ package handlers
 import (
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"kelimeler-backend/internal/dto"
@@ -11,7 +12,6 @@ import (
 	"kelimeler-backend/internal/services"
 
 	"github.com/gofiber/fiber/v2"
-	"gorm.io/gorm/clause"
 )
 
 // statsNow, istatistik uçlarının saatidir; testler gün sınırını sınamak için değiştirir.
@@ -144,25 +144,18 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 		CurrentStreak:    streak,
 	}, earnedBefore)
 
-	// Yeni kazanılan rozetleri kalıcılaştır.
-	if len(newlyEarned) > 0 {
-		rows := make([]models.EarnedBadge, 0, len(newlyEarned))
-		for _, id := range newlyEarned {
-			rows = append(rows, models.EarnedBadge{UserID: userID, BadgeID: id, EarnedAt: now})
-		}
-		if err := h.DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&rows).Error; err != nil {
-			return err
-		}
+	// Yeni kazanılan rozetleri kalıcılaştır. Yalnızca bu istekte gerçekten
+	// eklenen satırlar "yeni" sayılır: eşzamanlı iki özet isteği aynı rozeti
+	// yeni görse de popup bir kez çıkar.
+	inserted, err := h.insertEarnedBadges(userID, newlyEarned, now)
+	if err != nil {
+		return err
 	}
 
 	badgeDTOs := toBadgeDTOs(allBadges)
-	newlySet := map[string]bool{}
-	for _, id := range newlyEarned {
-		newlySet[id] = true
-	}
 	newlyDTOs := []dto.BadgeDTO{}
 	for _, b := range badgeDTOs {
-		if newlySet[b.ID] {
+		if inserted[b.ID] {
 			newlyDTOs = append(newlyDTOs, b)
 		}
 	}
@@ -187,6 +180,32 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 		TotalWordsByLevel: services.LevelTargets,
 		NewlyEarnedBadges: newlyDTOs,
 	})
+}
+
+// insertEarnedBadges, rozetleri earned_badges'e ekler (zaten varsa dokunmaz) ve
+// yalnızca bu çağrıda gerçekten eklenenlerin kümesini döner.
+func (h *Handlers) insertEarnedBadges(userID string, badgeIDs []string, at time.Time) (map[string]bool, error) {
+	inserted := map[string]bool{}
+	if len(badgeIDs) == 0 {
+		return inserted, nil
+	}
+	values := make([]string, 0, len(badgeIDs))
+	args := make([]any, 0, 3*len(badgeIDs))
+	for _, id := range badgeIDs {
+		values = append(values, "(?, ?, ?)")
+		args = append(args, userID, id, at.UTC())
+	}
+	var ids []string
+	if err := h.DB.Raw(`INSERT INTO earned_badges (user_id, badge_id, earned_at) VALUES `+
+		strings.Join(values, ", ")+
+		` ON CONFLICT (user_id, badge_id) DO NOTHING RETURNING badge_id`, args...).
+		Scan(&ids).Error; err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		inserted[id] = true
+	}
+	return inserted, nil
 }
 
 // LearnedWords: GET /stats/learned-words?level=&limit=&offset= — sayfalı öğrenilmiş kelimeler.
