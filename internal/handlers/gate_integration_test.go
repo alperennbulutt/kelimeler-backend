@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -543,6 +545,267 @@ func TestMapLockGate_HaritaIleAyniKarar(t *testing.T) {
 			}
 			if !unlocked && status != fiber.StatusForbidden {
 				t.Errorf("haritada kilitli grup kabul edildi: %d (%v)", status, body)
+			}
+		})
+	}
+}
+
+// --- Eşzamanlılık: kontrol noktasında patlama ---
+
+func TestReviewGate_EszamanliCevaplarKontrolNoktasiniAsamaz(t *testing.T) {
+	// Aynı kullanıcının farklı kelimelere aynı anda gelen cevapları kilitli
+	// kullanıcı satırında sıraya girer: kontrol noktasına kadar olanlar
+	// kabul edilir, gerisi reddedilir; hiçbiri kilit öncesi sayacı görüp
+	// kapıyı birlikte aşamaz.
+	cases := []struct {
+		name            string
+		answers, passes int
+		n               int
+		wantOK          int
+	}{
+		{"30 kapisi", 28, 0, 8, 2},
+		{"60 kapisi", 57, 1, 8, 3},
+		{"90 kapisi", 89, 2, 6, 1},
+		{"90 sonrasi serbest", 89, 3, 6, 6},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			kayit := kapiRaporunuYakala(t)
+			gdb, u, app := newGateTest(t, config.GateEnforce)
+			ids := dueWords(t, gdb, u.ID, "itest_gate_burst", 3, c.n)
+			setUsage(t, gdb, u.ID, map[string]any{"review_answers_today": c.answers, "review_ad_pass_count_today": c.passes})
+
+			statuses := kilitAltindaEszamanli(t, gdb, app, u.ID, c.n, func(i int) *http.Request {
+				return progressSwipe(ids[i], "right")
+			})
+			ok, rejected := 0, 0
+			for _, s := range statuses {
+				switch s {
+				case fiber.StatusOK:
+					ok++
+				case fiber.StatusForbidden:
+					rejected++
+				default:
+					t.Fatalf("beklenmeyen status %d (tümü: %v)", s, statuses)
+				}
+			}
+			if ok != c.wantOK || rejected != c.n-c.wantOK {
+				t.Fatalf("kabul = %d, ret = %d; beklenen %d / %d (tümü: %v)", ok, rejected, c.wantOK, c.n-c.wantOK, statuses)
+			}
+			if got := loadUser(t, gdb, u.ID).ReviewAnswersToday; got != c.answers+c.wantOK {
+				t.Errorf("review_answers_today = %d, beklenen %d", got, c.answers+c.wantOK)
+			}
+			var advanced int64
+			gdb.Model(&models.WordProgress{}).Where("user_id = ? AND word_id IN ? AND box = 4", u.ID, ids).Count(&advanced)
+			if int(advanced) != c.wantOK {
+				t.Errorf("ilerleyen kelime = %d, beklenen %d (reddedilen kelime değişmemeli)", advanced, c.wantOK)
+			}
+			if got := len(kayit.ihlaller()); got != c.n-c.wantOK {
+				t.Errorf("ihlal satırı = %d, beklenen %d", got, c.n-c.wantOK)
+			}
+		})
+	}
+}
+
+// --- Uçtan uca: dürüst istemci ---
+
+// durustIstemci, yayındaki Flutter istemcisinin kapı kararlarını aynen
+// uygular (learning_swipe_page.dart _openGroupForToday, review_swipe_page.dart
+// _syncGateState/_gateDue/_runCheckpointGate, rewarded_gate.dart no-fill
+// yolu). Hiçbir kararı sunucunun kuralına bakarak vermez; yalnızca
+// /users/me/usage yanıtını okur.
+type durustIstemci struct {
+	t   *testing.T
+	app *fiber.App
+	// 403 sayısı: dürüst istemci hiç ret almamalı.
+	rejections int
+}
+
+func (k *durustIstemci) do(req *http.Request) (int, map[string]any) {
+	k.t.Helper()
+	status, body := send(k.t, k.app, req)
+	if status == fiber.StatusForbidden {
+		k.rejections++
+	}
+	return status, body
+}
+
+func (k *durustIstemci) post(path string, payload any) map[string]any {
+	k.t.Helper()
+	status, body := k.do(jsonRequest(path, payload))
+	if status != fiber.StatusOK {
+		k.t.Fatalf("POST %s status = %d (%v)", path, status, body)
+	}
+	return body
+}
+
+func (k *durustIstemci) usage() map[string]any {
+	k.t.Helper()
+	status, body := k.do(httptest.NewRequest(http.MethodGet, "/users/me/usage", nil))
+	if status != fiber.StatusOK {
+		k.t.Fatalf("GET usage status = %d (%v)", status, body)
+	}
+	return body
+}
+
+// openGroup, sayfa açılışındaki kapıdır: grup bugün açıksa kayıt yok; değilse
+// günün ilk grubu ücretsiz (group-started), sonrakiler reklamla
+// (group-unlocked-by-ad; reklam izlendi sayılır).
+func (k *durustIstemci) openGroup(level string, group int) {
+	k.t.Helper()
+	u := k.usage()
+	if containsString(unlockedGroups(k.t, u), fmt.Sprintf("%s:%d", level, group)) {
+		return
+	}
+	body := fiber.Map{"level": level, "group": group}
+	if intField(k.t, u, "groupsStartedTodayCount") == 0 {
+		k.post("/users/me/usage/group-started", body)
+		return
+	}
+	k.post("/users/me/usage/group-unlocked-by-ad", body)
+}
+
+// learnGroup, haritada açık grubun kutu 1 ya da yeni kelimelerini "Biliyorum"
+// ile öğrenir: yeni kelime learn, kutu 1'deki eski kayıt swipe ile gider.
+func (k *durustIstemci) learnGroup(gdb *gorm.DB, userID string, words []models.DictionaryWord) {
+	k.t.Helper()
+	for _, w := range words {
+		var existing []models.WordProgress
+		gdb.Where("user_id = ? AND word_id = ?", userID, w.ID).Find(&existing)
+		if len(existing) > 0 && existing[0].Box >= 2 {
+			continue
+		}
+		if len(existing) > 0 {
+			k.post("/progress/swipe", fiber.Map{"wordId": w.ID, "direction": "right"})
+			continue
+		}
+		k.post("/progress/learn", fiber.Map{"wordId": w.ID, "level": w.Level, "group": w.Grp, "english": w.English, "turkish": w.Turkish})
+	}
+	k.post("/users/me/advance-group", fiber.Map{"level": words[0].Level, "group": words[0].Grp})
+}
+
+// reviewSession, tekrar seansıdır: sayaçlar sunucudan okunur; sıradaki cevap
+// geçilmemiş bir kapının arkasındaysa reklam (ya da no-fill toleransı)
+// geçilir ve review-ad-pass yazılır. Kayıtlar istemcide olduğu gibi
+// beklenmeden paralel gider, ama kapıya dayanan cevap gönderilmeden önce
+// bekleyenler biter (_gateMaybeDue). noFillAt kapısında reklam yüklenemez.
+func (k *durustIstemci) reviewSession(ids []string, noFillAt int) {
+	k.t.Helper()
+	u := k.usage()
+	answered := intField(k.t, u, "reviewAnswersToday")
+	passed := min(intField(k.t, u, "reviewAdPassCountToday"), 3) * 30
+	checkpointAt := func(n int) int {
+		switch {
+		case n <= 30:
+			return 0
+		case n <= 60:
+			return 30
+		case n <= 90:
+			return 60
+		}
+		return 90
+	}
+
+	var pending []chan int
+	flush := func() {
+		for _, ch := range pending {
+			s := <-ch
+			if s == fiber.StatusForbidden {
+				k.rejections++
+			}
+			if s != fiber.StatusOK {
+				k.t.Fatalf("tekrar cevabı status = %d", s)
+			}
+			answered++
+		}
+		pending = nil
+	}
+	for i, id := range ids {
+		if checkpointAt(answered+len(pending)+1) > passed {
+			flush()
+			if cp := checkpointAt(answered + 1); cp > passed {
+				if cp == noFillAt {
+					k.post("/users/me/usage/no-fill-pass", nil)
+				}
+				k.post("/users/me/usage/review-ad-pass", fiber.Map{"checkpoint": cp})
+				passed = cp
+			}
+		}
+		dir := "right"
+		if i%3 == 0 {
+			dir = "left"
+		}
+		req := progressSwipe(id, dir)
+		ch := make(chan int, 1)
+		go func() {
+			res, err := k.app.Test(req, -1)
+			if err != nil {
+				ch <- 0
+				return
+			}
+			res.Body.Close()
+			ch <- res.StatusCode
+		}()
+		pending = append(pending, ch)
+	}
+	flush()
+}
+
+func TestKapi_DurustIstemciHicIhlalUretmez(t *testing.T) {
+	for _, mode := range []config.GateEnforcement{config.GateLog, config.GateEnforce} {
+		t.Run(string(mode), func(t *testing.T) {
+			kayit := kapiRaporunuYakala(t)
+			gdb, u, app := newGateTest(t, mode)
+			a1 := testLevel(t, gdb, "A1", 3, 3, 3)
+			// Firestore'dan gelmiş kutu 1 kaydı: istemci onu swipe ile öğrenir.
+			setProgress(t, gdb, u.ID, a1[0][2], 1, nil)
+			k := &durustIstemci{t: t, app: app}
+
+			// Günün ücretsiz grubu.
+			k.openGroup("A1", 1)
+			k.learnGroup(gdb, u.ID, a1[0])
+			// Aynı gruba gün içinde yeniden giriş: yeni hak harcanmaz.
+			k.openGroup("A1", 1)
+			// İkinci grup reklamla; yanıtı kaybolan learn yeniden denenir.
+			k.openGroup("A1", 2)
+			k.post("/progress/learn", fiber.Map{"wordId": a1[1][0].ID})
+			k.post("/progress/learn", fiber.Map{"wordId": a1[1][0].ID})
+			k.learnGroup(gdb, u.ID, a1[1])
+			// Üçüncü grup da reklamla.
+			k.openGroup("A1", 3)
+			k.learnGroup(gdb, u.ID, a1[2])
+
+			// Tekrar: 70 vadesi gelmiş kelime, 30 ve 60 kapıları; 60'ta reklam
+			// yüklenemez ve no-fill toleransı kullanılır.
+			ids := make([]string, 0, 70)
+			for box := 2; box <= 5; box++ {
+				ids = append(ids, dueWords(t, gdb, u.ID, fmt.Sprintf("itest_honest_b%d", box), box, 18)...)
+			}
+			ids = ids[:70]
+			k.reviewSession(ids[:45], 60)
+			// Yinelenen cevap (yanıt kayboldu): no-op, sayılmaz, kapıya sorulmaz.
+			k.post("/progress/swipe", fiber.Map{"wordId": ids[1], "direction": "right"})
+			// Ekrandan çıkıp başka kutuya girilir; sayaçlar sunucudan okunur.
+			k.reviewSession(ids[45:], 60)
+
+			usage := k.usage()
+			if got := intField(t, usage, "reviewAnswersToday"); got != 70 {
+				t.Errorf("reviewAnswersToday = %d, beklenen 70", got)
+			}
+			if got := intField(t, usage, "reviewAdPassCountToday"); got != 2 {
+				t.Errorf("reviewAdPassCountToday = %d, beklenen 2", got)
+			}
+			if got := unlockedGroups(t, usage); len(got) != 3 {
+				t.Errorf("unlockedGroupsToday = %v, beklenen 3 grup", got)
+			}
+			if k.rejections != 0 {
+				t.Errorf("dürüst istemci %d kez 403 aldı", k.rejections)
+			}
+			if l := kayit.ihlaller(); len(l) != 0 {
+				t.Errorf("dürüst istemci ihlal üretti:\n%s", strings.Join(l, "\n"))
+			}
+			if s := kayit.sentry(); len(s) != 0 {
+				t.Errorf("Sentry'ye gitti: %v", s)
 			}
 		})
 	}

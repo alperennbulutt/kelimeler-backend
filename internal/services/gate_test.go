@@ -176,3 +176,133 @@ func TestReviewAnswerAllowed_Temel(t *testing.T) {
 		}
 	}
 }
+
+func TestReviewCheckpointForAnswer_Sinirlar(t *testing.T) {
+	cases := map[int]int{
+		1: 0, 29: 0, 30: 0,
+		31: 30, 59: 30, 60: 30,
+		61: 60, 89: 60, 90: 60,
+		91: 90, 92: 90, 500: 90,
+	}
+	for n, want := range cases {
+		if got := ReviewCheckpointForAnswer(n); got != want {
+			t.Errorf("ReviewCheckpointForAnswer(%d) = %d, beklenen %d", n, got, want)
+		}
+	}
+}
+
+// TestReviewGate_KontrolNoktasiSinirlariHerKipte, sayılan cevaptan ÖNCEKİ
+// günlük cevap sayısıyla (answers) kararı ve her kipteki sonucu sabitler:
+// answers=29 → 30. cevap (ücretsiz), answers=30 → 31. cevap (30 kapısı).
+func TestReviewGate_KontrolNoktasiSinirlariHerKipte(t *testing.T) {
+	cases := []struct {
+		answers, passes int
+		allowed         bool
+	}{
+		{29, 0, true}, {30, 0, false}, {31, 0, false},
+		{29, 1, true}, {30, 1, true}, {31, 1, true},
+		{59, 1, true}, {60, 1, false}, {61, 1, false},
+		{59, 2, true}, {60, 2, true}, {61, 2, true},
+		{89, 2, true}, {90, 2, false}, {91, 2, false},
+		{89, 3, true}, {90, 3, true}, {91, 3, true},
+		// Kapı atlanarak geçilemez: 60 kapısında bir geçiş yetmez.
+		{60, 0, false}, {90, 1, false},
+		// Sırayla geçilmeden 90 bildirildiyse sayaç 3'tür (RecordReviewAdPass).
+		{75, 3, true},
+	}
+	want := map[config.GateEnforcement]map[bool]GateAction{
+		config.GateOff:     {true: GateAllow, false: GateAllow},
+		config.GateLog:     {true: GateAllow, false: GateAllowAndReport},
+		config.GateEnforce: {true: GateAllow, false: GateReject},
+	}
+	for _, c := range cases {
+		got := ReviewAnswerAllowed(c.answers, c.passes)
+		if got != c.allowed {
+			t.Errorf("ReviewAnswerAllowed(%d, %d) = %v, beklenen %v", c.answers, c.passes, got, c.allowed)
+		}
+		for mode, actions := range want {
+			if a := GateActionFor(mode, got); a != actions[c.allowed] {
+				t.Errorf("kip %s, cevap=%d geçiş=%d: eylem %v, beklenen %v", mode, c.answers, c.passes, a, actions[c.allowed])
+			}
+		}
+	}
+}
+
+func TestLearnGate_HerKipteKarar(t *testing.T) {
+	s := DailyGateState{UnlockedGroups: []string{"A1:1"}}
+	cases := []struct {
+		mode config.GateEnforcement
+		key  string
+		want GateAction
+	}{
+		{config.GateOff, "A1:1", GateAllow},
+		{config.GateOff, "A1:2", GateAllow},
+		{config.GateLog, "A1:1", GateAllow},
+		{config.GateLog, "A1:2", GateAllowAndReport},
+		{config.GateEnforce, "A1:1", GateAllow},
+		{config.GateEnforce, "A1:2", GateReject},
+	}
+	for _, c := range cases {
+		if got := GateActionFor(c.mode, LearnAllowedToday(s, c.key)); got != c.want {
+			t.Errorf("kip %s, %s: %v, beklenen %v", c.mode, c.key, got, c.want)
+		}
+	}
+}
+
+func TestGateStateAt_IstanbulGeceYarisi(t *testing.T) {
+	kullanimKonumu(t, "Europe/Istanbul")
+	// 23 Ekim 23:59:59 TSİ'de yazılmış satır: 29 cevap, A1:3 açık.
+	lastReset := utc(t, "2026-10-23T20:59:59Z")
+	u := gateUser(lastReset, "A1:3", 1, 0, 95, 0)
+
+	cases := []struct {
+		name        string
+		now         string
+		wantAnswers int
+		wantToday   bool // A1:3 bugün açık
+		wantCarried bool // A1:3 gece yarısı toleransında
+	}{
+		{"ayni gun son an", "2026-10-23T20:59:59.999Z", 95, true, false},
+		{"gece yarisi", "2026-10-23T21:00:00Z", 0, false, true},
+		{"toleransin son ani", "2026-10-23T21:59:59Z", 0, false, true},
+		{"tolerans bitti", "2026-10-23T22:00:00Z", 0, false, false},
+		// 03:00 TSİ = 00:00 UTC: UTC günü döner ama kullanım günü çoktan dönmüştür.
+		{"utc gun donumu", "2026-10-24T00:00:00Z", 0, false, false},
+		{"iki gun sonra gece yarisi", "2026-10-24T21:10:00Z", 0, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := GateStateAt(u, utc(t, c.now))
+			if s.ReviewAnswers != c.wantAnswers {
+				t.Errorf("ReviewAnswers = %d, beklenen %d", s.ReviewAnswers, c.wantAnswers)
+			}
+			if got := containsKey(s.UnlockedGroups, "A1:3"); got != c.wantToday {
+				t.Errorf("bugün açık = %v, beklenen %v", got, c.wantToday)
+			}
+			if got := containsKey(s.CarriedOverGroups, "A1:3"); got != c.wantCarried {
+				t.Errorf("toleransta = %v, beklenen %v", got, c.wantCarried)
+			}
+			if got := LearnAllowedToday(s, "A1:3"); got != (c.wantToday || c.wantCarried) {
+				t.Errorf("LearnAllowedToday = %v", got)
+			}
+			// Yeni günde tekrar kapısı sıfırdan başlar.
+			if !NeedsResetAt(u.LastResetDate, utc(t, c.now)) {
+				return
+			}
+			if !ReviewAnswerAllowed(s.ReviewAnswers, s.ReviewAdPasses) {
+				t.Error("yeni günün ilk tekrar cevabı reddedildi")
+			}
+			if KeylessUnlockSlots(s) != 0 {
+				t.Error("dünkü açılışlar bugüne hak olarak taşındı")
+			}
+		})
+	}
+}
+
+func TestGateStateAt_YeniKullanici(t *testing.T) {
+	// Hiç sıfırlanmamış satır (last_reset_date = 0): her şey sıfır, tolerans yok.
+	s := GateStateAt(&models.User{UnlockedGroupsToday: "A1:1"}, time.Now())
+	if len(s.UnlockedGroups) != 0 || len(s.CarriedOverGroups) != 0 || s.ReviewAnswers != 0 {
+		t.Errorf("yeni kullanıcı durumu = %+v", s)
+	}
+}
