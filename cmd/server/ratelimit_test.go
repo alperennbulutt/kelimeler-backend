@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -150,5 +151,67 @@ func TestHizSiniri_GecersizTokenIPKovasinaDuser(t *testing.T) {
 	}
 	if kodlar[0] != fiber.StatusOK || kodlar[1] != fiber.StatusOK || kodlar[2] != fiber.StatusTooManyRequests {
 		t.Errorf("geçersiz token'lı istekler: status = %v, beklenen [200 200 429] (tek IP kovası)", kodlar)
+	}
+}
+
+// Eşzamanlı istekler kovayı yarışla aşamaz: aynı kullanıcının aynı anda gelen
+// isteklerinden tam olarak Max kadarı geçer; aynı IP'deki başka bir kullanıcının
+// ve kimliksiz isteklerin kovası bundan etkilenmez.
+func TestHizSiniri_EszamanliIsteklerSiniriAsmaz(t *testing.T) {
+	const max, n = 5, 40
+	app, ts := limiterApp(t, max, nil)
+	kovalar := map[string]string{
+		"ali":       token(t, ts, "ali"),
+		"ayse":      token(t, ts, "ayse"),
+		"kimliksiz": "",
+	}
+
+	type sonuc struct {
+		kova string
+		kod  int
+		err  error
+	}
+	sonuclar := make(chan sonuc, n*len(kovalar))
+	var wg sync.WaitGroup
+	basla := make(chan struct{})
+	for kova, tok := range kovalar {
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func(kova, tok string) {
+				defer wg.Done()
+				<-basla
+				req := httptest.NewRequest(http.MethodGet, "/ok", nil)
+				if tok != "" {
+					req.Header.Set(fiber.HeaderAuthorization, "Bearer "+tok)
+				}
+				resp, err := app.Test(req, -1)
+				if err != nil {
+					sonuclar <- sonuc{kova: kova, err: err}
+					return
+				}
+				resp.Body.Close()
+				sonuclar <- sonuc{kova: kova, kod: resp.StatusCode}
+			}(kova, tok)
+		}
+	}
+	close(basla)
+	wg.Wait()
+	close(sonuclar)
+
+	gecen := map[string]int{}
+	for s := range sonuclar {
+		switch {
+		case s.err != nil:
+			t.Fatalf("%s: istek başarısız: %v", s.kova, s.err)
+		case s.kod == fiber.StatusOK:
+			gecen[s.kova]++
+		case s.kod != fiber.StatusTooManyRequests:
+			t.Errorf("%s: beklenmeyen status %d", s.kova, s.kod)
+		}
+	}
+	for kova := range kovalar {
+		if gecen[kova] != max {
+			t.Errorf("%s: %d eşzamanlı istekten %d tanesi geçti, beklenen tam %d", kova, n, gecen[kova], max)
+		}
 	}
 }
