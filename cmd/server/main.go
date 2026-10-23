@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -222,13 +223,18 @@ func newApp(cfg *config.Config, accessLog io.Writer) *fiber.App {
 	//   sentry  (en iç) panic'i recover'dan önce görür, olayı gönderir ve yeniden
 	//           fırlatır (Repanic). recover'ın dışında olsaydı panic ona hiç
 	//           ulaşmazdı.
-	app.Use(logger.New(logger.Config{Output: accessLog}))
-	app.Use(recover.New(recover.Config{EnableStackTrace: true}))
+	//
+	// İstek kimliği hepsinden önce atanır ki erişim logu, hata işleyici ve
+	// Sentry olayı aynı kimliği taşısın.
+	app.Use(observability.RequestID())
+	app.Use(logger.New(logger.Config{Output: accessLog, Format: accessLogFormat}))
+	app.Use(recover.New(recover.Config{EnableStackTrace: true, StackTraceHandler: stackTrace}))
 	if cfg.SentryDSN != "" {
 		app.Use(sentryfiber.New(sentryfiber.Options{
 			Repanic:         true, // yanıtı recover üretsin
 			WaitForDelivery: false,
 		}))
+		app.Use(observability.TagSentryScope)
 		// Hata yanıta en dışta (logger) çevrilir; Sentry transaction'ı ondan önce
 		// kapanır. Durum kodu burada yazılmazsa hatalı istekler Sentry'de 200 görünür.
 		app.Use(middleware.WriteErrorStatus)
@@ -239,6 +245,18 @@ func newApp(cfg *config.Config, accessLog io.Writer) *fiber.App {
 	}
 
 	return app
+}
+
+// accessLogFormat, Fiber'ın varsayılan erişim logu biçimine istek kimliğini ekler.
+const accessLogFormat = "${time} | ${status} | ${latency} | ${ip} | ${method} | ${path} | ${locals:requestid} | ${error}\n"
+
+// stackTrace, panic'in stack'ini stderr'e yazar (Fiber'ın varsayılanıyla aynı)
+// ve isteği panic'li olarak işaretler: panic Sentry'ye middleware'de zaten
+// gitmiştir, ErrorHandler tekrar göndermez.
+func stackTrace(c *fiber.Ctx, e any) {
+	middleware.MarkPanic(c)
+	_, _ = fmt.Fprintf(os.Stderr, "panic: %v (request_id=%s)\n\n%s\n",
+		e, observability.RequestIDFrom(c), debug.Stack())
 }
 
 // corsConfig, izin verilen origin'leri yapılandırır; ok=false ise CORS

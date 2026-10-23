@@ -65,6 +65,8 @@ Depo özelse Coolify'de kaynak olarak **GitHub App** (Private Repository) kullan
 | `TRUSTED_PROXIES` | **Boş bırak** (varsayılan: özel ağlar + loopback). İstemci IP başlığına yalnızca bu adreslerden gelen bağlantıda güvenilir. Daraltmak istersen Coolify ağının CIDR'ını gir (aşağıya bak) |
 | `PROXY_HEADER` | `X-Forwarded-For` (varsayılan). Cloudflare'e geçilirse aşağıdaki nota bak |
 | `AUTH_RATE_LIMIT` | `10` — Google/Apple giriş uçlarının sıkı hız sınırı, IP başına istek/dk. `/auth/refresh` buna değil `API_RATE_LIMIT`'e tabidir |
+| `SENTRY_DSN` | Sentry projesinin DSN'i. Boşsa hata raporlama kapalıdır |
+| `SENTRY_RELEASE` | Boş bırakılabilir: imaj derlenirken gömülen sürüm (commit) kullanılır. Elle verilirse o geçerlidir |
 | `CORS_ALLOWED_ORIGINS` | **Boş bırak** (API'yi çağıran bir web sitesi yoksa). Gerekirse virgülle ayrılmış origin listesi, ör. `https://panel.example.com` |
 
 > `USAGE_TIMEZONE` yalnızca günlük kullanım sayaçlarını etkiler. Sürecin genel saat dilimini değiştiren `TZ` değişkenini **girme**: giriş serisi ve tekrar listesi sunucunun yerel gününe göre hesaplanır, `TZ` bunların gün sınırını da kaydırır.
@@ -272,4 +274,5 @@ tarayıcıda eski metni görüyorsan `curl` ile ya da gizli pencerede bak.
 - **Güncelleme:** `git push` sonrası Coolify'de **Redeploy**'a bas. Otomatik deploy (webhook) kurulu değildir; kurulana kadar push tek başına canlıyı güncellemez. Her deploy'dan sonra "Yayın sonrası doğrulama" listesini uygula.
 - **Google/Apple Sign-In:** OAuth client'lar Google Cloud / Apple Developer tarafında. Backend yalnızca idToken **doğrular**; production domaini eklemek gerekmez ama Google Cloud Console'da OAuth ayarlarının geçerli olduğundan emin ol.
 - **Güvenlik:** `JWT_SECRET`'i kimseyle paylaşma; sunucu root şifreni deploy sonrası değiştir.
-- **Hata raporlama:** `SENTRY_DSN` girilirse sunucudaki panic'ler Sentry'ye gönderilir; girilmezse raporlama kapalıdır. Her iki durumda da panic istemciye 500 olarak döner, stack konteyner loguna (stderr) ve istek satırı erişim loguna yazılır. Panic olmayan hatalar (ör. veritabanına ulaşılamaması) Sentry'ye olay olarak gitmez; yalnızca örneklenen performans kayıtlarında gerçek durum koduyla görünür ve erişim loguna yazılır.
+- **Hata raporlama:** `SENTRY_DSN` girilirse panic'ler ve 5xx dönen tüm hatalar (ör. veritabanına ulaşılamaması, sorgu zaman aşımı) Sentry'ye gönderilir; girilmezse raporlama kapalıdır. Her iki durumda da istemci genel bir 500 mesajı alır, asıl hata konteyner loguna `hata: <status> <method> <path> request_id=<id>: <hata>` satırıyla, panic stack'i stderr'e yazılır. 4xx yanıtlar Sentry'ye gitmez.
+- **İstek kimliği:** Her yanıtta `X-Request-ID` başlığı döner (istekte geçerli bir değer gelirse korunur, yoksa UUID üretilir). Aynı kimlik erişim logu satırında, `hata:` satırında ve Sentry olayının `request_id` etiketinde bulunur; kullanıcı bir hata bildirdiğinde bu kimlikle üçü eşleştirilebilir.
