@@ -6,9 +6,11 @@ import (
 	"strconv"
 	"time"
 
+	"kelimeler-backend/internal/config"
 	"kelimeler-backend/internal/dto"
 	"kelimeler-backend/internal/middleware"
 	"kelimeler-backend/internal/models"
+	"kelimeler-backend/internal/observability"
 	"kelimeler-backend/internal/services"
 
 	"github.com/gofiber/fiber/v2"
@@ -54,6 +56,10 @@ func (h *Handlers) GetProgressForGroup(c *fiber.Ctx) error {
 // düzeltilir) ve mevcut durum döner. Aksi halde iki cihaz ya da bayat bir
 // öğrenme destesi, ilerlemiş bir kelimeyi sessizce kutu 2'ye geri atardı.
 // Yalnızca kutu 1'deki eski (Firestore'dan gelen) kayıtlar kutu 2'ye alınır.
+//
+// Yeni yazım reklam kapısından geçer (sözleşme K4, bkz. learnGate): grup bugün
+// açılmamışsa GATE_ENFORCEMENT=enforce'ta 403 gate_required döner, log'da
+// ihlal raporlanıp yazılır.
 func (h *Handlers) LearnWord(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	var req dto.LearnRequest
@@ -80,27 +86,37 @@ func (h *Handlers) LearnWord(c *fiber.Ctx) error {
 	}
 	services.LearnNewWord(&wp)
 
-	// Çakışmada yalnızca kutu 1'deki satır güncellenir; diğerlerinde INSERT
-	// hiçbir satırı değiştirmez ve mevcut kayıt okunup döner.
-	res := h.DB.Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "user_id"}, {Name: "word_id"}},
-		DoUpdates: clause.AssignmentColumns([]string{
-			"level", "grp", "box", "last_review_date", "next_review_date",
-			"wrong_count", "learned", "english", "turkish", "updated_at",
-		}),
-		Where: clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: "word_progresses.box <= 1"}}},
-	}).Create(&wp)
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
+	now := time.Now()
+	var resp models.WordProgress
+	err := h.DB.Transaction(func(tx *gorm.DB) error {
+		if err := h.learnGate(c, tx, userID, &word, now); err != nil {
+			return err
+		}
+
+		// Çakışmada yalnızca kutu 1'deki satır güncellenir; diğerlerinde INSERT
+		// hiçbir satırı değiştirmez ve mevcut kayıt okunup döner.
+		res := tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "user_id"}, {Name: "word_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"level", "grp", "box", "last_review_date", "next_review_date",
+				"wrong_count", "learned", "english", "turkish", "updated_at",
+			}),
+			Where: clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: "word_progresses.box <= 1"}}},
+		}).Create(&wp)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected > 0 {
+			resp = wp
+			return nil
+		}
 		// İlerleme (kutu, tarihler, sayaçlar) korunur; yalnızca sözlükten gelen
 		// alanlar sözlük satırıyla eşitlenir. Seviyesi/grubu farklı yazılmış eski
 		// bir kayıt aksi halde ne öğrenme ekranının grup sorgusunda ne de harita
 		// tamamlanmasında görünür: kelime her seferinde yeniden sorulur ve grup
 		// hiçbir zaman tamamlanmış sayılmaz (eski kod bunu kutu 2'ye sıfırlayarak
 		// düzeltiyordu).
-		if err := h.DB.Model(&models.WordProgress{}).
+		if err := tx.Model(&models.WordProgress{}).
 			Where("user_id = ? AND word_id = ? AND (level <> ? OR grp <> ? OR english <> ? OR turkish <> ?)",
 				userID, word.ID, word.Level, word.Grp, word.English, word.Turkish).
 			Updates(map[string]any{
@@ -108,13 +124,150 @@ func (h *Handlers) LearnWord(c *fiber.Ctx) error {
 			}).Error; err != nil {
 			return err
 		}
-		var existing models.WordProgress
-		if err := h.DB.Where("user_id = ? AND word_id = ?", userID, word.ID).First(&existing).Error; err != nil {
-			return err
-		}
-		return c.JSON(&existing)
+		return tx.Where("user_id = ? AND word_id = ?", userID, word.ID).First(&resp).Error
+	})
+	if err != nil {
+		return err
 	}
-	return c.JSON(&wp)
+	return c.JSON(&resp)
+}
+
+// --- Reklam kapısı (sözleşme K4) ---
+
+// gateReporter, kapı ihlallerini loglar ve Sentry'ye bildirir; testler
+// değiştirebilir.
+var gateReporter = services.NewGateReporter()
+
+// Kapı reddinin yanıtları. İstemci kodu görünce kullanım durumunu
+// (/users/me/usage) yeniden çeker ve ilgili kapıyı gösterir; mesaj
+// kullanıcıya gösterilmez.
+var (
+	errGateRequired = apiErr(fiber.StatusForbidden, "gate_required",
+		"bu grup bugün açılmadı; devam etmek için grubu açman gerekiyor")
+	errReviewGateRequired = apiErr(fiber.StatusForbidden, "review_gate_required",
+		"tekrara devam etmek için önce reklam kapısını geçmen gerekiyor")
+)
+
+// gateMode, GATE_ENFORCEMENT kipidir (boşsa varsayılan).
+func (h *Handlers) gateMode() config.GateEnforcement {
+	if h.Cfg == nil {
+		return config.DefaultGateEnforcement
+	}
+	return services.NormalizeGateMode(h.Cfg.GateEnforcement)
+}
+
+// applyGate, bir kapı kararını kipe göre uygular: izin verildiyse ya da kip
+// off ise nil; log kipinde ihlali raporlar ve nil; enforce kipinde raporlar
+// ve rejection'ı döner (çağıranın transaction'ı geri alınır).
+func (h *Handlers) applyGate(c *fiber.Ctx, v services.GateViolation, allowed bool, now time.Time, rejection error) error {
+	mode := h.gateMode()
+	action := services.GateActionFor(mode, allowed)
+	if action == services.GateAllow {
+		return nil
+	}
+	v.Mode = mode
+	v.RequestID = observability.RequestIDFrom(c)
+	gateReporter.Report(v, now)
+	if action == services.GateReject {
+		return rejection
+	}
+	return nil
+}
+
+// learnGate, kelimenin öğrenme yazımının kapısını tx içinde denetler.
+//
+// Kapı yalnızca YENİ yazımda sorulur: kelimenin zaten ilerlemesi varsa
+// (kutu 2+) learn isteği hiçbir şey yazmaz (yinelenen istek, ikinci cihaz,
+// bayat deste) ve denetlenmez. TEST_MODE_UNLOCK_ALL kapıyı kapatır.
+//
+// Kilit sırası Swipe ile aynıdır (önce kelime satırı, sonra kullanıcı satırı);
+// aynı kelimeye eşzamanlı learn ve swipe birbirini kilitlenmede bekletmez.
+// Kullanıcı satırı paylaşımlı kilitlenir: aynı kullanıcının learn'leri
+// birbirini beklemez, ama karar ile yazım arasında "bugün açılan gruplar"
+// değişemez.
+func (h *Handlers) learnGate(c *fiber.Ctx, tx *gorm.DB, userID string, word *models.DictionaryWord, now time.Time) error {
+	if h.gateMode() == config.GateOff || (h.Cfg != nil && h.Cfg.TestModeUnlockAll) {
+		return nil
+	}
+
+	var existing []models.WordProgress
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("user_id = ? AND word_id = ?", userID, word.ID).Limit(1).Find(&existing).Error; err != nil {
+		return err
+	}
+	if len(existing) > 0 && existing[0].Box >= 2 {
+		return nil
+	}
+
+	var user models.User
+	if err := findUser(tx.Clauses(clause.Locking{Strength: "SHARE"}), userID, &user); err != nil {
+		return err
+	}
+	state := services.GateStateAt(&user, now)
+	key, ok := services.UnlockedGroupKey(word.Level, word.Grp)
+	allowed := ok && services.LearnAllowedToday(state, key)
+	if !allowed && ok {
+		// Eski istemci grubu gövdesiz kaydetmiş olabilir: hangi grubu açtığı
+		// bilinmez, yalnızca kaç grup açtığı bilinir.
+		if slots := services.KeylessUnlockSlots(state); slots > 0 {
+			learned, err := groupsLearnedToday(tx, userID, now)
+			if err != nil {
+				return err
+			}
+			allowed = services.KeylessSlotCovers(slots, learned, state.UnlockedGroups, key)
+		}
+	}
+	return h.applyGate(c, services.GateViolation{
+		Kind:   services.GateKindLearn,
+		Reason: services.GateReasonGroupNotUnlocked,
+		UserID: userID,
+		WordID: word.ID,
+		Level:  word.Level,
+		Group:  word.Grp,
+	}, allowed, now, errGateRequired)
+}
+
+// groupsLearnedToday, kullanıcının bugün (kullanım günü) yeni kelime
+// öğrendiği grupların anahtarlarıdır.
+func groupsLearnedToday(tx *gorm.DB, userID string, now time.Time) ([]string, error) {
+	var rows []struct {
+		Level string
+		Grp   int
+	}
+	if err := tx.Model(&models.WordProgress{}).Distinct("level", "grp").
+		Where("user_id = ? AND created_at >= ?", userID, services.UsageDayStart(now)).
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if k, ok := services.UnlockedGroupKey(r.Level, r.Grp); ok {
+			keys = append(keys, k)
+		}
+	}
+	return keys, nil
+}
+
+// reviewGate, bir tekrar cevabının (swipe öncesi kutu 2..5, vadesi gelmiş)
+// kapısını tx içinde denetler. Kullanıcı satırı sayaç artırımına kadar
+// kilitli kalır: eşzamanlı cevaplar sırayla karar verir ve kontrol noktasını
+// birlikte aşamaz.
+func (h *Handlers) reviewGate(c *fiber.Ctx, tx *gorm.DB, userID string, now time.Time) error {
+	if h.gateMode() == config.GateOff {
+		return nil
+	}
+	var user models.User
+	if err := lockUser(tx, userID, &user); err != nil {
+		return err
+	}
+	state := services.GateStateAt(&user, now)
+	return h.applyGate(c, services.GateViolation{
+		Kind:           services.GateKindReview,
+		Reason:         services.GateReasonReviewCheckpoint,
+		UserID:         userID,
+		ReviewAnswers:  state.ReviewAnswers,
+		ReviewAdPasses: state.ReviewAdPasses,
+	}, services.ReviewAnswerAllowed(state.ReviewAnswers, state.ReviewAdPasses), now, errReviewGateRequired)
 }
 
 // Swipe: POST /progress/swipe {wordId, direction} — box matematiği sunucuda.
@@ -126,6 +279,11 @@ func (h *Handlers) LearnWord(c *fiber.Ctx) error {
 // yazdığı kutuyu görür. Vadesi gelmemiş kelimeye (bkz. services.AcceptsSwipe)
 // gelen swipe hiçbir şeyi değiştirmez, sayılmaz ve mevcut durumu döner; böylece
 // yinelenen ya da eşzamanlı cevap kelimeyi iki kez ilerletmez.
+//
+// Sayılacak tekrar cevabı reklam kapısından geçer (sözleşme K4, bkz.
+// reviewGate): günün cevapları geçilmemiş bir kontrol noktasına (30/60/90)
+// dayanmışsa enforce'ta 403 review_gate_required döner ve hiçbir şey yazılmaz.
+// No-op swipe kapıya sorulmaz.
 func (h *Handlers) Swipe(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	var req dto.SwipeRequest
@@ -163,13 +321,20 @@ func (h *Handlers) Swipe(c *fiber.Ctx) error {
 
 		// Cevabın tekrar sayılıp sayılmayacağı swipe ÖNCESİ kutuya bağlıdır;
 		// mutasyon kutuyu değiştirir (öğrenme ekranının 1 → 2 swipe'ı sonradan
-		// bakılırsa tekrar cevabı gibi görünür).
+		// bakılırsa tekrar cevabı gibi görünür). Öğrenme swipe'ı (kutu 1)
+		// tekrar kapısına hiç girmez.
 		preBox := wp.Box
+		countsAsReview := services.CountsAsReviewAnswer(preBox)
+		if countsAsReview {
+			if err := h.reviewGate(c, tx, userID, now); err != nil {
+				return err
+			}
+		}
 		apply(&wp)
 		if err := tx.Save(&wp).Error; err != nil {
 			return err
 		}
-		if !services.CountsAsReviewAnswer(preBox) {
+		if !countsAsReview {
 			return nil
 		}
 		if err := resetUsageIfStale(tx, userID, now); err != nil {
