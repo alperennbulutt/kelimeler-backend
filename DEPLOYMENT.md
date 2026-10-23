@@ -327,7 +327,7 @@ Kaynak: `git diff 6b85321..HEAD -- internal/models`. Yalnızca `refresh_tokens` 
 | `refresh_tokens` | `replaced_by_id bigint NULL` kolonu | Rotasyonla yerine geçen satır; yanıtı kaybolan yenilemenin tolerans süresinde yeniden denenebilmesi için |
 
 - Kolonlar boş bırakılabilir (nullable) ve varsayılansızdır: ekleme anlıktır, veri taşıması yoktur. Index `CONCURRENTLY` olmadan kurulur ve kurulurken `refresh_tokens`'a yazmayı kısa süre bekletir; tablo küçük olduğundan saniyeden kısa sürer.
-- Migration tek bağlantıda ve `statement_timeout` kapalıyken çalışır. Başarısız olursa yeni container hiç ayağa kalkmaz, Coolify eskisini çalıştırmaya devam eder.
+- Migration tek bağlantıda, `statement_timeout` kapalıyken ve bağlantı ömürlü bir advisory lock altında çalışır: aynı anda açılan birden çok replika (ya da CI'da paralel test paketleri) sırayla migrate eder, biri "already exists" ile düşmez. Başarısız olursa yeni container hiç ayağa kalkmaz, Coolify eskisini çalıştırmaya devam eder.
 - Yeni sunucu saatlik bir **refresh token temizliği** çalıştırır: süresi ya da iptali 7 günden eski satırlar silinir. İlk tur açılışta çalışır ve birikmiş eski satırları bir kerede siler (logda `refresh token temizliği: N satır silindi`). Birden çok replika aynı anda çalıştırırsa advisory lock sayesinde yalnızca biri siler. Kapanmada tur kesilir, veritabanı havuzundan önce durdurulur.
   - **Deploy öncesi say:** Temizlik bugüne kadar hiç çalışmadı ve ilk tur tek bir `DELETE` ile çalışır; bu sorgu da `DB_STATEMENT_TIMEOUT`'a (varsayılan `10s`) ve tur başına 1 dakikalık sınıra tabidir. Silinecek satır sayısını önceden gör:
     `SELECT count(*) FROM refresh_tokens WHERE expires_at < now() - interval '7 days' OR revoked_at < now() - interval '7 days';`

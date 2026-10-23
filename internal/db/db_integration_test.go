@@ -278,3 +278,113 @@ func TestMigrateVeSeed_ZamanAsimindanEtkilenmez(t *testing.T) {
 		t.Errorf("migrate sonrası statement_timeout = %q, beklenen 100ms", got)
 	}
 }
+
+func TestMigrate_AdvisoryLockAltindaCalisir(t *testing.T) {
+	// Başka bir oturum migrate kilidini tutarken Migrate bekler; kilit
+	// bırakılınca tamamlanır.
+	dsn := testDSN(t)
+	tutan, err := Connect(dsn)
+	if err != nil {
+		t.Fatalf("veritabanına bağlanılamadı: %v", err)
+	}
+	closeOnCleanup(t, tutan)
+	gdb, err := Connect(dsn)
+	if err != nil {
+		t.Fatalf("veritabanına bağlanılamadı: %v", err)
+	}
+	closeOnCleanup(t, gdb)
+
+	err = tutan.Connection(func(conn *gorm.DB) error {
+		if err := conn.Exec(`SELECT pg_advisory_lock(?)`, migrateLockKey).Error; err != nil {
+			return err
+		}
+		done := make(chan error, 1)
+		go func() { done <- Migrate(gdb) }()
+
+		var bekleyen int64
+		for son := time.Now().Add(5 * time.Second); bekleyen < 1 && time.Now().Before(son); {
+			select {
+			case err := <-done:
+				conn.Exec(`SELECT pg_advisory_unlock(?)`, migrateLockKey)
+				return fmt.Errorf("Migrate kilidi beklemeden bitti (hata: %v)", err)
+			case <-time.After(20 * time.Millisecond):
+			}
+			conn.Raw(`SELECT count(*) FROM pg_stat_activity
+				WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory'`).Scan(&bekleyen)
+		}
+		if err := conn.Exec(`SELECT pg_advisory_unlock(?)`, migrateLockKey).Error; err != nil {
+			return err
+		}
+		if bekleyen < 1 {
+			return errors.New("Migrate advisory lock'ta beklemeye geçmedi")
+		}
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(30 * time.Second):
+			return errors.New("kilit bırakıldıktan sonra Migrate bitmedi")
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Kilit Migrate'ten sonra bırakılmış olmalı: başka oturum alabilir.
+	// Paralel koşan diğer paketlerin Migrate'i kilidi kısa süre tutabilir;
+	// Migrate'in (havuza dönen) bağlantısı tutsaydı hiç alınamazdı.
+	var alindi bool
+	for son := time.Now().Add(10 * time.Second); !alindi && time.Now().Before(son); {
+		if err := tutan.Connection(func(conn *gorm.DB) error {
+			if err := conn.Raw(`SELECT pg_try_advisory_lock(?)`, migrateLockKey).Scan(&alindi).Error; err != nil {
+				return err
+			}
+			if alindi {
+				return conn.Exec(`SELECT pg_advisory_unlock(?)`, migrateLockKey).Error
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("kilit denenemedi: %v", err)
+		}
+		if !alindi {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if !alindi {
+		t.Error("Migrate kilidi bırakmadı")
+	}
+}
+
+func TestMigrate_EszamanliBosSemadaHepsiBasarili(t *testing.T) {
+	// CI'da paralel paketler ve aynı anda açılan replikalar: boş bir şemaya
+	// aynı anda gelen Migrate'lerin hiçbiri "already exists" ile düşmez.
+	dsn := testDSN(t)
+	admin, err := Connect(dsn)
+	if err != nil {
+		t.Fatalf("veritabanına bağlanılamadı: %v", err)
+	}
+	closeOnCleanup(t, admin)
+	if err := Migrate(admin); err != nil {
+		t.Fatalf("migrate başarısız: %v", err)
+	}
+	schema := fmt.Sprintf("dbtest_mig_%d", time.Now().UnixNano())
+	if err := admin.Exec("CREATE SCHEMA " + schema).Error; err != nil {
+		t.Fatalf("şema oluşturulamadı: %v", err)
+	}
+	t.Cleanup(func() { admin.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE") })
+
+	const n = 4
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		gdb, err := Connect(withParam(t, dsn, "search_path", schema+",public"))
+		if err != nil {
+			t.Fatalf("geçici şemaya bağlanılamadı: %v", err)
+		}
+		closeOnCleanup(t, gdb)
+		go func() { errs <- Migrate(gdb) }()
+	}
+	for i := 0; i < n; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("eşzamanlı Migrate başarısız: %v", err)
+		}
+	}
+}

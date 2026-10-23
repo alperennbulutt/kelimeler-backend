@@ -103,11 +103,23 @@ func withStatementTimeout(dsn string, d time.Duration) (string, error) {
 	return strings.TrimSpace(dsn) + " statement_timeout=" + value, nil
 }
 
+// migrateLockKey, aynı veritabanında Migrate'lerin aynı anda çalışmasını
+// engelleyen advisory lock anahtarıdır (keyfi ama sabit; refresh token
+// temizliğininkinden farklı).
+const migrateLockKey int64 = 0x6b656c2d6d6967 // "kel-mig"
+
 // Migrate, gerekli extension'ları kurar ve tüm modelleri AutoMigrate eder.
 //
 // Tek bir bağlantıda ve statement_timeout kapalıyken çalışır: büyük bir tabloda
 // index kurmak ya da eski container'ın kilidini beklemek sorgu zaman aşımından
 // uzun sürebilir ve yarım kalan migration açılışı engeller.
+//
+// Bağlantı ömürlü bir advisory lock (pg_advisory_lock) altında çalışır: aynı
+// anda açılan replikalar ya da CI'da paralel koşan test paketleri sırayla
+// migrate eder. AutoMigrate önce tabloya bakıp sonra IF NOT EXISTS'siz CREATE
+// TABLE yaptığından, eşzamanlı iki migrate'ten biri "already exists" ile
+// düşebilirdi. Kilit bekleme de zaman aşımına tabi değildir; bağlantı koparsa
+// PostgreSQL kilidi kendiliğinden bırakır.
 func Migrate(gdb *gorm.DB) error {
 	return gdb.Connection(func(conn *gorm.DB) error {
 		if err := conn.Exec(`SET statement_timeout = 0`).Error; err != nil {
@@ -115,6 +127,10 @@ func Migrate(gdb *gorm.DB) error {
 		}
 		// Bağlantı havuza açılıştaki ayarıyla dönsün.
 		defer conn.Exec(`RESET statement_timeout`)
+		if err := conn.Exec(`SELECT pg_advisory_lock(?)`, migrateLockKey).Error; err != nil {
+			return err
+		}
+		defer conn.Exec(`SELECT pg_advisory_unlock(?)`, migrateLockKey)
 		return migrate(conn)
 	})
 }
