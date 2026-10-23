@@ -22,6 +22,11 @@ const (
 	// GateReasonGroupNotUnlocked: kelimenin grubu bugün açılmamış (ne ücretsiz
 	// hak ne reklam kaydı var).
 	GateReasonGroupNotUnlocked = "group_not_unlocked"
+	// GateReasonRolloverExpired: grup, satırın son yazıldığı (geçmiş) günde
+	// açılmıştı ve gece yarısı toleransı (GateRolloverGrace) bitti. Öğrenme
+	// sayfası gece boyunca açık kalan dürüst istemci de bunu üretir; enforce
+	// kararında değiştirilmiş istemci sinyali sayılmaz.
+	GateReasonRolloverExpired = "rollover_expired"
 	// GateReasonMapLocked: grup haritada kilitli (sıralı kilit ya da önceki
 	// seviye bitmemiş).
 	GateReasonMapLocked = "map_locked"
@@ -103,6 +108,10 @@ type DailyGateState struct {
 	// Dün açılan gruplar; yalnızca satır bugün henüz sıfırlanmamışsa, en son
 	// dün yazılmışsa ve now gün başından GateRolloverGrace içindeyse dolu.
 	CarriedOverGroups []string
+	// Satır bugün henüz sıfırlanmamışken geçmiş bir günde açılmış ama
+	// toleransa girmeyen gruplar. İzin vermez; yalnızca ihlal nedenini
+	// (GateReasonRolloverExpired) ayırır.
+	ExpiredGroups []string
 }
 
 // GateStateAt, u'nun now'daki günlük kapı durumunu döndürür.
@@ -118,10 +127,23 @@ func GateStateAt(u *models.User, now time.Time) DailyGateState {
 	s := DailyGateState{UnlockedGroups: []string{}}
 	dayStart := UsageDayStart(now)
 	yesterdayStart := dayStart.AddDate(0, 0, -1).UnixMilli()
-	if u.LastResetDate >= yesterdayStart && now.Sub(dayStart) < GateRolloverGrace {
+	switch {
+	case u.LastResetDate >= yesterdayStart && now.Sub(dayStart) < GateRolloverGrace:
 		s.CarriedOverGroups = SplitUnlockedGroups(u.UnlockedGroupsToday)
+	case u.LastResetDate > 0:
+		s.ExpiredGroups = SplitUnlockedGroups(u.UnlockedGroupsToday)
 	}
 	return s
+}
+
+// LearnDenialReason, LearnAllowedToday'in reddettiği key grubu için ihlal
+// nedenidir: grup satırın son (geçmiş) gününde açılmış ve tolerans bitmişse
+// GateReasonRolloverExpired, aksi halde GateReasonGroupNotUnlocked.
+func LearnDenialReason(s DailyGateState, key string) string {
+	if containsKey(s.ExpiredGroups, key) {
+		return GateReasonRolloverExpired
+	}
+	return GateReasonGroupNotUnlocked
 }
 
 func containsKey(keys []string, key string) bool {

@@ -329,7 +329,7 @@ func corsConfig(cfg *config.Config) (corsCfg cors.Config, ok bool) {
 	if len(cfg.CORSAllowedOrigins) > 0 {
 		return cors.Config{
 			AllowOrigins: strings.Join(cfg.CORSAllowedOrigins, ","),
-			AllowHeaders: "Origin, Content-Type, Accept, Authorization",
+			AllowHeaders: "Origin, Content-Type, Accept, Authorization, " + observability.AppVersionHeader,
 			AllowMethods: "GET, POST, PUT, PATCH, DELETE, OPTIONS",
 		}, true
 	}

@@ -2,6 +2,7 @@ package services
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +16,7 @@ type kayitliRaporlayici struct {
 	mu       sync.Mutex
 	lines    []string
 	captures []string
+	tags     []map[string]string
 }
 
 func (k *kayitliRaporlayici) reporter() *GateReporter {
@@ -24,10 +26,11 @@ func (k *kayitliRaporlayici) reporter() *GateReporter {
 			defer k.mu.Unlock()
 			k.lines = append(k.lines, fmt.Sprintf(format, args...))
 		},
-		func(msg string) {
+		func(msg string, tags map[string]string) {
 			k.mu.Lock()
 			defer k.mu.Unlock()
 			k.captures = append(k.captures, msg)
+			k.tags = append(k.tags, tags)
 		},
 	)
 }
@@ -56,9 +59,9 @@ func TestGateReporter_SatirBicimi(t *testing.T) {
 	}, now)
 
 	want := []string{
-		`gate_violation kind=learn reason=group_not_unlocked mode=log user=u1 request_id=req-1 word="A1_2_5" group=A1:2 count=1`,
-		`gate_violation kind=review reason=review_checkpoint mode=enforce user=u1 request_id=req-2 answers_today=30 passes=0 count=1`,
-		`gate_violation kind=learn reason=free_group_reused mode=enforce user=u2 request_id=req-3 group=A1:3 count=1`,
+		`gate_violation kind=learn reason=group_not_unlocked mode=log user=u1 request_id=req-1 app_version=eski word="A1_2_5" group=A1:2 count=1`,
+		`gate_violation kind=review reason=review_checkpoint mode=enforce user=u1 request_id=req-2 app_version=eski answers_today=30 passes=0 count=1`,
+		`gate_violation kind=learn reason=free_group_reused mode=enforce user=u2 request_id=req-3 app_version=eski group=A1:3 count=1`,
 	}
 	if strings.Join(k.lines, "\n") != strings.Join(want, "\n") {
 		t.Errorf("log satırları:\n%s\nbeklenen:\n%s", strings.Join(k.lines, "\n"), strings.Join(want, "\n"))
@@ -66,6 +69,29 @@ func TestGateReporter_SatirBicimi(t *testing.T) {
 	// Enforce kipinde ret beklenen davranıştır; Sentry'ye yalnızca log kipi gider.
 	if len(k.captures) != 1 || k.captures[0] != "reklam kapısı ihlali (kip=log): learn/group_not_unlocked" {
 		t.Errorf("Sentry mesajları = %q", k.captures)
+	}
+	// Başlıksız (yayındaki eski) istemci "eski" etiketini alır.
+	if len(k.tags) != 1 || k.tags[0]["app_version"] != "eski" {
+		t.Errorf("Sentry etiketleri = %v, app_version=eski bekleniyordu", k.tags)
+	}
+}
+
+func TestGateReporter_IstemciSurumuLogVeSentryEtiketinde(t *testing.T) {
+	k := &kayitliRaporlayici{}
+	r := k.reporter()
+	v := learnViolation("u1", config.GateLog)
+	v.Reason, v.AppVersion = GateReasonRolloverExpired, "1.0.3+57"
+	r.Report(v, time.Now())
+
+	want := `gate_violation kind=learn reason=rollover_expired mode=log user=u1 request_id=req-1 app_version=1.0.3+57 word="A1_2_5" group=A1:2 count=1`
+	if len(k.lines) != 1 || k.lines[0] != want {
+		t.Errorf("log satırı = %q\nbeklenen %q", k.lines, want)
+	}
+	wantTags := map[string]string{
+		"gate_kind": "learn", "gate_reason": "rollover_expired", "gate_mode": "log", "app_version": "1.0.3+57",
+	}
+	if len(k.tags) != 1 || !reflect.DeepEqual(k.tags[0], wantTags) {
+		t.Errorf("Sentry etiketleri = %v, beklenen %v", k.tags, wantTags)
 	}
 }
 

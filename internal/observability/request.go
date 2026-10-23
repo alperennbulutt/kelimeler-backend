@@ -51,6 +51,42 @@ func validRequestID(id string) bool {
 	return true
 }
 
+// AppVersionHeader, mobil istemcinin sürümünü taşıyan isteğe bağlı başlıktır
+// (ör. "1.0.3+57"). Yayındaki eski istemci göndermez.
+const AppVersionHeader = "X-App-Version"
+
+// Başlığı olmayan ya da geçersiz değer gönderen isteklerin sürüm etiketi.
+const (
+	AppVersionLegacy  = "eski"
+	AppVersionInvalid = "gecersiz"
+)
+
+const maxAppVersionLen = 32
+
+// AppVersionFrom, isteğin istemci sürümünü döner: başlık yoksa
+// AppVersionLegacy, kısa ve güvenli karakterlerden oluşmuyorsa
+// AppVersionInvalid. Değer log satırına ve Sentry etiketine yazıldığı için
+// boşluk, satır sonu ya da "=" taşıyamaz.
+func AppVersionFrom(c *fiber.Ctx) string {
+	v := c.Get(AppVersionHeader)
+	if v == "" {
+		return AppVersionLegacy
+	}
+	if len(v) > maxAppVersionLen {
+		return AppVersionInvalid
+	}
+	for i := 0; i < len(v); i++ {
+		ch := v[i]
+		switch {
+		case ch >= 'a' && ch <= 'z', ch >= 'A' && ch <= 'Z', ch >= '0' && ch <= '9':
+		case ch == '.', ch == '+', ch == '-', ch == '_':
+		default:
+			return AppVersionInvalid
+		}
+	}
+	return v
+}
+
 // RequestIDFrom, RequestID middleware'inin atadığı kimliği döner; yoksa "".
 func RequestIDFrom(c *fiber.Ctx) string {
 	id, _ := c.Locals(RequestIDLocal).(string)

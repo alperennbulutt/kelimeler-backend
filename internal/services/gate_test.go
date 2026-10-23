@@ -306,3 +306,41 @@ func TestGateStateAt_YeniKullanici(t *testing.T) {
 		t.Errorf("yeni kullanıcı durumu = %+v", s)
 	}
 }
+
+func TestLearnDenialReason_ToleransBitinceRolloverExpired(t *testing.T) {
+	kullanimKonumu(t, "Europe/Istanbul")
+	// 23 Ekim 23:30 TSİ'de A1:3 açılmış, satır o günden beri yazılmamış.
+	u := gateUser(utc(t, "2026-10-23T20:30:00Z"), "A1:3", 1, 0, 0, 0)
+
+	cases := []struct {
+		name string
+		now  string
+		key  string
+		want string
+	}{
+		{"ayni gun acilmamis grup", "2026-10-23T20:45:00Z", "A1:4", GateReasonGroupNotUnlocked},
+		{"tolerans bitti", "2026-10-23T22:00:00Z", "A1:3", GateReasonRolloverExpired},
+		{"iki gun sonra", "2026-10-25T09:00:00Z", "A1:3", GateReasonRolloverExpired},
+		{"o gun acilmamis grup", "2026-10-23T22:00:00Z", "A1:4", GateReasonGroupNotUnlocked},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := GateStateAt(u, utc(t, c.now))
+			if LearnAllowedToday(s, c.key) {
+				t.Fatalf("%s izinli, ret bekleniyordu", c.key)
+			}
+			if got := LearnDenialReason(s, c.key); got != c.want {
+				t.Errorf("neden = %s, beklenen %s", got, c.want)
+			}
+		})
+	}
+
+	// Toleranstaki grup izinlidir; hiç sıfırlanmamış satırın kümesi geçmiş
+	// bir güne ait sayılmaz.
+	if s := GateStateAt(u, utc(t, "2026-10-23T21:30:00Z")); !LearnAllowedToday(s, "A1:3") {
+		t.Error("toleranstaki grup reddedildi")
+	}
+	if s := GateStateAt(&models.User{UnlockedGroupsToday: "A1:3"}, time.Now()); LearnDenialReason(s, "A1:3") != GateReasonGroupNotUnlocked {
+		t.Error("yeni kullanıcının kümesi rollover_expired sayıldı")
+	}
+}

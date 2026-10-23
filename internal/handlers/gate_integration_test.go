@@ -28,6 +28,7 @@ type kapiKaydi struct {
 	mu       sync.Mutex
 	lines    []string
 	captures []string
+	tags     []map[string]string
 }
 
 // kapiRaporunuYakala, paket düzeyindeki gateReporter'ı test boyunca
@@ -43,10 +44,11 @@ func kapiRaporunuYakala(t *testing.T) *kapiKaydi {
 			defer k.mu.Unlock()
 			k.lines = append(k.lines, fmt.Sprintf(format, args...))
 		},
-		func(msg string) {
+		func(msg string, tags map[string]string) {
 			k.mu.Lock()
 			defer k.mu.Unlock()
 			k.captures = append(k.captures, msg)
+			k.tags = append(k.tags, tags)
 		},
 	)
 	t.Cleanup(func() { gateReporter = onceki })
@@ -651,6 +653,70 @@ func TestReviewGate_EszamanliCevaplarKontrolNoktasiniAsamaz(t *testing.T) {
 				t.Errorf("ihlal satırı = %d, beklenen %d", got, c.n-c.wantOK)
 			}
 		})
+	}
+}
+
+// --- İhlal satırında istemci sürümü ve gece yarısı nedeni ---
+
+func TestLearnGate_IhlalIstemciSurumunuTasir(t *testing.T) {
+	cases := []struct {
+		name   string
+		header string
+		want   string
+	}{
+		{"baslik yok", "", "eski"},
+		{"surum", "1.0.3+57", "1.0.3+57"},
+		{"gecersiz", "1.0 x=y", "gecersiz"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			kayit := kapiRaporunuYakala(t)
+			gdb, _, app := newGateTest(t, config.GateLog)
+			w := testDictWord(t, gdb, "itest_gate_version", "A1", 1, 1)
+
+			req := learnRequest(fiber.Map{"wordId": w.ID})
+			if c.header != "" {
+				req.Header.Set("X-App-Version", c.header)
+			}
+			if status, body := send(t, app, req); status != fiber.StatusOK {
+				t.Fatalf("status = %d (%v)", status, body)
+			}
+			lines := kayit.ihlaller()
+			if len(lines) != 1 || !strings.Contains(lines[0], " app_version="+c.want+" ") {
+				t.Errorf("ihlal satırı = %v, app_version=%s bekleniyordu", lines, c.want)
+			}
+			kayit.mu.Lock()
+			defer kayit.mu.Unlock()
+			if len(kayit.tags) != 1 || kayit.tags[0]["app_version"] != c.want {
+				t.Errorf("Sentry etiketleri = %v, app_version=%s bekleniyordu", kayit.tags, c.want)
+			}
+		})
+	}
+}
+
+func TestLearnGate_ToleransiGecenGeceOturumuAyriNeden(t *testing.T) {
+	// Satır en son iki gün önce yazılmış ve grup o gün açılmış: öğrenme sayfası
+	// gece boyunca açık kalmış dürüst istemci. Ret aynıdır, neden ayrıdır.
+	kayit := kapiRaporunuYakala(t)
+	gdb, u, app := newGateTest(t, config.GateEnforce)
+	w1 := testDictWord(t, gdb, "itest_gate_rollover_1", "A1", 1, 1)
+	w2 := testDictWord(t, gdb, "itest_gate_rollover_2", "A1", 2, 1)
+	setUsage(t, gdb, u.ID, map[string]any{
+		"groups_started_today_count": 1, "unlocked_groups_today": "A1:1",
+		"last_reset_date": services.UsageDayStart(time.Now()).AddDate(0, 0, -2).Add(23 * time.Hour).UnixMilli(),
+	})
+	setProgress(t, gdb, u.ID, testDictWord(t, gdb, "itest_gate_rollover_0", "A1", 1, 2), 2, nil)
+
+	if status, body := send(t, app, learnRequest(fiber.Map{"wordId": w1.ID})); status != fiber.StatusForbidden || gateCode(body) != "gate_required" {
+		t.Fatalf("status = %d (%v), beklenen 403 gate_required", status, body)
+	}
+	// O gün açılmamış bir grup yine group_not_unlocked'tır.
+	if status, body := send(t, app, learnRequest(fiber.Map{"wordId": w2.ID})); status != fiber.StatusForbidden {
+		t.Fatalf("status = %d (%v), beklenen 403", status, body)
+	}
+	lines := kayit.ihlaller()
+	if len(lines) != 2 || !strings.Contains(lines[0], "reason=rollover_expired") || !strings.Contains(lines[1], "reason=group_not_unlocked") {
+		t.Errorf("ihlal satırları = %v, beklenen rollover_expired sonra group_not_unlocked", lines)
 	}
 }
 

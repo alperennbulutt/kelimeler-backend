@@ -18,6 +18,8 @@ type GateViolation struct {
 	Mode      config.GateEnforcement
 	UserID    string
 	RequestID string
+	// İstemci sürümü (X-App-Version); boşsa observability.AppVersionLegacy.
+	AppVersion string
 
 	// learn
 	WordID string
@@ -43,7 +45,8 @@ const (
 // Sentry'ye kullanıcı/tür/gün başına yalnızca İLK ihlal gider: değiştirilmiş
 // bir istemci dakikada yüzlerce istek atabilir ve kotayı tüketirdi. Sentry
 // mesajı kullanıcıyı içermez, tür ve nedene göre gruplanır (olay sayısı
-// "kaç kullanıcı etkilenirdi" sorusunun cevabıdır); kullanıcı ve istek kimliği
+// "kaç kullanıcı etkilenirdi" sorusunun cevabıdır); olay tür, neden, kip ve
+// istemci sürümü (app_version) etiketlerini taşır. Kullanıcı ve istek kimliği
 // log satırındadır.
 //
 // Sayaçlar süreç belleğindedir ve gün dönünce sıfırlanır; birden çok replika
@@ -54,22 +57,25 @@ type GateReporter struct {
 	counts map[string]int
 
 	logf    func(format string, args ...any)
-	capture func(msg string)
+	capture func(msg string, tags map[string]string)
 }
 
-// NewGateReporter, standart log ve observability.CaptureWarning kullanan bir
-// raporlayıcı kurar.
+// NewGateReporter, standart log ve observability.CaptureWarningWithTags
+// kullanan bir raporlayıcı kurar.
 func NewGateReporter() *GateReporter {
-	return NewGateReporterWith(log.Printf, observability.CaptureWarning)
+	return NewGateReporterWith(log.Printf, observability.CaptureWarningWithTags)
 }
 
 // NewGateReporterWith, çıktıları verilen fonksiyonlara yönlendirir (testler).
-func NewGateReporterWith(logf func(format string, args ...any), capture func(msg string)) *GateReporter {
+func NewGateReporterWith(logf func(format string, args ...any), capture func(msg string, tags map[string]string)) *GateReporter {
 	return &GateReporter{counts: map[string]int{}, logf: logf, capture: capture}
 }
 
 // Report, ihlali kaydeder. now'ın kullanım günü sınırlamanın günüdür.
 func (r *GateReporter) Report(v GateViolation, now time.Time) {
+	if v.AppVersion == "" {
+		v.AppVersion = observability.AppVersionLegacy
+	}
 	day := UsageDate(now)
 	key := v.UserID + "|" + v.Kind
 
@@ -86,7 +92,12 @@ func (r *GateReporter) Report(v GateViolation, now time.Time) {
 		r.logf("%s", formatGateViolation(v, n))
 	}
 	if n == 1 && v.Mode != config.GateEnforce {
-		r.capture(fmt.Sprintf("reklam kapısı ihlali (kip=%s): %s/%s", v.Mode, v.Kind, v.Reason))
+		r.capture(fmt.Sprintf("reklam kapısı ihlali (kip=%s): %s/%s", v.Mode, v.Kind, v.Reason), map[string]string{
+			"gate_kind":   v.Kind,
+			"gate_reason": v.Reason,
+			"gate_mode":   string(v.Mode),
+			"app_version": v.AppVersion,
+		})
 	}
 }
 
@@ -97,7 +108,8 @@ func formatGateViolation(v GateViolation, count int) string {
 		" reason=" + v.Reason +
 		" mode=" + string(v.Mode) +
 		" user=" + v.UserID +
-		" request_id=" + v.RequestID
+		" request_id=" + v.RequestID +
+		" app_version=" + v.AppVersion
 	switch v.Kind {
 	case GateKindLearn:
 		// Grup açılışı ihlalinde (free_group_reused) kelime yoktur.

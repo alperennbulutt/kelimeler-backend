@@ -171,6 +171,7 @@ func (h *Handlers) applyGate(c *fiber.Ctx, v services.GateViolation, allowed boo
 	}
 	v.Mode = mode
 	v.RequestID = observability.RequestIDFrom(c)
+	v.AppVersion = observability.AppVersionFrom(c)
 	gateReporter.Report(v, now)
 	if action == services.GateReject {
 		return rejection
@@ -255,7 +256,7 @@ func (h *Handlers) learnGate(c *fiber.Ctx, tx *gorm.DB, userID string, word *mod
 		}
 	}
 	// Bir istek tek ihlal satırı üretir; bugün açılmamış grup önce gelir.
-	reason := services.GateReasonGroupNotUnlocked
+	reason := services.LearnDenialReason(state, key)
 	if allowed && mapLocked {
 		allowed, reason = false, services.GateReasonMapLocked
 	}
