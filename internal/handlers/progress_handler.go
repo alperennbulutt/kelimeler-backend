@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -38,7 +39,16 @@ func (h *Handlers) GetProgressForGroup(c *fiber.Ctx) error {
 	return c.JSON(list)
 }
 
-// LearnWord: POST /progress/learn — yeni kelimeyi kutu 2'ye alır (idempotent upsert).
+// LearnWord: POST /progress/learn — yeni kelimeyi kutu 2'ye alır.
+//
+// Kelime sözlükte olmalıdır; seviye, grup ve metinler istemciden değil sözlük
+// satırından alınır (gövdedeki level/group/english/turkish yok sayılır; mevcut
+// istemci onları göndermeye devam edebilir).
+//
+// İdempotenttir: kelimenin zaten ilerlemesi varsa (kutu 2 ve üstü) kayıt
+// değiştirilmez ve mevcut durum döner. Aksi halde iki cihaz ya da bayat bir
+// öğrenme destesi, ilerlemiş bir kelimeyi sessizce kutu 2'ye geri atardı.
+// Yalnızca kutu 1'deki eski (Firestore'dan gelen) kayıtlar kutu 2'ye alınır.
 func (h *Handlers) LearnWord(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	var req dto.LearnRequest
@@ -46,25 +56,44 @@ func (h *Handlers) LearnWord(c *fiber.Ctx) error {
 		return apiErr(fiber.StatusBadRequest, "invalid_request", "wordId gerekli")
 	}
 
+	var word models.DictionaryWord
+	if err := h.DB.First(&word, "id = ?", req.WordID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return apiErr(fiber.StatusNotFound, "unknown_word", "kelime sözlükte bulunamadı")
+		}
+		return err
+	}
+
 	wp := models.WordProgress{
 		UserID:  userID,
-		WordID:  req.WordID,
-		Level:   req.Level,
-		Grp:     req.Group,
-		English: req.English,
-		Turkish: req.Turkish,
+		WordID:  word.ID,
+		Level:   word.Level,
+		Grp:     word.Grp,
+		English: word.English,
+		Turkish: word.Turkish,
 		Box:     1,
 	}
 	services.LearnNewWord(&wp)
 
-	if err := h.DB.Clauses(clause.OnConflict{
+	// Çakışmada yalnızca kutu 1'deki satır güncellenir; diğerlerinde INSERT
+	// hiçbir satırı değiştirmez ve mevcut kayıt okunup döner.
+	res := h.DB.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "user_id"}, {Name: "word_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"level", "grp", "box", "last_review_date", "next_review_date",
 			"wrong_count", "learned", "english", "turkish", "updated_at",
 		}),
-	}).Create(&wp).Error; err != nil {
-		return err
+		Where: clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: "word_progresses.box <= 1"}}},
+	}).Create(&wp)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		var existing models.WordProgress
+		if err := h.DB.Where("user_id = ? AND word_id = ?", userID, word.ID).First(&existing).Error; err != nil {
+			return err
+		}
+		return c.JSON(&existing)
 	}
 	return c.JSON(&wp)
 }
