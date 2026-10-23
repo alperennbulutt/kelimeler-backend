@@ -183,19 +183,64 @@ func syncTotalLearned(tx *gorm.DB, userID string) error {
 	).Error
 }
 
-// ReviewWordsForBox: GET /progress/review/box/:box?date=YYYY-MM-DD
-// nextReviewDate <= bugün filtresi sunucuda (Postgres index'i kullanır).
+// maxReviewListLimit, tekrar listesinde ?limit ile istenebilecek en çok kelime.
+const maxReviewListLimit = 200
+
+// reviewBox, kullanıcının bir kutusundaki kelime ilerlemeleridir.
+func reviewBox(userID string, box int) func(*gorm.DB) *gorm.DB {
+	return func(db *gorm.DB) *gorm.DB {
+		return db.Model(&models.WordProgress{}).Where("user_id = ? AND box = ?", userID, box)
+	}
+}
+
+// dueForReview, "bugün tekrar edilecek" kümesinin tek tanımıdır: sonraki
+// tekrar tarihi yok ya da bugünün bitişinden (end, hariç) önce. Liste ucu ve
+// /counts'taki today aynı kümeyi bu koşulla sayar; swipe vadesi
+// (services.AcceptsSwipe) de aynı kuraldır.
+func dueForReview(end time.Time) func(*gorm.DB) *gorm.DB {
+	return func(db *gorm.DB) *gorm.DB {
+		return db.Where("(next_review_date IS NULL OR next_review_date < ?)", end)
+	}
+}
+
+// reviewDay, tekrar uçlarının "bugün"ünü çözer: ?date=YYYY-MM-DD verilmişse o
+// takvim günü, yoksa şimdi; ikisi de kullanım saat diliminde
+// (services.UsageLocation). Çözülemeyen tarih "şimdi" sayılır.
+//
+// next_review_date bir timestamptz'dir (mutlak an): sınırları burada saat
+// dilimiyle hesaplayıp anla karşılaştırmak, oturumun ya da sürecin saat
+// diliminden etkilenmez.
+func reviewDay(dateParam string) (start, end time.Time) {
+	if dateParam != "" {
+		if d, err := time.ParseInLocation("2006-01-02", dateParam, services.UsageLocation()); err == nil {
+			return reviewDayBounds(d)
+		}
+	}
+	return reviewDayBounds(time.Now())
+}
+
+// ReviewWordsForBox: GET /progress/review/box/:box?date=YYYY-MM-DD&limit=N
+// Bugün vadesi gelmiş kelimeler (bkz. dueForReview), sabit sırayla: önce
+// tarihsizler, sonra en eski vade; eşitlikte eklenme sırası. limit (1..200)
+// verilmezse liste sınırsızdır (eski istemciler).
 func (h *Handlers) ReviewWordsForBox(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	box, _ := strconv.Atoi(c.Params("box"))
-	today := parseQueryDate(c.Query("date"))
-	endOfToday := startOfDay(today).AddDate(0, 0, 1) // ertesi gün 00:00 (exclusive üst sınır)
+	limit := -1
+	if raw := c.Query("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > maxReviewListLimit {
+			return apiErr(fiber.StatusBadRequest, "invalid_limit",
+				fmt.Sprintf("limit 1 ile %d arasında olmalı", maxReviewListLimit))
+		}
+		limit = n
+	}
+	_, end := reviewDay(c.Query("date"))
 
-	var list []models.WordProgress
-	if err := h.DB.Where(
-		"user_id = ? AND box = ? AND (next_review_date IS NULL OR next_review_date < ?)",
-		userID, box, endOfToday,
-	).Find(&list).Error; err != nil {
+	list := []models.WordProgress{}
+	if err := h.DB.Scopes(reviewBox(userID, box), dueForReview(end)).
+		Order("next_review_date ASC NULLS FIRST").Order("id").
+		Limit(limit).Find(&list).Error; err != nil {
 		return err
 	}
 	return c.JSON(list)
@@ -203,34 +248,33 @@ func (h *Handlers) ReviewWordsForBox(c *fiber.Ctx) error {
 
 // UpcomingCountsForBox: GET /progress/review/box/:box/counts?date=YYYY-MM-DD
 // user_word_repository.getUpcomingCountsForBox portu (0..30 gün dağılımı + en yoğun gün).
+// Gün farkları kullanım saat diliminin takvim günleriyle hesaplanır; 0. gün
+// (today) liste ucuyla aynı koşuldan (dueForReview) sayılır.
 func (h *Handlers) UpcomingCountsForBox(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	box, _ := strconv.Atoi(c.Params("box"))
-	todayDate := startOfDay(parseQueryDate(c.Query("date")))
+	start, end := reviewDay(c.Query("date"))
 
-	var list []models.WordProgress
-	if err := h.DB.Where("user_id = ? AND box = ?", userID, box).Find(&list).Error; err != nil {
+	var today int64
+	if err := h.DB.Scopes(reviewBox(userID, box), dueForReview(end)).Count(&today).Error; err != nil {
+		return err
+	}
+	// 1..30. günler: [end, start+31 gün) aralığındaki vadeler.
+	var upcoming []time.Time
+	if err := h.DB.Scopes(reviewBox(userID, box)).
+		Where("next_review_date >= ? AND next_review_date < ?", end, start.AddDate(0, 0, 31)).
+		Pluck("next_review_date", &upcoming).Error; err != nil {
 		return err
 	}
 
 	dailyCounts := map[int]int{}
-	totalMonth := 0
-	for _, wp := range list {
-		if wp.NextReviewDate == nil {
-			dailyCounts[0]++
-			totalMonth++
-			continue
-		}
-		nextDate := startOfDay(*wp.NextReviewDate)
-		diffDays := int(nextDate.Sub(todayDate).Hours() / 24)
-		switch {
-		case diffDays <= 0:
-			dailyCounts[0]++
-			totalMonth++
-		case diffDays <= 30:
-			dailyCounts[diffDays]++
-			totalMonth++
-		}
+	if today > 0 {
+		dailyCounts[0] = int(today)
+	}
+	totalMonth := int(today)
+	for _, next := range upcoming {
+		dailyCounts[usageDaysBetween(start, next)]++
+		totalMonth++
 	}
 
 	busiestIdx, maxCount := -1, -1
@@ -257,7 +301,7 @@ func (h *Handlers) UpcomingCountsForBox(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(dto.UpcomingCounts{
-		Today:           dailyCounts[0],
+		Today:           int(today),
 		Tomorrow:        dailyCounts[1],
 		Later:           later,
 		DailyCounts:     dcStr,

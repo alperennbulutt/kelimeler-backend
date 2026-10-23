@@ -1,14 +1,17 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
 	"kelimeler-backend/internal/config"
+	"kelimeler-backend/internal/dto"
 	"kelimeler-backend/internal/middleware"
 	"kelimeler-backend/internal/models"
 	"kelimeler-backend/internal/services"
@@ -430,5 +433,158 @@ func TestSwipe_Kutu6yaGecisTotalLearnedGunceller(t *testing.T) {
 	}
 	if got := loadUser(t, gdb, u.ID).TotalLearned; got != 2 {
 		t.Errorf("total_learned = %d, beklenen 2", got)
+	}
+}
+
+// --- GET /progress/review/box/:box ve /counts ---
+
+func reviewList(t *testing.T, app *fiber.App, path string) []map[string]any {
+	t.Helper()
+
+	status, raw := getJSON(t, app, path)
+	if status != fiber.StatusOK {
+		t.Fatalf("GET %s status = %d (body: %s)", path, status, raw)
+	}
+	var list []map[string]any
+	if err := json.Unmarshal(raw, &list); err != nil {
+		t.Fatalf("liste çözülemedi: %v (body: %s)", err, raw)
+	}
+	return list
+}
+
+func reviewCounts(t *testing.T, app *fiber.App, path string) dto.UpcomingCounts {
+	t.Helper()
+
+	status, raw := getJSON(t, app, path)
+	if status != fiber.StatusOK {
+		t.Fatalf("GET %s status = %d (body: %s)", path, status, raw)
+	}
+	var counts dto.UpcomingCounts
+	if err := json.Unmarshal(raw, &counts); err != nil {
+		t.Fatalf("sayılar çözülemedi: %v (body: %s)", err, raw)
+	}
+	return counts
+}
+
+func wordIDs(list []map[string]any) []string {
+	ids := make([]string, 0, len(list))
+	for _, w := range list {
+		ids = append(ids, fmt.Sprint(w["wordId"]))
+	}
+	return ids
+}
+
+func TestReviewBox_BugunKullanimSaatDilimineGore(t *testing.T) {
+	gdb, u, app := newProgressTest(t)
+	loc := services.UsageLocation()
+	at := func(y int, m time.Month, d, hh, mm int, l *time.Location) *time.Time {
+		v := time.Date(y, m, d, hh, mm, 0, 0, l)
+		return &v
+	}
+	word := func(id string) models.DictionaryWord {
+		return models.DictionaryWord{ID: id, Level: "A1", Grp: 1}
+	}
+
+	// ?date=2030-01-15, kullanım saat diliminde 15 Ocak demektir.
+	setProgress(t, gdb, u.ID, word("r_nil"), 2, nil)
+	setProgress(t, gdb, u.ID, word("r_past"), 2, at(2030, 1, 10, 12, 0, loc))
+	setProgress(t, gdb, u.ID, word("r_today_late"), 2, at(2030, 1, 15, 23, 59, loc))
+	// UTC'de hâlâ 15 Ocak, kullanım saat diliminde (UTC+3) 16 Ocak 01:30: yarın.
+	setProgress(t, gdb, u.ID, word("r_utc_today"), 2, at(2030, 1, 15, 22, 30, time.UTC))
+	setProgress(t, gdb, u.ID, word("r_tomorrow"), 2, at(2030, 1, 16, 0, 1, loc))
+	setProgress(t, gdb, u.ID, word("r_day3"), 2, at(2030, 1, 18, 10, 0, loc))
+	setProgress(t, gdb, u.ID, word("r_far"), 2, at(2030, 2, 20, 10, 0, loc))
+	setProgress(t, gdb, u.ID, word("r_other_box"), 3, nil)
+
+	if loc.String() == "UTC" {
+		t.Skip("kullanım saat dilimi UTC; saat dilimi farkı sınanamaz")
+	}
+
+	list := reviewList(t, app, "/progress/review/box/2?date=2030-01-15")
+	want := []string{"r_nil", "r_past", "r_today_late"}
+	if got := wordIDs(list); !reflect.DeepEqual(got, want) {
+		t.Errorf("liste = %v, beklenen %v (sıra: tarihsiz önce, sonra tarih)", got, want)
+	}
+
+	counts := reviewCounts(t, app, "/progress/review/box/2/counts?date=2030-01-15")
+	wantCounts := dto.UpcomingCounts{
+		Today:           3,
+		Tomorrow:        2,
+		Later:           1,
+		DailyCounts:     map[string]int{"0": 3, "1": 2, "3": 1},
+		TotalMonthCount: 6,
+		BusiestDayLabel: "1 gün sonra",
+		BusiestDayCount: 2,
+	}
+	if !reflect.DeepEqual(counts, wantCounts) {
+		t.Errorf("sayılar = %+v, beklenen %+v", counts, wantCounts)
+	}
+}
+
+func TestReviewBox_ListeUzunluguBugunSayisinaEsit(t *testing.T) {
+	gdb, u, app := newProgressTest(t)
+	start, end := usageDay()
+	offsets := []*time.Time{
+		nil,
+		ptrTime(start.AddDate(0, 0, -5)),
+		ptrTime(start),
+		ptrTime(end.Add(-time.Second)),
+		ptrTime(end),
+		ptrTime(end.Add(time.Second)),
+		ptrTime(end.AddDate(0, 0, 6)),
+	}
+	for i, next := range offsets {
+		setProgress(t, gdb, u.ID, models.DictionaryWord{ID: fmt.Sprintf("eq_%d", i), Level: "A1", Grp: 1}, 4, next)
+	}
+
+	for _, q := range []string{"", "?date=" + start.Format("2006-01-02")} {
+		list := reviewList(t, app, "/progress/review/box/4"+q)
+		counts := reviewCounts(t, app, "/progress/review/box/4/counts"+q)
+		if len(list) != counts.Today || counts.Today != 4 {
+			t.Errorf("%q: liste %d kelime, counts.today %d; ikisi de 4 olmalı", q, len(list), counts.Today)
+		}
+		if counts.Tomorrow != 2 {
+			t.Errorf("%q: counts.tomorrow = %d, beklenen 2", q, counts.Tomorrow)
+		}
+	}
+}
+
+func TestReviewBox_LimitVeSabitSiralama(t *testing.T) {
+	gdb, u, app := newProgressTest(t)
+	start, _ := usageDay()
+	same := start.Add(-time.Hour)
+	// Aynı tarihli kelimeler eklendikleri sırayla (id) gelir.
+	for _, id := range []string{"l_c", "l_a", "l_b"} {
+		setProgress(t, gdb, u.ID, models.DictionaryWord{ID: id, Level: "A1", Grp: 1}, 2, &same)
+	}
+	setProgress(t, gdb, u.ID, models.DictionaryWord{ID: "l_old", Level: "A1", Grp: 1}, 2, ptrTime(start.AddDate(0, 0, -3)))
+	setProgress(t, gdb, u.ID, models.DictionaryWord{ID: "l_nil", Level: "A1", Grp: 1}, 2, nil)
+
+	if got, want := wordIDs(reviewList(t, app, "/progress/review/box/2")), []string{"l_nil", "l_old", "l_c", "l_a", "l_b"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("limitsiz liste = %v, beklenen %v", got, want)
+	}
+	if got, want := wordIDs(reviewList(t, app, "/progress/review/box/2?limit=3")), []string{"l_nil", "l_old", "l_c"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("limit=3 liste = %v, beklenen %v", got, want)
+	}
+
+	for _, bad := range []string{"0", "201", "-1", "abc"} {
+		status, raw := getJSON(t, app, "/progress/review/box/2?limit="+bad)
+		if status != fiber.StatusBadRequest {
+			t.Errorf("limit=%s status = %d, beklenen 400 (body: %s)", bad, status, raw)
+		}
+	}
+}
+
+func TestReviewBox_GecersizKutuBosListe(t *testing.T) {
+	gdb, u, app := newProgressTest(t)
+	setProgress(t, gdb, u.ID, models.DictionaryWord{ID: "b_1", Level: "A1", Grp: 1}, 2, nil)
+
+	for _, box := range []string{"0", "7", "abc"} {
+		if list := reviewList(t, app, "/progress/review/box/"+box); len(list) != 0 {
+			t.Errorf("kutu %s: %d kelime, beklenen boş liste", box, len(list))
+		}
+		if counts := reviewCounts(t, app, "/progress/review/box/"+box+"/counts"); counts.Today != 0 || counts.TotalMonthCount != 0 {
+			t.Errorf("kutu %s: sayılar %+v, beklenen sıfır", box, counts)
+		}
 	}
 }
