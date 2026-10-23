@@ -5,6 +5,8 @@ Mimari: **Coolify Application (Go container)** + **Coolify managed PostgreSQL** 
 
 > Port derdi yok: Coolify her uygulamayı Traefik reverse-proxy arkasında domain bazlı yönlendirir; container içinde 8080 dinlemen yeterli.
 
+> Bu sürümü (backend sprint 1) canlıya alıyorsan önce en sondaki [Backend sprint 1 sürüm notları ve deploy kontrol listesi](#backend-sprint-1-sürüm-notları-ve-deploy-kontrol-listesi) bölümünü oku.
+
 ---
 
 ## 1) Depo
@@ -78,7 +80,7 @@ Depo özelse Coolify'de kaynak olarak **GitHub App** (Private Repository) kullan
 | `SENTRY_RELEASE` | Boş bırakılabilir: imaj derlenirken gömülen sürüm (commit) kullanılır. Elle verilirse o geçerlidir |
 | `CORS_ALLOWED_ORIGINS` | **Boş bırak** (API'yi çağıran bir web sitesi yoksa). Gerekirse virgülle ayrılmış origin listesi, ör. `https://panel.example.com` |
 
-> `USAGE_TIMEZONE` yalnızca günlük kullanım sayaçlarını etkiler. Sürecin genel saat dilimini değiştiren `TZ` değişkenini **girme**: giriş serisi ve tekrar listesi sunucunun yerel gününe göre hesaplanır, `TZ` bunların gün sınırını da kaydırır.
+> `USAGE_TIMEZONE`, sunucudaki bütün "bugün" hesaplarının gün sınırıdır: günlük kullanım sayaçları, giriş serisi ve giriş günleri, tekrar listesi ve `/counts` içindeki `today`, yanlış cevaptan sonraki "ertesi gün". Sürecin genel saat dilimini değiştiren `TZ` değişkenini **girme**; gün hesapları ona bakmaz, yalnızca log saatlerini değiştirir ve iki ayarın farklı görünmesi kafa karıştırır.
 
 > **Apple revoke anahtarları:** `APPLE_TEAM_ID`, `APPLE_KEY_ID` ve `APPLE_PRIVATE_KEY` üçü birden girilmezse hesap silinirken Apple'daki uygulama yetkisi iptal **edilmez** (silme yine çalışır, açılış loguna uyarı düşer). Apple bu iptali şart koşar ve hesap silme sayfası bunu vaat eder. İptal için gereken Apple refresh token'ı yalnızca anahtarlar girildikten **sonra** yapılan Apple girişlerinde saklanır; anahtarları ilk yayından önce gir.
 
@@ -120,6 +122,8 @@ Sunucu açılırken yapılandırmayı denetler. Şu durumlarda **açılmaz** (de
 - `APPLE_TEAM_ID`/`APPLE_KEY_ID`/`APPLE_PRIVATE_KEY`'den biri eksik (hesap silmede Apple token iptali yapılmaz) ya da anahtar geçersiz.
 - `GOOGLE_CLIENT_IDS` boş (her Google girişi reddedilir).
 - `TEST_MODE_UNLOCK_ALL=true` (tüm gruplar kilitsiz açılır, reklam kapıları devre dışı).
+
+Apple girişi açıkken (`APPLE_CLIENT_ID` dolu) revoke yapılandırılamadıysa açılış loguna ayrıca `!!! UYARI !!!` ile başlayan bir satır düşer ve Sentry'ye hata olarak gider: bu durumda hesap silme Apple'ın şart koştuğu token iptalini yapamaz (App Store 5.1.1(v)).
 
 ### Production'a özgü davranışlar
 
@@ -289,3 +293,92 @@ tarayıcıda eski metni görüyorsan `curl` ile ya da gizli pencerede bak.
 - **Güvenlik:** `JWT_SECRET`'i kimseyle paylaşma; sunucu root şifreni deploy sonrası değiştir.
 - **Hata raporlama:** `SENTRY_DSN` girilirse panic'ler ve 5xx dönen tüm hatalar (ör. veritabanına ulaşılamaması, sorgu zaman aşımı) Sentry'ye gönderilir; girilmezse raporlama kapalıdır. Her iki durumda da istemci genel bir 500 mesajı alır, asıl hata konteyner loguna `hata: <status> <method> <path> request_id=<id>: <hata>` satırıyla, panic stack'i stderr'e yazılır. 4xx yanıtlar Sentry'ye gitmez.
 - **İstek kimliği:** Her yanıtta `X-Request-ID` başlığı döner (istekte geçerli bir değer gelirse korunur, yoksa UUID üretilir). Aynı kimlik erişim logu satırında, `hata:` satırında ve Sentry olayının `request_id` etiketinde bulunur; kullanıcı bir hata bildirdiğinde bu kimlikle üçü eşleştirilebilir.
+
+---
+
+## Backend sprint 1 sürüm notları ve deploy kontrol listesi
+
+Bu bölüm, `6b85321`'den sonraki backend sprint 1 değişikliklerini canlıya almak içindir. Bütün API değişiklikleri geriye dönük uyumludur: yayındaki mobil istemci hiçbir şey göndermeden eskisi gibi çalışır. Yeni istek alanları isteğe bağlıdır, yanıtlara yalnızca alan eklenmiştir.
+
+### Yeni ve değişen ortam değişkenleri
+
+Ayrıntılar ve önerilen değerler için 4. bölümdeki tabloya bak. Deploy'dan **önce** Coolify → Application → Environment'ta şunları kontrol et:
+
+| Değişken | Ne değişti | Deploy öncesi yapılacak |
+|---|---|---|
+| `APP_ENV` | Artık **zorunlu ve katı**. Eskiden boşsa `development` sayılıyordu. Şimdi yalnızca tam `production` ya da `development` kabul edilir; boş ya da başka bir değerde (`prod`, `Production`) sunucu **açılmaz** | Değerin tam `production` olduğunu gör |
+| `JWT_SECRET` | Production'da en az 32 bayt olmalı; kod varsayılanı ya da `.env*.example`'daki yer tutucular reddedilir, sunucu açılmaz | Uzunluğu kontrol et (`printf %s "$JWT_SECRET" \| wc -c`). Kısaysa `openssl rand -base64 48` ile yenisini gir. Değiştirmek yalnızca access token'ları (15 dk) geçersiz kılar: refresh token'lar JWT değil, veritabanındaki rastgele değerlerdir; istemci 401 alınca sessizce yeniler |
+| `GATE_ENFORCEMENT` | Yeni. `off` / `log` / `enforce`, varsayılan `log`. Başka bir değerde sunucu açılmaz | İlk deploy'da `log` bırak (aşağıdaki sıraya bak) |
+| `DB_MAX_OPEN_CONNS`, `DB_MAX_IDLE_CONNS`, `DB_CONN_MAX_LIFETIME` | Yeni; havuz ayarları env'den gelir. Varsayılanlar 25 / 10 / 1h (boşta tutulan bağlantı eskiden sabit 5'ti) | Genelde boş bırakılabilir. Toplamın PostgreSQL `max_connections`'ı aşmadığını gör |
+| `DB_STATEMENT_TIMEOUT` | Yeni, varsayılan `10s`. Her sorguya PostgreSQL'de üst süre uygulanır (eskiden sınırsızdı). Migration ve sözlük seed'i bu sınırdan muaftır | Varsayılan yeterli. Sorgu zaman aşımı yüzünden 500'ler görülürse artır ya da `0` ile kapat |
+| `TRUSTED_PROXIES`, `PROXY_HEADER` | Yeni. `X-Forwarded-For` yalnızca güvenilen proxy'den (varsayılan: özel ağlar + loopback) gelen bağlantıda okunur | Boş bırak. Traefik doğrulaması için aşağıdaki canlı kontrollere bak |
+| `SENTRY_RELEASE` | Boşsa sürüm, derlemede `-ldflags "-X main.version=<commit>"` ile gömülen commit olur (Dockerfile `SOURCE_COMMIT` build arg'ı) | Boş bırak; Coolify'de "Include Source Commit in Build" açık olmalı |
+| `SHUTDOWN_TIMEOUT` | Yeni, varsayılan `8s`. SIGTERM'de süren istekler bu kadar beklenir | Boş bırak (Notlar'daki düzgün kapanma maddesine bak) |
+| `API_RATE_LIMIT` | Anlamı değişti: geçerli access token'lı istekler artık **kullanıcı başına**, diğerleri IP başına sayılır | Değer aynı kalabilir (`600`) |
+
+### Açılışta AutoMigrate'in uygulayacağı veritabanı değişiklikleri
+
+Kaynak: `git diff 6b85321..HEAD -- internal/models`. Yalnızca `refresh_tokens` tablosu değişir; diğer tablolar aynıdır (`word_progresses.wrong_count`'ta yalnızca kod yorumu değişti):
+
+| Tablo | Değişiklik | Not |
+|---|---|---|
+| `refresh_tokens` | `family_id varchar(32) NULL` kolonu | Aynı girişten türeyen token'ları bir oturumda toplar. Eski satırlarda boştur, ilk rotasyonda doldurulur |
+| `refresh_tokens` | `idx_refresh_tokens_family_id` index'i (`family_id`) | Logout ve yeniden kullanım tespitinde ailenin iptali için |
+| `refresh_tokens` | `replaced_by_id bigint NULL` kolonu | Rotasyonla yerine geçen satır; yanıtı kaybolan yenilemenin tolerans süresinde yeniden denenebilmesi için |
+
+- Kolonlar boş bırakılabilir (nullable) ve varsayılansızdır: ekleme anlıktır, veri taşıması yoktur. Index `CONCURRENTLY` olmadan kurulur ve kurulurken `refresh_tokens`'a yazmayı kısa süre bekletir; tablo küçük olduğundan saniyeden kısa sürer.
+- Migration tek bağlantıda ve `statement_timeout` kapalıyken çalışır. Başarısız olursa yeni container hiç ayağa kalkmaz, Coolify eskisini çalıştırmaya devam eder.
+- Yeni sunucu saatlik bir **refresh token temizliği** çalıştırır: süresi ya da iptali 7 günden eski satırlar silinir. İlk tur açılışta çalışır ve birikmiş eski satırları bir kerede siler (logda `refresh token temizliği: N satır silindi`). Birden çok replika aynı anda çalıştırırsa advisory lock sayesinde yalnızca biri siler. Kapanmada tur kesilir, veritabanı havuzundan önce durdurulur.
+- İsteğe bağlı, deploy'un parçası değil (ürün kararı): eski 2200 eşiğiyle erken verilmiş `level_B2` rozetleri `earned_badges`'te durur. Temizlemek için SQL, sprint raporundaki BB ertelenen maddesindedir. Bir rozeti geri almak demek olduğu için ürün onayı olmadan çalıştırma.
+
+### Davranış değişiklikleri
+
+İstemciyi bozmazlar ama destek ve izleme sırasında bilinmeleri gerekir:
+
+- **Leitner, yanlış cevap:** Tekrardaki kelime bir alt kutuya iner (en alt kutu 2) ve `next_review_date` ertesi kullanım gününün başı olur (`USAGE_TIMEZONE` gece yarısı). Eskiden kelime ancak üçüncü art arda yanlışta bir alt kutuya iniyor ve kutusunun aralığı kadar sonra soruluyordu. `wrongCount` yalnızca art arda yanlış sayısıdır (istatistik), kutuyu etkilemez. Doğru cevap kuralları değişmedi.
+- **Öğrenme (`POST /progress/learn`) idempotent:** Kelime sözlükten doğrulanır, sözlükte yoksa `404 unknown_word` döner. Zaten ilerlemiş bir kelimeyi kutu 1'e sıfırlamaz; aynı istek tekrar gelirse ilerleme değişmez.
+- **Swipe (`POST /progress/swipe`) idempotent:** Kelime satırı kilitlenir; vadesi gelmemiş kelimedeki cevap değişiklik yapmaz. Çift dokunuş ya da yeniden deneme kelimeyi iki kutu ilerletmez.
+- **`POST /users/me/advance-group`:** İsteğe bağlı gövde `{"level","group"}` (tamamlanan grup) ile idempotenttir: işaretçi yalnızca o gruptaysa bir ileri gider. Gövdesiz istek eski davranıştır ama satır kilidiyle atomiktir. C2'nin son grubundan sonra A1 Grup 1'e geri sarma olmaz.
+- **`PUT /users/me/current-group`:** Seviye/grup doğrulanır (aksi `400 invalid_group`); işaretçi yalnızca **ileri** yazılır, geriye dönük istek değişiklik yapmadan 200 döner.
+- **Refresh toleransı:** Rotasyonla iptal edilmiş token 60 sn içinde ve halefi hiç kullanılmamışsa yeniden kabul edilir (yanıtı mobil ağda kaybolan yenileme). Bunun dışındaki yeniden kullanım çalınmış token sayılır: token'ın **bütün ailesi** iptal edilir, 401 döner. 401 yalnızca token reddedilince döner; veritabanı hatası 500'dür (istemci oturumu koruyup yeniden dener).
+- **Logout:** Verilen token'la birlikte aynı oturumdan (aile) türeyen bütün token'ları iptal eder.
+- **Access token:** `exp` zorunludur; yeni token'lar `iss`/`aud` taşır. `iss`/`aud`'suz eski token'lar süreleri dolana kadar kabul edilir.
+- **Health:** `/api/v1/health` veritabanını 2 sn'lik zaman aşımıyla sınar; ulaşılamazsa `503 db_unavailable` döner ve container `unhealthy` olur.
+- **Hız sınırı:** Kimlikli istekler kullanıcı başına sayılır (aynı CGNAT IP'sini paylaşan kullanıcılar birbirinin sınırını doldurmaz). `X-Forwarded-For` yalnızca güvenilen proxy'den okunur. Giriş uçlarının sıkı sınırı (`AUTH_RATE_LIMIT`) IP başınadır.
+- **Hatalar sahte başarı dönmez:** İlerleme, harita, ana sayfa, istatistik, `/auth/me` ve parola girişi uçlarında veritabanı hatası artık 500 döner; eskiden bazıları 200 (boş liste/sıfır), 404 `user_not_found` ya da 401 dönüyordu. Bağlı giriş yöntemleri okunamazsa `linkedProviders: []` yerine 500 döner. Bu yüzden deploy sonrası Sentry'de 5xx sayısı artmış görünebilir: bunlar önceden gizlenen hatalardır.
+- **Günler:** Giriş günü ve seri dahil bütün "bugün" hesapları `USAGE_TIMEZONE`'a göredir (varsayılan Europe/Istanbul). Gece yarısı ile 03:00 arasındaki girişler artık doğru güne yazılır.
+- **Rozetler ve toplamlar:** Seviye rozeti hedefleri sözlükteki gerçek kelime sayısıdır; `GET /stats/summary` yanıtına `levelTotals` eklendi. Yeni rozet yalnızca gerçekten eklendiğinde bildirilir.
+- **Tekrar listesi:** `GET /progress/review/box/:box` isteğe bağlı `?limit=N` (1–200) alır; sıra sabittir (`next_review_date ASC NULLS FIRST`, sonra `id`). Listeyle `/counts`'taki `today` aynı kümedir.
+- **Sözlük batch'i:** `POST /dictionary/words/batch` en fazla 500 tekil id kabul eder (fazlası `400 invalid_request`); boş ve tekrar eden id'ler yok sayılır. İstemci tek seferde 50 id gönderir.
+- **Hesap silme ve Apple:** `DELETE /auth/account` isteğe bağlı `{"appleAuthorizationCode"}` alır; saklı token yoksa bu kodla iptal yapılır. Apple bağlantısı kaldırılırken saklı token iptal edilir. İptal başarısız olsa da silme sürer, hata Sentry'ye gider.
+- **Sosyal kayıt:** Google/Apple'dan gelen görünen ad temizlenir ve 60 karaktere kısaltılır. Eşzamanlı ilk girişte 500 yerine aynı kullanıcı döner.
+- **Gözlemlenebilirlik:** Her yanıtta `X-Request-ID` başlığı vardır; 5xx'ler istek kimliğiyle loglanır ve Sentry'ye gider. SIGTERM'de süren istekler beklenir (düzgün kapanma).
+- **Reklam kapısı (`GATE_ENFORCEMENT`):** `log` kipinde ihlal loglanır ve Sentry'ye bilgi olarak gider, istek kabul edilir. `enforce` kipinde öğrenme `403 gate_required`, tekrar cevabı `403 review_gate_required` ile reddedilir.
+
+### Güvenli yayın sırası
+
+1. **Hazırlık:** CI'da son commit yeşil (`test` ve `docker` işleri). Ortam değişkenleri yukarıdaki tabloya göre kontrol edildi; `GATE_ENFORCEMENT` açıkça `log`.
+2. **Deploy öncesi yedek:** PostgreSQL kaynağı → Backups → **Backup Now**, satır "Success" olmalı. Migration geri alınabilir bir değişiklik olsa da sprint sonrası ilk deploy öncesinde elde taze bir dump bulunsun.
+3. **Önce backend:** Backend'i deploy et. Yayındaki istemci için güvenlidir: yeni alanları göndermese de eski davranış korunur. Mobil istemcinin yeni sürümü (advance-group gövdesi, `?limit=50`, Apple silme kodu, kapı kodlarının işlenmesi) backend canlıdayken yayınlanmalıdır, **önce değil**. Yeni istemci eski backend'e karşı da çalışır ama sunucu tarafı korumalardan yararlanamaz.
+4. **İzle (en az birkaç gün):** "Yayın sonrası doğrulama" listesini ve aşağıdaki canlı kontrolleri uygula. Sentry'de şunlara bak: yeni 5xx türleri (özellikle sorgu zaman aşımı, `canceling statement due to statement timeout`), kapı ihlali bilgileri (`log` kipinde), `!!! UYARI !!!` satırı ya da `refresh token temizliği başarısız`.
+5. **Sonra enforce:** Yeni istemci yaygınlaştıktan ve `log` kipinde yeni sürümden gelen ihlal kalmadığı görüldükten sonra `GATE_ENFORCEMENT=enforce` yapıp uygulamayı yeniden başlat (redeploy gerekmez). Eski istemci `gate_required` / `review_gate_required` kodlarını tanımaz, ham hata gösterir. Eski sürümün payı hâlâ yüksekse enforce'a geçme ya da önce zorunlu güncelleme kararını ver.
+
+### Geri alma (rollback)
+
+- **Yalnızca kapı sorunu:** `GATE_ENFORCEMENT=log` (ya da `off`) yapıp yeniden başlat. Kod geri alınmaz.
+- **Sorgu zaman aşımı kaynaklı 500'ler:** `DB_STATEMENT_TIMEOUT`'u artır ya da `0` yap, yeniden başlat.
+- **Kodu geri almak:** Coolify'de bir önceki commit'i deploy et. Şema geri alma gerekmez: yeni kolonlar boş bırakılabilir, eski kod onları yok sayar (AutoMigrate kolon silmez). Eski sunucu yeni access token'ları kabul eder (`iss`/`aud`'a bakmaz), refresh token'lar geçerli kalır, kullanıcılar çıkış yapmaz. Geri alınca refresh toleransı, aile iptali ve saatlik temizlik de geri gider; oturumlar eski kurallarla sürer.
+- **Geri alırken dikkat:** Eski kod `APP_ENV` boşken `development` sayar; değişkeni hiçbir zaman kaldırma (production'da parola uçları açılır). Geri alınan sürüm Leitner'in eski yanlış cevap kuralına (üç yanlışta bir alt kutu) döner; aradaki günlerde yazılmış kutu/tarihler olduğu gibi kalır, düzeltme gerekmez.
+- **Veri bozulması:** Yalnızca gerçek bir veri kaybı ya da bozulmasında 2. adımdaki dump'tan geri yükle ([BACKUP.md](BACKUP.md), "Gerçek bir felaketten dönüş"). Dump'tan sonraki ilerleme kaybolur.
+
+### Canlıda elle yapılacak kontroller
+
+Bunlar kodla ya da CI'da doğrulanamaz; ilk deploy'dan sonra bir kez yapılıp sonuç kaydedilmeli:
+
+1. **Traefik `X-Forwarded-For`'u siliyor mu:** "İstemci IP'si, Traefik ve hız sınırı" bölümündeki 11 uydurma `X-Forwarded-For`'lu istek, 11.'de `429` ile bitmeli. Bitmiyorsa Traefik istemci başlığını koruyordur ve IP başına sınır atlatılabilir.
+2. **Health probe:** Coolify'nin arayüz health check'i kapalı olmalı; sunucuda `docker ps` çıktısında container `(healthy)` görünmeli (imajın `HEALTHCHECK`'i, `/server -healthcheck`). `curl -si https://<domain>/api/v1/health` → `200` ve `"dictionaryWords":9980`.
+3. **Sürüm gömülü mü:** Coolify'de "Include Source Commit in Build" açık; açılış logunda `kelimeler-backend sürüm: <commit>` (`bilinmiyor` değil) ve Sentry olaylarında aynı release.
+4. **S3 yedeği ve geri yükleme provası:** Zamanlanmış yedek "Success", dosya bucket'ta; ilk geri yükleme provası `scripts/restore-verify.sh` ile yapılıp kaydedildi ([BACKUP.md](BACKUP.md)). Saklama süreleri, herkese açık sayfaların verdiği sözle uyumlu olmalı: hesap silme ve gizlilik sayfaları silinen hesabın yedeklerdeki kopyalarının **en fazla 14 gün** içinde silindiğini söyler. Coolify S3 saklaması ve bucket yaşam döngüsü kuralı 14 günü aşmamalı.
+5. **Açılış logu:** `ortam: APP_ENV=production GATE_ENFORCEMENT=log`, `db: migrate tamamlandı`, `kullanım günü saat dilimi: Europe/Istanbul` satırları var; `config: uyarı:` ve `!!! UYARI !!!` satırları yok.
+6. **GitHub:** Settings → Branches'ta `main` için `test` ve `docker` zorunlu kontrol (kod dışı repo ayarı).
+7. **Herkese açık sayfalar:** Flutter reposundaki `docs/` güncellendiyse `make sync-web` çalıştırılıp commit edildi; deploy sonrası `/privacy` ve `/account-deletion` sayfalarındaki "Son Güncelleme" tarihi Flutter'daki ile aynı ("Herkese açık sayfalar" bölümüne bak).

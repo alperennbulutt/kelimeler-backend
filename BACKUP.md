@@ -34,9 +34,10 @@ ya da ele geçirilmesine karşı korumaz.
 
 1. S3 uyumlu bir bucket aç (ör. Cloudflare R2 `kelimeler-db-yedek`). Yalnızca
    bu bucket'a yazma/okuma yetkisi olan ayrı bir erişim anahtarı üret.
-2. Bucket'ta bir **yaşam döngüsü (lifecycle) kuralı** tanımla: 90 günden eski
+2. Bucket'ta bir **yaşam döngüsü (lifecycle) kuralı** tanımla: 14 günden eski
    nesneler silinsin. Coolify'nin kendi saklama ayarı çalışmasa bile bucket
-   sonsuza dek büyümez.
+   sonsuza dek büyümez ve yedekler yayımlanan süreden uzun kalmaz (aşağıdaki
+   saklama notuna bak).
 3. Coolify → **Storages → + Add** (S3 Storage): endpoint (R2 için
    `https://<hesap-id>.r2.cloudflarestorage.com`), bucket, region (R2 için
    `auto`), access key, secret key. **Test Connection** başarılı olmalı.
@@ -51,7 +52,13 @@ Coolify → Proje → **PostgreSQL kaynağı → Backups → + Add**:
 | Databases | Uygulamanın veritabanı (`DATABASE_URL`'in sonundaki ad, ör. `postgres`) |
 | Save to S3 | Açık, 1. adımdaki depolama seçili |
 | Saklama (yerel) | Son 7 yedek / 7 gün |
-| Saklama (S3) | 30 gün (bucket kuralı 90 günde ikinci emniyet) |
+| Saklama (S3) | 14 gün (bucket kuralı 14 günde ikinci emniyet) |
+
+> **Saklama süresi bir sözdür:** Hesap silme ve gizlilik sayfaları, silinen
+> hesabın yedeklerdeki kopyalarının **en fazla 14 gün** içinde silindiğini
+> söyler. Coolify'nin S3 saklaması da bucket kuralı da 14 günü aşmamalı.
+> Süreyi uzatmak gerekirse önce Flutter reposundaki `docs/` sayfaları ve
+> uygulama içi gizlilik metni güncellenmeli.
 
 Ardından:
 
