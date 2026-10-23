@@ -151,7 +151,9 @@ func (h *Handlers) Register(c *fiber.Ctx) error {
 	req.DisplayName = displayNameInput
 
 	var count int64
-	h.DB.Model(&models.User{}).Where("email = ?", req.Email).Count(&count)
+	if err := h.DB.Model(&models.User{}).Where("email = ?", req.Email).Count(&count).Error; err != nil {
+		return err
+	}
 	if count > 0 {
 		return apiErr(fiber.StatusConflict, "email_in_use", "bu email zaten kullanımda")
 	}
@@ -183,6 +185,10 @@ func (h *Handlers) Register(c *fiber.Ctx) error {
 		}
 		return tx.Create(&identity).Error
 	})
+	if isUniqueViolation(err) {
+		// Aynı adresle eşzamanlı ikinci kayıt.
+		return apiErr(fiber.StatusConflict, "email_in_use", "bu email zaten kullanımda")
+	}
 	if err != nil {
 		return err
 	}
@@ -292,11 +298,30 @@ func (h *Handlers) storeAppleRefreshToken(ctx context.Context, userID, subject, 
 	}
 }
 
+// isUniqueViolation, PostgreSQL unique kısıt ihlalini (SQLSTATE 23505) tanır.
+func isUniqueViolation(err error) bool {
+	var pgErr interface{ SQLState() string }
+	return errors.As(err, &pgErr) && pgErr.SQLState() == "23505"
+}
+
 // authenticateSocial: provider+subject ile bul; yoksa email ile eşle/oluştur ve kimliği bağla.
 //
 // E-postayla bulunan hesabın 'password' kimliği ya da aynı sağlayıcının başka
 // bir kimliği varsa bağlama yapılmaz, 409 döner (bkz. aşağıdaki gerekçeler).
+//
+// İlk giriş aynı anda iki kez gelirse (çift dokunuş, yeniden deneme) ikinci
+// istek kullanıcıyı ya da kimliği yazarken unique kısıta çarpar. Kısıt ancak
+// öteki istek commit edince ihlal verir; bu yüzden bir kez yeniden okumak
+// öteki isteğin açtığı hesabı bulur ve aynı kullanıcı döner.
 func (h *Handlers) authenticateSocial(provider string, si *auth.SocialIdentity, displayName string) (*models.User, error) {
+	user, err := h.authenticateSocialOnce(provider, si, displayName)
+	if isUniqueViolation(err) {
+		return h.authenticateSocialOnce(provider, si, displayName)
+	}
+	return user, err
+}
+
+func (h *Handlers) authenticateSocialOnce(provider string, si *auth.SocialIdentity, displayName string) (*models.User, error) {
 	var identity models.AuthIdentity
 	err := h.DB.Where("provider = ? AND provider_subject = ?", provider, si.Subject).First(&identity).Error
 	if err == nil {
@@ -635,7 +660,12 @@ func (h *Handlers) linkProvider(c *fiber.Ctx, userID, provider string, si *auth.
 		ProviderSubject: &sub,
 		Email:           &email,
 	}).Error; err != nil {
-		return apiErr(fiber.StatusConflict, "provider_already_linked", "bağlama başarısız")
+		// Kimlik bu arada başka bir hesaba bağlandı ya da hesapta bu sağlayıcının
+		// başka bir kimliği var. Diğer hatalar geçicidir: 500 döner.
+		if isUniqueViolation(err) {
+			return apiErr(fiber.StatusConflict, "provider_already_linked", "bağlama başarısız")
+		}
+		return err
 	}
 	return h.respondUser(c, userID)
 }

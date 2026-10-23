@@ -1184,3 +1184,106 @@ func TestUnlinkProvider_VeritabaniHatasi500Doner(t *testing.T) {
 		t.Errorf("status = %d, beklenen 500 (body: %v)", status, body)
 	}
 }
+
+// --- Eşzamanlı ilk sosyal giriş ve bağlama ---
+
+// İlk sosyal giriş aynı anda iki kez gelirse ikinci istek unique kısıta çarpar.
+// Test, öteki isteği commit edilmemiş bir transaction olarak taklit eder: istek
+// kullanıcıyı yazarken onun commit'ini bekler, sonra kısıt ihlali alır.
+func TestAuthenticateSocial_EszamanliIlkGirisAyniKullaniciyiDoner(t *testing.T) {
+	gdb := testDB(t)
+	h := New(gdb, &config.Config{AppEnv: "test"}, testTokens(), nil)
+
+	email := benzersizEposta("cift")
+	t.Cleanup(func() { gdb.Delete(&models.User{}, "email = ?", email) })
+	si := &auth.SocialIdentity{Subject: "cift-" + email, Email: email, Name: "Çift"}
+
+	oteki := gdb.Begin()
+	defer oteki.Rollback()
+	ilk := models.User{Email: email, DisplayName: "Çift", CurrentLevel: "A1", CurrentGroup: 1}
+	if err := oteki.Create(&ilk).Error; err != nil {
+		t.Fatalf("öteki istek kullanıcıyı yazamadı: %v", err)
+	}
+	sub := si.Subject
+	if err := oteki.Create(&models.AuthIdentity{UserID: ilk.ID, Provider: "google",
+		ProviderSubject: &sub, Email: &email}).Error; err != nil {
+		t.Fatalf("öteki istek kimliği yazamadı: %v", err)
+	}
+
+	type sonuc struct {
+		user *models.User
+		err  error
+	}
+	done := make(chan sonuc, 1)
+	go func() {
+		u, err := h.authenticateSocial("google", si, "")
+		done <- sonuc{u, err}
+	}()
+
+	var bekleyen int64
+	for son := time.Now().Add(10 * time.Second); bekleyen < 1 && time.Now().Before(son); {
+		time.Sleep(10 * time.Millisecond)
+		gdb.Raw(`SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&bekleyen)
+	}
+	if bekleyen < 1 {
+		t.Error("istek öteki transaction'ı beklemedi; yarış sıralaması kurulamadı")
+	}
+	if err := oteki.Commit().Error; err != nil {
+		t.Fatalf("öteki istek commit edilemedi: %v", err)
+	}
+
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("eşzamanlı ikinci giriş hata verdi: %v", got.err)
+	}
+	if got.user.ID != ilk.ID {
+		t.Errorf("kullanıcı = %s, beklenen öteki isteğin açtığı %s", got.user.ID, ilk.ID)
+	}
+}
+
+func linkApp(h *Handlers, userID, provider string, si *auth.SocialIdentity) *fiber.App {
+	app := fiber.New(fiber.Config{ErrorHandler: middleware.ErrorHandler})
+	app.Post("/link", func(c *fiber.Ctx) error { return h.linkProvider(c, userID, provider, si) })
+	return app
+}
+
+func TestLinkProvider(t *testing.T) {
+	gdb := testDB(t)
+	h := New(gdb, &config.Config{AppEnv: "test"}, testTokens(), nil)
+
+	t.Run("başka kullanıcıya bağlı kimlik 409", func(t *testing.T) {
+		sahip, u := testUser(t, gdb), testUser(t, gdb)
+		testIdentity(t, gdb, sahip, "google")
+		si := &auth.SocialIdentity{Subject: "google-" + sahip.ID, Email: sahip.Email}
+		status, body := post(t, linkApp(h, u.ID, "google", si), "/link")
+		if status != fiber.StatusConflict || body["code"] != "provider_already_linked" {
+			t.Errorf("status = %d %v, beklenen 409 provider_already_linked", status, body["code"])
+		}
+		if n := identityCount(t, gdb, u.ID, "google"); n != 0 {
+			t.Errorf("kimlik bağlandı (%d satır)", n)
+		}
+	})
+	t.Run("hesapta aynı sağlayıcının başka kimliği varsa 409", func(t *testing.T) {
+		u := testUser(t, gdb)
+		testIdentity(t, gdb, u, "google")
+		si := &auth.SocialIdentity{Subject: "baska-" + u.ID, Email: u.Email}
+		status, body := post(t, linkApp(h, u.ID, "google", si), "/link")
+		if status != fiber.StatusConflict || body["code"] != "provider_already_linked" {
+			t.Errorf("status = %d %v, beklenen 409 provider_already_linked", status, body["code"])
+		}
+	})
+	t.Run("yeni kimlik bağlanır, tekrar istek 200", func(t *testing.T) {
+		u := testUser(t, gdb)
+		testIdentity(t, gdb, u, "google")
+		si := &auth.SocialIdentity{Subject: "apple-yeni-" + u.ID, Email: u.Email}
+		for i := 0; i < 2; i++ {
+			if status, body := post(t, linkApp(h, u.ID, "apple", si), "/link"); status != fiber.StatusOK {
+				t.Fatalf("%d. istek: status = %d, beklenen 200 (body: %v)", i+1, status, body)
+			}
+		}
+		if n := identityCount(t, gdb, u.ID, "apple"); n != 1 {
+			t.Errorf("apple kimliği sayısı = %d, beklenen 1", n)
+		}
+	})
+}
