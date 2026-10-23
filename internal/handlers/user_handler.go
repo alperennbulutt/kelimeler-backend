@@ -66,12 +66,43 @@ func (h *Handlers) respondMe(c *fiber.Ctx, userID string) error {
 	if err := findUser(h.DB, userID, &user); err != nil {
 		return err
 	}
-	return c.JSON(fiber.Map{"user": h.userJSON(&user)})
+	u, err := h.userJSON(&user)
+	if err != nil {
+		return err
+	}
+	return c.JSON(fiber.Map{"user": u})
 }
 
 // userJSON, /users/me uçlarının bugünkü yanıt şeklidir ({"user": ...}).
-func (h *Handlers) userJSON(user *models.User) *dto.UserDTO {
-	return dto.NewUserDTO(user, h.linkedProviders(user.ID))
+//
+// Bağlı giriş yöntemleri okunamazsa hata döner (500). linkedProviders gibi
+// boş listeye düşmek, istemciye "hiçbir yöntem bağlı değil" dedirtir: hesap
+// bağlama/ayırma ekranı yanlış seçenek gösterir.
+func (h *Handlers) userJSON(user *models.User) (*dto.UserDTO, error) {
+	providers, err := h.loadLinkedProviders(user.ID)
+	if err != nil {
+		return nil, err
+	}
+	return dto.NewUserDTO(user, providers), nil
+}
+
+// txWithUserResponse, fn'i bir transaction'da çalıştırır ve fn'in okuduğu
+// user'ın yanıt gövdesini döner.
+//
+// Bağlı giriş yöntemleri transaction'dan ÖNCE okunur: okunamazsa hiçbir şey
+// yazılmadan 500 döner. Yazımdan sonra okunup hata verseydi istemci 500 görüp
+// yeniden denerken yazım çoktan kalıcı olurdu (gövdesiz advance-group'ta
+// işaretçi iki kez ilerlerdi). Transaction içinde h.DB ile okumak ise
+// bağlantı havuzunda ikinci bir bağlantı bekletirdi.
+func (h *Handlers) txWithUserResponse(userID string, user *models.User, fn func(tx *gorm.DB) error) (*dto.UserDTO, error) {
+	providers, err := h.loadLinkedProviders(userID)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.DB.Transaction(fn); err != nil {
+		return nil, err
+	}
+	return dto.NewUserDTO(user, providers), nil
 }
 
 // SetCurrentGroup: PUT /users/me/current-group — user_profile_repository.setCurrentGroup.
@@ -96,7 +127,7 @@ func (h *Handlers) SetCurrentGroup(c *fiber.Ctx) error {
 	}
 
 	var user models.User
-	err := h.DB.Transaction(func(tx *gorm.DB) error {
+	u, err := h.txWithUserResponse(userID, &user, func(tx *gorm.DB) error {
 		maxGroup, err := maxGroupForLevel(tx, req.Level)
 		if err != nil {
 			return err
@@ -132,7 +163,7 @@ func (h *Handlers) SetCurrentGroup(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	return c.JSON(fiber.Map{"user": h.userJSON(&user)})
+	return c.JSON(fiber.Map{"user": u})
 }
 
 // AdvanceGroup: POST /users/me/advance-group — sonraki level/grup'u sunucu hesaplar.
@@ -161,7 +192,7 @@ func (h *Handlers) AdvanceGroup(c *fiber.Ctx) error {
 
 	var user models.User
 	levelChanged := false
-	err := h.DB.Transaction(func(tx *gorm.DB) error {
+	u, err := h.txWithUserResponse(userID, &user, func(tx *gorm.DB) error {
 		if err := lockUser(tx, userID, &user); err != nil {
 			return err
 		}
@@ -189,7 +220,7 @@ func (h *Handlers) AdvanceGroup(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{
-		"user":         h.userJSON(&user),
+		"user":         u,
 		"levelChanged": levelChanged,
 		"newLevel":     user.CurrentLevel,
 		"newGroup":     user.CurrentGroup,
