@@ -15,13 +15,22 @@ func IndexOfLevel(level string) int {
 // AdvanceGroup, mevcut seviye/grup ve seviyedeki max grup verildiğinde
 // bir sonraki seviye/grup'u hesaplar (user_profile_repository.advanceToNextGroup portu).
 // C2'nin son grubu bitince group=0 döner (tüm seviyeler tamamlandı işareti).
+//
+// Konum değişmeyecekse girdiyi aynen döndürür: C2 tamamlanmışsa (group<=0)
+// başa sarılmaz, tanınmayan seviyede de işaretçiye dokunulmaz.
 func AdvanceGroup(currentLevel string, currentGroup, maxGroupInCurrentLevel int) (nextLevel string, nextGroup int, levelChanged bool) {
+	idx := IndexOfLevel(currentLevel)
+	if idx < 0 || IsAllLevelsCompleted(currentLevel, currentGroup) {
+		return currentLevel, currentGroup, false
+	}
 	nextLevel = currentLevel
 	nextGroup = currentGroup + 1
+	if nextGroup < 1 {
+		nextGroup = 1
+	}
 
 	if nextGroup > maxGroupInCurrentLevel {
-		idx := IndexOfLevel(currentLevel)
-		if idx >= 0 && idx < len(Levels)-1 {
+		if idx < len(Levels)-1 {
 			nextLevel = Levels[idx+1]
 			nextGroup = 1
 			levelChanged = true
@@ -32,4 +41,10 @@ func AdvanceGroup(currentLevel string, currentGroup, maxGroupInCurrentLevel int)
 		}
 	}
 	return nextLevel, nextGroup, levelChanged
+}
+
+// IsAllLevelsCompleted, işaretçinin "tüm seviyeler bitti" (son seviye, grup 0)
+// durumunda olup olmadığını söyler.
+func IsAllLevelsCompleted(level string, group int) bool {
+	return level == Levels[len(Levels)-1] && group <= 0
 }

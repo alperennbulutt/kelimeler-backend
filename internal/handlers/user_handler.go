@@ -31,6 +31,20 @@ func (h *Handlers) UpdateProfile(c *fiber.Ctx) error {
 	return h.respondUser(c, userID)
 }
 
+// lockUser, kullanıcı satırını transaction sonuna kadar kilitleyerek okur.
+func lockUser(tx *gorm.DB, userID string, user *models.User) error {
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(user, "id = ?", userID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return apiErr(fiber.StatusNotFound, "user_not_found", "kullanıcı bulunamadı")
+	}
+	return err
+}
+
+// userJSON, /users/me uçlarının bugünkü yanıt şeklidir ({"user": ...}).
+func (h *Handlers) userJSON(user *models.User) *dto.UserDTO {
+	return dto.NewUserDTO(user, h.linkedProviders(user.ID))
+}
+
 // SetCurrentGroup: PUT /users/me/current-group — user_profile_repository.setCurrentGroup.
 func (h *Handlers) SetCurrentGroup(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
@@ -56,28 +70,63 @@ func (h *Handlers) SetCurrentGroup(c *fiber.Ctx) error {
 }
 
 // AdvanceGroup: POST /users/me/advance-group — sonraki level/grup'u sunucu hesaplar.
+//
+// İsteğe bağlı gövde {"level","group"}, istemcinin tamamladığı gruptur:
+// işaretçi tam o gruptaysa bir ileri gider, değilse (zaten ileride ya da
+// geride) hiçbir şey değişmez. Yanıtı kaybolan isteğin yeniden denenmesi bu
+// yüzden grup atlatmaz. Gövdesiz istek (eski istemciler) işaretçiyi koşulsuz
+// bir ileri götürür.
+//
+// İki yolda da kullanıcı satırı kilitlenir: eşzamanlı istekler aynı işaretçiyi
+// okuyup birbirinin yazdığını ezmez. C2'nin son grubu bitince işaretçi
+// "tümü tamamlandı"da (C2, grup 0) kalır, başa sarılmaz.
 func (h *Handlers) AdvanceGroup(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
-	var user models.User
-	if err := h.DB.First(&user, "id = ?", userID).Error; err != nil {
-		return apiErr(fiber.StatusNotFound, "user_not_found", "kullanıcı bulunamadı")
+	var completed *dto.AdvanceGroupRequest
+	if len(c.Body()) > 0 {
+		var req dto.AdvanceGroupRequest
+		if err := c.BodyParser(&req); err != nil {
+			return apiErr(fiber.StatusBadRequest, "invalid_request", "geçersiz istek")
+		}
+		if req.Level != "" {
+			completed = &req
+		}
 	}
 
-	var maxGroup int
-	h.DB.Model(&models.DictionaryWord{}).Where("level = ?", user.CurrentLevel).
-		Select("COALESCE(MAX(grp),0)").Scan(&maxGroup)
+	var user models.User
+	levelChanged := false
+	err := h.DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockUser(tx, userID, &user); err != nil {
+			return err
+		}
+		if completed != nil && (completed.Level != user.CurrentLevel || completed.Group != user.CurrentGroup) {
+			return nil
+		}
 
-	nextLevel, nextGroup, levelChanged := services.AdvanceGroup(user.CurrentLevel, user.CurrentGroup, maxGroup)
-	user.CurrentLevel = nextLevel
-	user.CurrentGroup = nextGroup
-	h.DB.Model(&models.User{}).Where("id = ?", userID).
-		Updates(map[string]any{"current_level": nextLevel, "current_group": nextGroup})
+		maxGroup, err := maxGroupForLevel(tx, user.CurrentLevel)
+		if err != nil {
+			return err
+		}
+		nextLevel, nextGroup, changed := services.AdvanceGroup(user.CurrentLevel, user.CurrentGroup, maxGroup)
+		if nextLevel == user.CurrentLevel && nextGroup == user.CurrentGroup {
+			return nil
+		}
+		if err := tx.Model(&models.User{}).Where("id = ?", userID).
+			Updates(map[string]any{"current_level": nextLevel, "current_group": nextGroup}).Error; err != nil {
+			return err
+		}
+		levelChanged = changed
+		return tx.First(&user, "id = ?", userID).Error
+	})
+	if err != nil {
+		return err
+	}
 
 	return c.JSON(fiber.Map{
-		"user":         dto.NewUserDTO(&user, h.linkedProviders(userID)),
+		"user":         h.userJSON(&user),
 		"levelChanged": levelChanged,
-		"newLevel":     nextLevel,
-		"newGroup":     nextGroup,
+		"newLevel":     user.CurrentLevel,
+		"newGroup":     user.CurrentGroup,
 	})
 }
 

@@ -45,6 +45,23 @@ func TestAdvanceGroup(t *testing.T) {
 			level: "C2", group: 20, maxGroup: 20,
 			wantLevel: "C2", wantGroup: 0, wantChanged: false,
 		},
+		{
+			// Tümü tamamlandıysa ikinci çağrı C2 Grup 1'e geri sarmaz.
+			name:  "C2 tamamlanmisken degismez",
+			level: "C2", group: 0, maxGroup: 20,
+			wantLevel: "C2", wantGroup: 0, wantChanged: false,
+		},
+		{
+			name:  "taninmayan seviyede degismez",
+			level: "a1", group: 3, maxGroup: 0,
+			wantLevel: "a1", wantGroup: 3, wantChanged: false,
+		},
+		{
+			// Eski doğrulamasız yazımdan kalan grup 0, seviyenin başıdır.
+			name:  "son seviye disinda grup 0 ilk gruba gecer",
+			level: "A1", group: 0, maxGroup: 12,
+			wantLevel: "A1", wantGroup: 1, wantChanged: false,
+		},
 	}
 
 	for _, c := range cases {

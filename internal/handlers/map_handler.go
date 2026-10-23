@@ -7,6 +7,7 @@ import (
 	"kelimeler-backend/internal/services"
 
 	"github.com/gofiber/fiber/v2"
+	"gorm.io/gorm"
 )
 
 // LevelGroups: GET /map/levels/:level/groups — map_repository.getLevelGroups portu.
@@ -119,11 +120,21 @@ func (h *Handlers) isLevelCompletedByScan(userID, level string) bool {
 	return true
 }
 
+// maxGroupForLevel, seviyenin sözlükteki en büyük grup numarasıdır (seviye
+// boşsa ya da tanınmıyorsa 0).
+func maxGroupForLevel(db *gorm.DB, level string) (int, error) {
+	var maxGroup int
+	err := db.Model(&models.DictionaryWord{}).Where("level = ?", level).
+		Select("COALESCE(MAX(grp),0)").Scan(&maxGroup).Error
+	return maxGroup, err
+}
+
 // MaxGroupForLevel: GET /map/levels/:level/max-group
 func (h *Handlers) MaxGroupForLevel(c *fiber.Ctx) error {
-	var maxGroup int
-	h.DB.Model(&models.DictionaryWord{}).Where("level = ?", c.Params("level")).
-		Select("COALESCE(MAX(grp),0)").Scan(&maxGroup)
+	maxGroup, err := maxGroupForLevel(h.DB, c.Params("level"))
+	if err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"maxGroup": maxGroup})
 }
 
