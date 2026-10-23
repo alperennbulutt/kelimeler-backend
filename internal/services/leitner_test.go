@@ -95,41 +95,92 @@ func TestOnRightSwipe_KutuyuYukseltir(t *testing.T) {
 	}
 }
 
-func TestOnLeftSwipe_UcuncuHatadaDuser(t *testing.T) {
-	wp := &models.WordProgress{Box: 4, WrongCount: 0}
+func TestOnLeftSwipe_BirAltKutuyaInipYarinSorulur(t *testing.T) {
+	loc := UsageLocation()
+	// Kullanım gününün 23:30'u: ertesi gün başı yalnızca 30 dakika sonradır.
+	// Kural "24 saat sonra" değil "yarın gün başı" olduğu için fark önemlidir.
+	now := time.Date(2026, 3, 10, 23, 30, 0, 0, loc)
+	tomorrow := time.Date(2026, 3, 11, 0, 0, 0, 0, loc)
 
-	// İlk iki hata yalnızca sayacı artırır.
-	OnLeftSwipe(wp)
-	if wp.Box != 4 || wp.WrongCount != 1 {
-		t.Fatalf("1. hata: kutu=%d wrong=%d, beklenen kutu=4 wrong=1", wp.Box, wp.WrongCount)
+	cases := []struct {
+		name      string
+		fromBox   int
+		fromWrong int
+		learned   bool
+		wantBox   int
+		wantWrong int
+	}{
+		{name: "kutu 5 kutu 4'e iner", fromBox: 5, wantBox: 4, wantWrong: 1},
+		{name: "kutu 4 kutu 3'e iner", fromBox: 4, fromWrong: 1, wantBox: 3, wantWrong: 2},
+		{name: "kutu 3 kutu 2'ye iner", fromBox: 3, wantBox: 2, wantWrong: 1},
+		// Kutu 2 tabandır: daha aşağı inmez ama yine yarın sorulur.
+		{name: "kutu 2 tabanda kalir", fromBox: 2, fromWrong: 2, wantBox: 2, wantWrong: 3},
+		// Öğrenilmiş kelime yanlış cevaplanırsa artık öğrenilmiş sayılmaz.
+		{name: "kutu 6 kutu 5'e iner", fromBox: 6, learned: true, wantBox: 5, wantWrong: 1},
 	}
-	OnLeftSwipe(wp)
-	if wp.Box != 4 || wp.WrongCount != 2 {
-		t.Fatalf("2. hata: kutu=%d wrong=%d, beklenen kutu=4 wrong=2", wp.Box, wp.WrongCount)
-	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			wp := &models.WordProgress{Box: c.fromBox, WrongCount: c.fromWrong, Learned: c.learned}
+			onLeftSwipe(wp, now)
 
-	// Üçüncü hata bir alt kutuya düşürür ve sayacı sıfırlar.
-	OnLeftSwipe(wp)
-	if wp.Box != 3 {
-		t.Errorf("3. hata: kutu = %d, beklenen 3", wp.Box)
-	}
-	if wp.WrongCount != 0 {
-		t.Errorf("3. hata: WrongCount = %d, düşünce sıfırlanmalı", wp.WrongCount)
+			if wp.Box != c.wantBox {
+				t.Errorf("kutu %d → %d, beklenen %d", c.fromBox, wp.Box, c.wantBox)
+			}
+			if wp.WrongCount != c.wantWrong {
+				t.Errorf("WrongCount = %d, beklenen %d", wp.WrongCount, c.wantWrong)
+			}
+			if wp.Learned {
+				t.Error("Learned = true, yanlış cevaplanan kelime öğrenilmiş sayılmaz")
+			}
+			if wp.LastReviewDate == nil || !wp.LastReviewDate.Equal(now) {
+				t.Errorf("LastReviewDate = %v, beklenen %v", wp.LastReviewDate, now)
+			}
+			if wp.NextReviewDate == nil || !wp.NextReviewDate.Equal(tomorrow) {
+				t.Errorf("NextReviewDate = %v, beklenen ertesi gün başı %v", wp.NextReviewDate, tomorrow)
+			}
+		})
 	}
 }
 
-func TestOnLeftSwipe_Kutu2TabandirDusmez(t *testing.T) {
-	// Kutu 2 tabandır: 3 hata olsa da daha aşağı inmez, sayaç artmaya devam eder.
-	wp := &models.WordProgress{Box: 2, WrongCount: 2}
-	OnLeftSwipe(wp)
+func TestOnLeftSwipe_GunBasiKullanimSaatDilimineGore(t *testing.T) {
+	// UTC'de hâlâ 10 Mart olan an, İstanbul'da 11 Mart'tır: "yarın" 12 Mart
+	// İstanbul gece yarısıdır, 11 Mart UTC gece yarısı değil.
+	loc := UsageLocation()
+	now := time.Date(2026, 3, 10, 22, 30, 0, 0, time.UTC)
+	y, m, d := now.In(loc).Date()
+	want := time.Date(y, m, d+1, 0, 0, 0, 0, loc)
 
-	if wp.Box != 2 {
-		t.Errorf("kutu = %d, beklenen 2 (taban)", wp.Box)
+	wp := &models.WordProgress{Box: 3}
+	onLeftSwipe(wp, now)
+	if wp.NextReviewDate == nil || !wp.NextReviewDate.Equal(want) {
+		t.Errorf("NextReviewDate = %v, beklenen %v", wp.NextReviewDate, want)
 	}
-	if wp.WrongCount != 3 {
-		t.Errorf("WrongCount = %d, beklenen 3 (taban kutuda sıfırlanmaz)", wp.WrongCount)
+}
+
+func TestOnLeftSwipe_Kutu1KutusundaKalir(t *testing.T) {
+	// Öğrenme ekranındaki "Bilmiyorum": kelime henüz öğrenilmedi, kutu 2'ye
+	// çıkmaz ve kutu 1'de hemen yeniden gösterilebilir.
+	now := time.Now()
+	wp := &models.WordProgress{Box: 1}
+	onLeftSwipe(wp, now)
+
+	if wp.Box != 1 {
+		t.Errorf("kutu = %d, beklenen 1", wp.Box)
 	}
-	if wp.NextReviewDate == nil {
-		t.Error("NextReviewDate nil, taban kutuda da tekrar planlanmalı")
+	if wp.WrongCount != 1 {
+		t.Errorf("WrongCount = %d, beklenen 1", wp.WrongCount)
+	}
+	if wp.NextReviewDate == nil || !wp.NextReviewDate.Equal(now) {
+		t.Errorf("NextReviewDate = %v, beklenen %v", wp.NextReviewDate, now)
+	}
+}
+
+func TestOnRightSwipe_YanlistanSonraSayaciSifirlar(t *testing.T) {
+	wp := &models.WordProgress{Box: 4}
+	OnLeftSwipe(wp)
+	OnLeftSwipe(wp)
+	OnRightSwipe(wp)
+	if wp.Box != 3 || wp.WrongCount != 0 {
+		t.Errorf("kutu=%d wrong=%d, beklenen kutu=3 wrong=0 (4→3→2→3)", wp.Box, wp.WrongCount)
 	}
 }

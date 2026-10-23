@@ -54,18 +54,32 @@ func OnRightSwipe(wp *models.WordProgress) {
 	wp.NextReviewDate = nextReview(wp.Box, now)
 }
 
-// OnLeftSwipe: yanlış cevap, wrongCount++ ve 3'e ulaşınca bir alt kutuya (kutu 2 tabanı).
+// OnLeftSwipe: yanlış cevap (bkz. onLeftSwipe).
 func OnLeftSwipe(wp *models.WordProgress) {
-	now := time.Now()
-	newWrong := wp.WrongCount + 1
-	if newWrong >= 3 && wp.Box > 2 {
-		wp.Box--
-		wp.WrongCount = 0
-		wp.LastReviewDate = &now
+	onLeftSwipe(wp, time.Now())
+}
+
+// onLeftSwipe, yanlış cevabı now anına göre uygular.
+//
+// Ürün kuralı: tekrardaki kelime (kutu 2 ve üstü) bir alt kutuya iner, en alt
+// kutu 2'dir (kutu 1 "henüz öğrenilmedi" demektir, yanlış cevap kelimeyi
+// oraya geri atmaz). Kelime, aradaki kutunun aralığını beklemeden ertesi
+// kullanım gününün başında (UsageLocation gece yarısı) yeniden sorulur.
+//
+// wrongCount art arda verilen yanlış cevap sayısıdır; kutuyu etkilemez,
+// doğru cevap sıfırlar. Kutu 1'deki kelime (öğrenme ekranındaki "Bilmiyorum")
+// kutusunda kalır.
+func onLeftSwipe(wp *models.WordProgress, now time.Time) {
+	wp.WrongCount++
+	wp.LastReviewDate = &now
+	if wp.Box <= 1 {
 		wp.NextReviewDate = nextReview(wp.Box, now)
 		return
 	}
-	wp.WrongCount = newWrong
-	wp.LastReviewDate = &now
-	wp.NextReviewDate = nextReview(wp.Box, now)
+	if wp.Box > 2 {
+		wp.Box--
+	}
+	wp.Learned = false
+	tomorrow := UsageDayStart(now).AddDate(0, 0, 1)
+	wp.NextReviewDate = &tomorrow
 }
