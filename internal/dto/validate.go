@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/mail"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -63,11 +64,56 @@ func ValidatePassword(password string) error {
 	return nil
 }
 
-// NormalizeDisplayName, görünen adı kırpar ve uzunluğunu doğrular.
+// cleanDisplayName, görünen addan görünmez ve yön değiştiren karakterleri
+// atar, boşlukları tek boşluğa indirir ve kırpar.
+//
+// Kontrol karakterleri (satır sonu, sekme dahil) ve Unicode biçim karakterleri
+// (U+202E gibi yön değiştiriciler, U+200B sıfır genişlikli boşluk, BOM) adın
+// gösterildiği yerde metni ters çevirebilir ya da boş görünen adlar
+// üretebilir. ZWJ/ZWNJ (U+200D/U+200C) korunur: emoji dizileri ve bazı
+// yazı sistemleri onlara dayanır.
+func cleanDisplayName(name string) string {
+	name = strings.ToValidUTF8(name, "")
+	var b strings.Builder
+	b.Grow(len(name))
+	space := false
+	for _, r := range name {
+		switch {
+		case unicode.IsSpace(r):
+			space = true
+			continue
+		case r == '\u200c' || r == '\u200d':
+		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
+			continue
+		}
+		if space && b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		space = false
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// NormalizeDisplayName, görünen adı temizler (bkz. cleanDisplayName) ve
+// uzunluğunu doğrular. Kullanıcının kendi girdiği ad için: sınırı aşan ad
+// reddedilir.
 func NormalizeDisplayName(name string) (string, error) {
-	name = strings.TrimSpace(name)
+	name = cleanDisplayName(name)
 	if utf8.RuneCountInString(name) > MaxDisplayNameLength {
 		return "", ErrDisplayNameLong
 	}
 	return name, nil
+}
+
+// SanitizeDisplayName, görünen adı temizler ve MaxDisplayNameLength
+// karaktere keser. Sosyal girişte (sağlayıcının ya da istemcinin verdiği ad)
+// kullanılır: uzun bir ad girişi bozmamalı, yalnızca kısaltılmalıdır.
+func SanitizeDisplayName(name string) string {
+	name = cleanDisplayName(name)
+	if utf8.RuneCountInString(name) <= MaxDisplayNameLength {
+		return name
+	}
+	runes := []rune(name)[:MaxDisplayNameLength]
+	return strings.TrimSpace(string(runes))
 }
