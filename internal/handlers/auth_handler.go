@@ -31,21 +31,6 @@ func (h *Handlers) loadLinkedProviders(userID string) ([]string, error) {
 	return providers, err
 }
 
-// linkedProviders, loadLinkedProviders'ın hatayı döndürmeyen eski biçimidir;
-// hata log'lanır ve boş liste döner. Yeni kod loadLinkedProviders kullanmalı:
-// boş liste istemciye "bağlı yöntem yok" diye yanlış bilgi verir.
-//
-// Yalnızca user_handler.go (userJSON) için duruyor; o dosya hata döndüren
-// biçime geçince kaldırılmalı.
-func (h *Handlers) linkedProviders(userID string) []string {
-	providers, err := h.loadLinkedProviders(userID)
-	if err != nil {
-		log.Printf("auth: bağlı giriş yöntemleri okunamadı (user=%s): %v", userID, err)
-		return []string{}
-	}
-	return providers
-}
-
 // usableSignInMethod, sağlayıcının bu ortamda giriş için kullanılabilir olup
 // olmadığını söyler. Production'da parola uçları kapalıdır (bkz. routes.go);
 // eski 'password' kimliği orada giriş yöntemi sayılmaz.
