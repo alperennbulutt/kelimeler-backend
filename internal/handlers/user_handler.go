@@ -171,8 +171,15 @@ func (h *Handlers) SetCurrentGroup(c *fiber.Ctx) error {
 // İsteğe bağlı gövde {"level","group"}, istemcinin tamamladığı gruptur:
 // işaretçi tam o gruptaysa bir ileri gider, değilse (zaten ileride ya da
 // geride) hiçbir şey değişmez. Yanıtı kaybolan isteğin yeniden denenmesi bu
-// yüzden grup atlatmaz. Gövdesiz istek (eski istemciler) işaretçiyi koşulsuz
-// bir ileri götürür.
+// yüzden grup atlatmaz.
+//
+// Gövdesiz istek (yayındaki eski istemci) işaretçiyi yalnızca işaretçinin
+// gösterdiği grup haritada tamamlanmışsa (bkz. groupCompleted) bir ileri
+// götürür; değilse hiçbir şey değişmez ve güncel kullanıcı aynı şekilde 200
+// ile döner. Eski istemci tur sonunda, sola kaydırılan ("Bilmiyorum")
+// kelimeler kutu 1'de kalsa da ve geride bir grubu tekrarlarken de
+// (current-group geri yazmaz) gövdesiz advance çağırır; koşulsuz ilerleme
+// işaretçiyi her turda bir grup, seviye sonunda bir seviye ileri kaydırırdı.
 //
 // İki yolda da kullanıcı satırı kilitlenir: eşzamanlı istekler aynı işaretçiyi
 // okuyup birbirinin yazdığını ezmez. C2'nin son grubu bitince işaretçi
@@ -189,6 +196,11 @@ func (h *Handlers) AdvanceGroup(c *fiber.Ctx) error {
 			completed = &req
 		}
 	}
+	if completed == nil {
+		if err := h.awaitPointerGroupCompleted(userID); err != nil {
+			return err
+		}
+	}
 
 	var user models.User
 	levelChanged := false
@@ -198,6 +210,14 @@ func (h *Handlers) AdvanceGroup(c *fiber.Ctx) error {
 		}
 		if completed != nil && (completed.Level != user.CurrentLevel || completed.Group != user.CurrentGroup) {
 			return nil
+		}
+		if completed == nil {
+			// Karar kilitli satırdaki işaretçiyle verilir: bekleme sırasında
+			// başka bir istek işaretçiyi ilerletmiş olabilir.
+			done, err := groupCompleted(tx, userID, user.CurrentLevel, user.CurrentGroup)
+			if err != nil || !done {
+				return err
+			}
 		}
 
 		maxGroup, err := maxGroupForLevel(tx, user.CurrentLevel)
@@ -225,6 +245,41 @@ func (h *Handlers) AdvanceGroup(c *fiber.Ctx) error {
 		"newLevel":     user.CurrentLevel,
 		"newGroup":     user.CurrentGroup,
 	})
+}
+
+// Gövdesiz advance-group'un, son kelimenin yazımını bekleme süresi ve
+// yoklama aralığı; testler değiştirebilir.
+//
+// Eski istemci grubun son kartı kaydırılınca learn/swipe kaydını beklemeden
+// advance-group'u da gönderir; iki istek sunucuya ters sırada varabilir.
+// İşaretçideki grup tamamlanmamış görünürse karar, havadaki yazımın commit
+// olması için bu süre boyunca yeniden sorulur.
+var (
+	legacyAdvanceSettle       = time.Second
+	legacyAdvancePollInterval = 100 * time.Millisecond
+)
+
+// awaitPointerGroupCompleted, işaretçinin gösterdiği grup tamamlanana ya da
+// legacyAdvanceSettle dolana kadar bekler. Asıl karar kilitli satırla
+// AdvanceGroup'un transaction'ında verilir; bu bekleme transaction'ın dışında
+// ve kilitsizdir (kilit tutarak beklemek, beklenen learn'ün kullanıcı satırı
+// kilidini bekletirdi).
+func (h *Handlers) awaitPointerGroupCompleted(userID string) error {
+	deadline := time.Now().Add(legacyAdvanceSettle)
+	for {
+		var user models.User
+		if err := findUser(h.DB, userID, &user); err != nil {
+			return err
+		}
+		if services.IndexOfLevel(user.CurrentLevel) < 0 || services.IsAllLevelsCompleted(user.CurrentLevel, user.CurrentGroup) {
+			return nil
+		}
+		done, err := groupCompleted(h.DB, userID, user.CurrentLevel, user.CurrentGroup)
+		if err != nil || done || !time.Now().Before(deadline) {
+			return err
+		}
+		time.Sleep(legacyAdvancePollInterval)
+	}
 }
 
 // --- Günlük kullanım ---

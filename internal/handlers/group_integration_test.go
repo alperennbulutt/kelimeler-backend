@@ -105,7 +105,16 @@ func userField(t *testing.T, body map[string]any) map[string]any {
 
 // --- POST /users/me/advance-group ---
 
-func TestAdvanceGroup_GovdesizBirIleri(t *testing.T) {
+// completeGroup, grubun bütün kelimelerini kutu 2'ye yazar: grup haritada
+// tamamlanmış görünür.
+func completeGroup(t *testing.T, gdb *gorm.DB, userID string, words []models.DictionaryWord) {
+	t.Helper()
+	for _, w := range words {
+		setProgress(t, gdb, userID, w, 2, nil)
+	}
+}
+
+func TestAdvanceGroup_GovdesizTamamlanmisGrupBirIleri(t *testing.T) {
 	cases := []struct {
 		name        string
 		level       string
@@ -123,8 +132,11 @@ func TestAdvanceGroup_GovdesizBirIleri(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			gdb, u, app := newGroupTest(t, nil)
-			seedGroupLevels(t, gdb)
+			levels := seedGroupLevels(t, gdb)
 			setPointer(t, gdb, u.ID, c.level, c.group)
+			if c.group > 0 {
+				completeGroup(t, gdb, u.ID, levels[c.level][c.group-1])
+			}
 
 			status, body := send(t, app, advanceRequest(nil))
 			if status != fiber.StatusOK {
@@ -218,11 +230,13 @@ func TestAdvanceGroup_EszamanliAyniGovdeTekIlerleme(t *testing.T) {
 }
 
 func TestAdvanceGroup_EszamanliGovdesizIsteklerKaybolmaz(t *testing.T) {
-	// Gövdesiz istek eski davranıştır (her biri bir ileri); satır kilidi
-	// sayesinde eşzamanlı iki istek aynı değeri okuyup birbirini ezmez.
+	// Gövdesiz istek işaretçideki grup tamamlanmışsa bir ileri gider; satır
+	// kilidi sayesinde eşzamanlı iki istek aynı değeri okuyup birbirini ezmez.
 	gdb, u, app := newGroupTest(t, nil)
-	seedGroupLevels(t, gdb)
+	a1 := seedGroupLevels(t, gdb)["A1"]
 	setPointer(t, gdb, u.ID, "A1", 1)
+	completeGroup(t, gdb, u.ID, a1[0])
+	completeGroup(t, gdb, u.ID, a1[1])
 
 	statuses := kilitAltindaEszamanli(t, gdb, app, u.ID, 2, func(int) *http.Request {
 		return advanceRequest(nil)
@@ -554,11 +568,13 @@ func TestGrupAkisi_OgrenTamamlaIlerle(t *testing.T) {
 
 func TestAdvanceGroup_EskiIstemciGovdeleriBirIleri(t *testing.T) {
 	// Yayındaki istemci gövde göndermez; Content-Type başlığı yine de gelebilir.
+	// İşaretçideki grup tamamlanmışsa hepsi gövdesiz istek sayılır.
 	for _, raw := range []string{"", "null", "{}"} {
 		t.Run("govde "+raw, func(t *testing.T) {
 			gdb, u, app := newGroupTest(t, nil)
-			seedGroupLevels(t, gdb)
+			a1 := seedGroupLevels(t, gdb)["A1"]
 			setPointer(t, gdb, u.ID, "A1", 1)
+			completeGroup(t, gdb, u.ID, a1[0])
 
 			req := httptest.NewRequest(http.MethodPost, "/users/me/advance-group", bytes.NewReader([]byte(raw)))
 			req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)

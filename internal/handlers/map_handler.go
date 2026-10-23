@@ -28,6 +28,20 @@ type levelGroupProgress struct {
 	RemainingInBox1 int // kaydı olmayan ya da kutu 1'deki kelimeler
 }
 
+// completed, haritadaki "tamamlandı" kuralıdır: grupta kelime var, en az
+// birine başlanmış ve hiçbiri kaydı olmayan ya da kutu 1'de değil. Harita
+// (computeLevelGroups) ve gövdesiz advance-group (groupCompleted) aynı kuralı
+// buradan okur.
+func (r levelGroupProgress) completed() bool {
+	return r.TotalWords > 0 && r.StartedWords > 0 && r.RemainingInBox1 == 0
+}
+
+// levelGroupProgressColumns, levelProgressQuery üzerinden grup özetini sayan
+// SELECT listesidir.
+const levelGroupProgressColumns = `SELECT COUNT(*) AS total_words,
+		       COUNT(wp.id) AS started_words,
+		       COUNT(*) FILTER (WHERE wp.id IS NULL OR wp.box = 1) AS remaining_in_box1`
+
 // levelProgressQuery, seviyenin sözlük kelimelerini kullanıcının ilerlemesiyle
 // eşler. İlerleme satırı yalnızca kendi seviyesi sözlük satırınınkiyle aynıysa
 // sayılır (eski kayıtlarda seviye farklı yazılmış olabilir).
@@ -62,7 +76,7 @@ func (h *Handlers) computeLevelGroups(userID, level string) ([]dto.LevelGroupDTO
 	previousCompleted := true
 	for _, r := range rows {
 		hasStarted := r.StartedWords > 0
-		isCompleted := r.TotalWords > 0 && hasStarted && r.RemainingInBox1 == 0
+		isCompleted := r.completed()
 
 		var isUnlocked bool
 		switch {
@@ -90,6 +104,18 @@ func (h *Handlers) computeLevelGroups(userID, level string) ([]dto.LevelGroupDTO
 		}
 	}
 	return result, nil
+}
+
+// groupCompleted, (level, grp) grubunun haritada tamamlanmış görünüp
+// görünmediğini söyler (computeLevelGroups'taki IsCompleted ile aynı kural).
+// db, çağıranın transaction'ı olabilir.
+func groupCompleted(db *gorm.DB, userID, level string, grp int) (bool, error) {
+	var r levelGroupProgress
+	if err := db.Raw(levelGroupProgressColumns+levelProgressQuery+`
+		  AND d.grp = ?`, userID, level, grp).Scan(&r).Error; err != nil {
+		return false, err
+	}
+	return r.completed(), nil
 }
 
 // groupLockedOnMap, (level, grp) grubunun haritada (computeLevelGroups)
