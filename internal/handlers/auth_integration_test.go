@@ -1,10 +1,21 @@
 package handlers
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -780,4 +791,288 @@ func TestDeleteStaleRefreshTokens_BaskaReplikaKilidiTutarkenAtlar(t *testing.T) 
 		t.Errorf("kilit tutulurken = (%d, %v), beklenen (0, nil)", n, err)
 	}
 	loadRefreshToken(t, gdb, token)
+}
+
+// --- Hesap silme ve Apple token iptali ---
+
+// fakeApple, Apple'ın token (code → refresh token) ve revoke uçlarını taklit
+// eder; gelen istekleri kaydeder.
+type fakeApple struct {
+	mu        sync.Mutex
+	exchanged []string        // token'a çevrilen authorization code'lar
+	revoked   []string        // iptal edilen refresh token'lar
+	failCodes map[string]bool // token'a çevrilemeyecek code'lar
+	failToken map[string]bool // iptali başarısız olacak token'lar
+}
+
+func (f *fakeApple) handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/token", func(w http.ResponseWriter, r *http.Request) {
+		code := r.FormValue("code")
+		f.mu.Lock()
+		f.exchanged = append(f.exchanged, code)
+		fail := f.failCodes[code]
+		f.mu.Unlock()
+		if fail {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"invalid_grant"}`))
+			return
+		}
+		w.Write([]byte(`{"refresh_token":"rt-` + code + `"}`))
+	})
+	mux.HandleFunc("/auth/revoke", func(w http.ResponseWriter, r *http.Request) {
+		token := r.FormValue("token")
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.failToken[token] {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		f.revoked = append(f.revoked, token)
+	})
+	return mux
+}
+
+func (f *fakeApple) snapshot() (exchanged, revoked []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.exchanged...), append([]string(nil), f.revoked...)
+}
+
+// testAppleRevoker, istekleri sahte Apple sunucusuna yönlendiren bir revoker kurar.
+func testAppleRevoker(t *testing.T) (*auth.AppleRevoker, *fakeApple) {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("anahtar üretilemedi: %v", err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("anahtar kodlanamadı: %v", err)
+	}
+	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+	r, err := auth.NewAppleRevoker("com.example.app", "TEAM123456", "KEY1234567", keyPEM)
+	if err != nil || r == nil {
+		t.Fatalf("revoker kurulamadı: %v", err)
+	}
+
+	fake := &fakeApple{failCodes: map[string]bool{}, failToken: map[string]bool{}}
+	srv := httptest.NewServer(fake.handler())
+	t.Cleanup(srv.Close)
+	return r.WithEndpoints(srv.URL+"/auth/token", srv.URL+"/auth/revoke"), fake
+}
+
+// authApp, gerçek rota tablosunu (auth middleware dahil) kurar.
+func authApp(h *Handlers) *fiber.App {
+	app := fiber.New(fiber.Config{ErrorHandler: middleware.ErrorHandler})
+	RegisterRoutes(app.Group("/api/v1"), h, h.Tokens, sinirsiz)
+	return app
+}
+
+// authRequest, kullanıcının access token'ıyla bir istek hazırlar; payload nil
+// değilse JSON gövde eklenir.
+func authRequest(t *testing.T, h *Handlers, u *models.User, method, path string, payload any) *http.Request {
+	t.Helper()
+
+	var body io.Reader
+	if payload != nil {
+		raw, _ := json.Marshal(payload)
+		body = bytes.NewReader(raw)
+	}
+	req := httptest.NewRequest(method, path, body)
+	if payload != nil {
+		req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	}
+	access, err := h.Tokens.GenerateAccessToken(u.ID, u.Email)
+	if err != nil {
+		t.Fatalf("access token üretilemedi: %v", err)
+	}
+	req.Header.Set(fiber.HeaderAuthorization, "Bearer "+access)
+	return req
+}
+
+// testAppleIdentity, kullanıcıya Apple kimliği ekler; stored boş değilse
+// saklı Apple refresh token'ı olarak yazılır.
+func testAppleIdentity(t *testing.T, gdb *gorm.DB, u *models.User, stored string) {
+	t.Helper()
+
+	testIdentity(t, gdb, u, "apple")
+	if stored == "" {
+		return
+	}
+	if err := gdb.Model(&models.AuthIdentity{}).
+		Where("user_id = ? AND provider = ?", u.ID, "apple").
+		Update("apple_refresh_token", stored).Error; err != nil {
+		t.Fatalf("saklı Apple token yazılamadı: %v", err)
+	}
+}
+
+func userExists(t *testing.T, gdb *gorm.DB, userID string) bool {
+	t.Helper()
+
+	var n int64
+	if err := gdb.Model(&models.User{}).Where("id = ?", userID).Count(&n).Error; err != nil {
+		t.Fatalf("kullanıcı sayılamadı: %v", err)
+	}
+	return n > 0
+}
+
+func TestDeleteAccount_TumVeriSilinirOturumOlur(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	testIdentity(t, gdb, u, "google")
+	testWord(t, gdb, u.ID, "w-silme-"+u.ID, 2)
+	if err := gdb.Create(&models.DailyLogin{UserID: u.ID, LoginDate: time.Now()}).Error; err != nil {
+		t.Fatalf("giriş kaydı yazılamadı: %v", err)
+	}
+	if err := gdb.Create(&models.EarnedBadge{UserID: u.ID, BadgeID: "first_day", EarnedAt: time.Now()}).Error; err != nil {
+		t.Fatalf("rozet yazılamadı: %v", err)
+	}
+	refresh := testRefreshToken(t, gdb, u.ID, time.Now().Add(time.Hour), nil)
+
+	h := New(gdb, &config.Config{AppEnv: "test"}, testTokens(), nil)
+	app := authApp(h)
+
+	if status, body := send(t, app, authRequest(t, h, u, http.MethodDelete, "/api/v1/auth/account", nil)); status != fiber.StatusNoContent {
+		t.Fatalf("silme: status = %d, beklenen 204 (body: %v)", status, body)
+	}
+
+	if userExists(t, gdb, u.ID) {
+		t.Error("kullanıcı silinmedi")
+	}
+	for _, m := range []any{&models.AuthIdentity{}, &models.RefreshToken{}, &models.WordProgress{},
+		&models.DailyLogin{}, &models.EarnedBadge{}} {
+		var n int64
+		if err := gdb.Model(m).Where("user_id = ?", u.ID).Count(&n).Error; err != nil {
+			t.Fatalf("%T sayılamadı: %v", m, err)
+		}
+		if n != 0 {
+			t.Errorf("%T: %d satır kaldı, beklenen 0", m, n)
+		}
+	}
+
+	refreshStatus, _ := send(t, app, jsonRequest("/api/v1/auth/refresh", fiber.Map{"refreshToken": refresh}))
+	if refreshStatus != fiber.StatusUnauthorized {
+		t.Errorf("silinen hesabın refresh token'ı: status = %d, beklenen 401", refreshStatus)
+	}
+	meReq := authRequest(t, h, u, http.MethodGet, "/api/v1/auth/me", nil)
+	if status, _ := send(t, app, meReq); status != fiber.StatusNotFound {
+		t.Errorf("silinen hesabın access token'ıyla /auth/me: status = %d, beklenen 404", status)
+	}
+}
+
+func TestDeleteAccount_AppleIptali(t *testing.T) {
+	cases := []struct {
+		name          string
+		stored        string // saklı Apple refresh token ("" = yok)
+		linked        bool   // Apple kimliği var mı
+		body          any    // nil = gövdesiz (yayındaki istemci)
+		failCode      bool
+		failStored    bool
+		wantExchanged []string
+		wantRevoked   []string
+	}{
+		{name: "saklı token gövdesiz iptal edilir", stored: "sakli", linked: true,
+			wantRevoked: []string{"sakli"}},
+		{name: "saklı token varken kod kullanılmaz", stored: "sakli", linked: true,
+			body: fiber.Map{"appleAuthorizationCode": "kod"}, wantRevoked: []string{"sakli"}},
+		{name: "saklı token yoksa kod token'a çevrilip iptal edilir", linked: true,
+			body: fiber.Map{"appleAuthorizationCode": "kod"}, wantExchanged: []string{"kod"}, wantRevoked: []string{"rt-kod"}},
+		{name: "saklı token iptali başarısızsa kod denenir", stored: "sakli", linked: true, failStored: true,
+			body: fiber.Map{"appleAuthorizationCode": "kod"}, wantExchanged: []string{"kod"}, wantRevoked: []string{"rt-kod"}},
+		{name: "kod da çevrilemezse silme yine sürer", stored: "sakli", linked: true, failStored: true, failCode: true,
+			body: fiber.Map{"appleAuthorizationCode": "kod"}, wantExchanged: []string{"kod"}},
+		{name: "saklı token ve kod yoksa silme yine sürer", linked: true},
+		{name: "Apple bağlı değilse Apple'a gidilmez"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gdb := testDB(t)
+			u := testUser(t, gdb)
+			testIdentity(t, gdb, u, "google")
+			if c.linked {
+				testAppleIdentity(t, gdb, u, c.stored)
+			}
+			revoker, fake := testAppleRevoker(t)
+			fake.failCodes["kod"] = c.failCode
+			fake.failToken["sakli"] = c.failStored
+			h := New(gdb, &config.Config{AppEnv: "test"}, testTokens(), nil).WithAppleRevoker(revoker)
+
+			req := authRequest(t, h, u, http.MethodDelete, "/api/v1/auth/account", c.body)
+			if status, body := send(t, authApp(h), req); status != fiber.StatusNoContent {
+				t.Fatalf("status = %d, beklenen 204 (body: %v)", status, body)
+			}
+			if userExists(t, gdb, u.ID) {
+				t.Error("Apple iptalinin sonucundan bağımsız olarak hesap silinmeliydi")
+			}
+			exchanged, revoked := fake.snapshot()
+			if !slices.Equal(exchanged, c.wantExchanged) {
+				t.Errorf("token'a çevrilen kodlar = %v, beklenen %v", exchanged, c.wantExchanged)
+			}
+			if !slices.Equal(revoked, c.wantRevoked) {
+				t.Errorf("iptal edilen token'lar = %v, beklenen %v", revoked, c.wantRevoked)
+			}
+		})
+	}
+}
+
+func TestDeleteAccount_RevokerYoksaHesapYineSilinir(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	testAppleIdentity(t, gdb, u, "sakli")
+	h := New(gdb, &config.Config{AppEnv: "test"}, testTokens(), nil)
+
+	req := authRequest(t, h, u, http.MethodDelete, "/api/v1/auth/account", fiber.Map{"appleAuthorizationCode": "kod"})
+	if status, body := send(t, authApp(h), req); status != fiber.StatusNoContent {
+		t.Fatalf("status = %d, beklenen 204 (body: %v)", status, body)
+	}
+	if userExists(t, gdb, u.ID) {
+		t.Error("hesap silinmedi")
+	}
+}
+
+func TestUnlinkApple_SakliTokenIptalEdilir(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	testIdentity(t, gdb, u, "google")
+	testAppleIdentity(t, gdb, u, "sakli")
+	revoker, fake := testAppleRevoker(t)
+	h := New(gdb, &config.Config{AppEnv: "test"}, testTokens(), nil).WithAppleRevoker(revoker)
+
+	status, body := send(t, authApp(h), authRequest(t, h, u, http.MethodDelete, "/api/v1/auth/link/apple", nil))
+	if status != fiber.StatusOK {
+		t.Fatalf("status = %d, beklenen 200 (body: %v)", status, body)
+	}
+	if n := identityCount(t, gdb, u.ID, "apple"); n != 0 {
+		t.Errorf("apple kimliği kaldırılmadı (%d satır)", n)
+	}
+	if _, revoked := fake.snapshot(); !slices.Equal(revoked, []string{"sakli"}) {
+		t.Errorf("iptal edilen token'lar = %v, beklenen [sakli]", revoked)
+	}
+}
+
+func TestWarnIfAppleRevokeDisabled(t *testing.T) {
+	revoker, _ := testAppleRevoker(t)
+	cases := []struct {
+		name     string
+		env      string
+		clientID string
+		revoker  *auth.AppleRevoker
+		want     bool
+	}{
+		{"production, Apple açık, revoker yok", "production", "com.example.app", nil, true},
+		{"production, revoker var", "production", "com.example.app", revoker, false},
+		{"production, Apple girişi kapalı", "production", "", nil, false},
+		{"geliştirme", "development", "com.example.app", nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := New(nil, &config.Config{AppEnv: c.env, AppleClientID: c.clientID}, testTokens(), nil).
+				WithAppleRevoker(c.revoker)
+			if got := h.WarnIfAppleRevokeDisabled(); got != c.want {
+				t.Errorf("WarnIfAppleRevokeDisabled = %v, beklenen %v", got, c.want)
+			}
+		})
+	}
 }

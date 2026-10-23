@@ -35,6 +35,13 @@ type LogoutRequest struct {
 	RefreshToken string `json:"refreshToken"`
 }
 
+// DeleteAccountRequest, DELETE /auth/account'un isteğe bağlı gövdesidir.
+type DeleteAccountRequest struct {
+	// Saklı Apple refresh token yoksa (ya da iptali başarısız olursa) bu kod
+	// token'a çevrilip iptal edilir. Gövdesiz istek de geçerlidir.
+	AppleAuthorizationCode string `json:"appleAuthorizationCode"`
+}
+
 // AuthResponse, login/register/social uçlarının dönüşü.
 type AuthResponse struct {
 	AccessToken  string   `json:"accessToken"`

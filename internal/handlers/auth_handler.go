@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"kelimeler-backend/internal/dto"
 	"kelimeler-backend/internal/middleware"
 	"kelimeler-backend/internal/models"
+	"kelimeler-backend/internal/observability"
 
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
@@ -598,6 +600,9 @@ func (h *Handlers) linkProvider(c *fiber.Ctx, userID, provider string, si *auth.
 }
 
 // UnlinkProvider: belirtilen provider kimliğini kaldırır (son kimlik korunur).
+//
+// Apple kimliği kaldırılırken saklı refresh token'ı Apple'da iptal edilir:
+// satır silindikten sonra hesap silme sırasında iptal edilecek token kalmaz.
 func (h *Handlers) UnlinkProvider(provider string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		userID := middleware.UserID(c)
@@ -606,20 +611,69 @@ func (h *Handlers) UnlinkProvider(provider string) fiber.Handler {
 		if count <= 1 {
 			return apiErr(fiber.StatusBadRequest, "last_identity", "son giriş yöntemi kaldırılamaz")
 		}
-		h.DB.Where("user_id = ? AND provider = ?", userID, provider).Delete(&models.AuthIdentity{})
+		var identities []models.AuthIdentity
+		if err := h.DB.Clauses(clause.Returning{}).
+			Where("user_id = ? AND provider = ?", userID, provider).
+			Delete(&identities).Error; err != nil {
+			return err
+		}
+		for _, identity := range identities {
+			if provider == "apple" {
+				h.revokeAppleOnUnlink(userID, identity)
+			}
+		}
 		return h.respondUser(c, userID)
 	}
+}
+
+// appleRevokeTimeout, Apple'a yapılan exchange + revoke çağrılarının toplam
+// süre sınırıdır. Silme ya da bağlantı kaldırma bu süreden uzun beklemez.
+const appleRevokeTimeout = 20 * time.Second
+
+// revokeAppleOnUnlink, kaldırılan Apple kimliğinin saklı token'ını iptal eder.
+// Best effort: başarısızlık bağlantı kaldırmayı geri almaz, raporlanır.
+func (h *Handlers) revokeAppleOnUnlink(userID string, identity models.AuthIdentity) {
+	stored := ""
+	if identity.AppleRefreshToken != nil {
+		stored = *identity.AppleRefreshToken
+	}
+	if stored == "" {
+		reportAppleRevokeFailure("bağlantı kaldırma", userID,
+			errors.New("saklı refresh token yok, Apple erişimi iptal edilemedi"))
+		return
+	}
+	if h.AppleRevoker == nil {
+		reportAppleRevokeFailure("bağlantı kaldırma", userID, errAppleRevokerMissing)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), appleRevokeTimeout)
+	defer cancel()
+	if err := h.AppleRevoker.Revoke(ctx, stored); err != nil {
+		reportAppleRevokeFailure("bağlantı kaldırma", userID, err)
+		return
+	}
+	log.Printf("apple: bağlantı kaldırılırken token iptal edildi (user=%s)", userID)
 }
 
 // DeleteAccount: kullanıcıyı siler; FK CASCADE tüm ilişkili veriyi temizler.
 //
 // Silmeden önce Apple token'ı iptal edilir: Apple, "Sign in with Apple" sunan
 // uygulamalardan hesap silinirken revoke çağrısı yapılmasını şart koşar.
+// İsteğe bağlı gövde {"appleAuthorizationCode"}: saklı token yoksa ya da
+// iptali başarısız olursa bu kod token'a çevrilip iptal edilir.
 // Revoke başarısız olsa bile silme sürdürülür — kullanıcının silme hakkını
-// üçüncü taraf bir servisin erişilebilirliğine bağlamayız.
+// üçüncü taraf bir servisin erişilebilirliğine bağlamayız; başarısızlık
+// log'lanır ve Sentry'ye gider.
 func (h *Handlers) DeleteAccount(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
-	h.revokeAppleAccess(context.Background(), userID)
+	// Gövde isteğe bağlıdır: yayındaki istemci gövdesiz gönderir, okunamayan
+	// gövde kod gönderilmemiş sayılır.
+	var req dto.DeleteAccountRequest
+	_ = c.BodyParser(&req)
+
+	if err := h.revokeAppleAccess(userID, strings.TrimSpace(req.AppleAuthorizationCode)); err != nil {
+		return err
+	}
 
 	if err := h.DB.Delete(&models.User{}, "id = ?", userID).Error; err != nil {
 		return err
@@ -627,25 +681,79 @@ func (h *Handlers) DeleteAccount(c *fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-// revokeAppleAccess, kullanıcının Apple kimliği varsa uygulamanın erişimini iptal eder.
-func (h *Handlers) revokeAppleAccess(ctx context.Context, userID string) {
-	if h.AppleRevoker == nil {
-		return
-	}
+// errAppleRevokerMissing, Apple kimliği olan bir hesapta revoke yapılandırması
+// (APPLE_TEAM_ID/APPLE_KEY_ID/APPLE_PRIVATE_KEY) eksik olduğunda raporlanır.
+var errAppleRevokerMissing = errors.New("Apple revoker yapılandırılmamış, token iptali yapılamadı")
 
+// revokeAppleAccess, kullanıcının Apple kimliği varsa (ya da istemci bir
+// authorization code gönderdiyse) uygulamanın Apple erişimini iptal eder.
+// Önce saklı refresh token denenir; yoksa ya da iptal başarısızsa code
+// token'a çevrilip iptal edilir.
+//
+// Revoke başarısızlığı hata olarak dönmez, raporlanır; dönen hata yalnızca
+// kimliğin okunamadığı veritabanı hatasıdır.
+func (h *Handlers) revokeAppleAccess(userID, code string) error {
 	var identity models.AuthIdentity
 	err := h.DB.Where("user_id = ? AND provider = ?", userID, "apple").First(&identity).Error
-	if err != nil {
-		return // Apple ile bağlı değil
+	linked := err == nil
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
 	}
-	if identity.AppleRefreshToken == nil || *identity.AppleRefreshToken == "" {
-		log.Printf("apple: revoke atlandı, saklı refresh token yok (user=%s)", userID)
-		return
+	if !linked && code == "" {
+		return nil // Apple ile bağlı değil
+	}
+	if h.AppleRevoker == nil {
+		reportAppleRevokeFailure("hesap silme", userID, errAppleRevokerMissing)
+		return nil
 	}
 
-	if err := h.AppleRevoker.Revoke(ctx, *identity.AppleRefreshToken); err != nil {
-		log.Printf("apple: token iptal edilemedi (user=%s): %v", userID, err)
-		return
+	ctx, cancel := context.WithTimeout(context.Background(), appleRevokeTimeout)
+	defer cancel()
+
+	var failures []error
+	if identity.AppleRefreshToken != nil && *identity.AppleRefreshToken != "" {
+		err := h.AppleRevoker.Revoke(ctx, *identity.AppleRefreshToken)
+		if err == nil {
+			log.Printf("apple: token iptal edildi (user=%s)", userID)
+			return nil
+		}
+		failures = append(failures, fmt.Errorf("saklı token: %w", err))
 	}
-	log.Printf("apple: token iptal edildi (user=%s)", userID)
+	if code != "" {
+		refreshToken, err := h.AppleRevoker.ExchangeCode(ctx, code)
+		if err == nil {
+			err = h.AppleRevoker.Revoke(ctx, refreshToken)
+		}
+		if err == nil {
+			log.Printf("apple: authorization code ile token iptal edildi (user=%s)", userID)
+			return nil
+		}
+		failures = append(failures, fmt.Errorf("authorization code: %w", err))
+	}
+	if len(failures) == 0 {
+		failures = append(failures, errors.New("saklı refresh token yok ve authorization code gönderilmedi"))
+	}
+	reportAppleRevokeFailure("hesap silme", userID, errors.Join(failures...))
+	return nil
+}
+
+// reportAppleRevokeFailure, Apple erişiminin iptal edilemediğini log'lar ve
+// Sentry'ye gönderir: Apple bunu şart koştuğu için sessiz kalmamalı.
+func reportAppleRevokeFailure(step, userID string, err error) {
+	log.Printf("apple: %s sırasında token iptal edilemedi (user=%s): %v", step, userID, err)
+	observability.CaptureError(fmt.Errorf("apple revoke (%s, user=%s): %w", step, userID, err))
+}
+
+// WarnIfAppleRevokeDisabled, production'da Apple girişi açıkken revoke
+// yapılandırılmamışsa açılışta yüksek sesle uyarır (log + Sentry) ve true
+// döner. Bu durumda hesap silme Apple'ın şart koştuğu iptali yapamaz.
+func (h *Handlers) WarnIfAppleRevokeDisabled() bool {
+	if h.Cfg == nil || h.Cfg.AppEnv != "production" || h.Cfg.AppleClientID == "" || h.AppleRevoker != nil {
+		return false
+	}
+	err := errors.New("APPLE_TEAM_ID/APPLE_KEY_ID/APPLE_PRIVATE_KEY eksik ya da geçersiz: " +
+		"Apple ile giriş açık ama hesap silmede token iptali YAPILMAYACAK (App Store 5.1.1(v))")
+	log.Printf("!!! UYARI !!! %v", err)
+	observability.CaptureError(err)
+	return true
 }
