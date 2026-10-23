@@ -12,7 +12,9 @@ import (
 func (h *Handlers) LearnedCount(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	var cnt int64
-	h.DB.Model(&models.WordProgress{}).Where("user_id = ? AND box = 6", userID).Count(&cnt)
+	if err := h.DB.Model(&models.WordProgress{}).Where("user_id = ? AND box = 6", userID).Count(&cnt).Error; err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"learnedCount": cnt})
 }
 
@@ -20,8 +22,8 @@ func (h *Handlers) LearnedCount(c *fiber.Ctx) error {
 func (h *Handlers) CurrentGroup(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	var user models.User
-	if err := h.DB.First(&user, "id = ?", userID).Error; err != nil {
-		return apiErr(fiber.StatusNotFound, "user_not_found", "kullanıcı bulunamadı")
+	if err := findUser(h.DB, userID, &user); err != nil {
+		return err
 	}
 
 	title := "Yeni Grup"

@@ -41,6 +41,14 @@ type SetCurrentGroupRequest struct {
 	TotalWords  *int    `json:"totalWords"`
 }
 
+// AdvanceGroupRequest, advance-group ucunun isteğe bağlı gövdesidir:
+// istemcinin TAMAMLADIĞI grup. Gövde verilmezse (eski istemciler) işaretçi
+// koşulsuz bir ileri gider.
+type AdvanceGroupRequest struct {
+	Level string `json:"level"`
+	Group int    `json:"group"`
+}
+
 // UnlockGroupRequest, group-started ve group-unlocked-by-ad uçlarının isteğe
 // bağlı gövdesidir. Gövde verilmezse uç yalnızca sayacı artırır.
 type UnlockGroupRequest struct {

@@ -17,7 +17,9 @@ type WordProgress struct {
 	LastReviewDate *time.Time `json:"lastReviewDate"`
 	NextReviewDate *time.Time `gorm:"index:idx_wp_user_box_next,priority:3" json:"nextReviewDate"`
 
-	WrongCount int    `gorm:"not null;default:0" json:"wrongCount"` // 0..3
+	// Art arda verilen yanlış cevap sayısı; doğru cevap sıfırlar. Kutuyu
+	// etkilemez, yalnızca istatistik içindir (kural: services.OnLeftSwipe).
+	WrongCount int    `gorm:"not null;default:0" json:"wrongCount"`
 	Learned    bool   `gorm:"not null;default:false" json:"learned"`
 	English    string `gorm:"not null;default:''" json:"english"`
 	Turkish    string `gorm:"not null;default:''" json:"turkish"`

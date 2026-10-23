@@ -7,60 +7,62 @@ import (
 	"kelimeler-backend/internal/services"
 
 	"github.com/gofiber/fiber/v2"
+	"gorm.io/gorm"
 )
 
 // LevelGroups: GET /map/levels/:level/groups — map_repository.getLevelGroups portu.
 func (h *Handlers) LevelGroups(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
-	groups := h.computeLevelGroups(userID, c.Params("level"))
+	groups, err := h.computeLevelGroups(userID, c.Params("level"))
+	if err != nil {
+		return err
+	}
 	return c.JSON(groups)
 }
 
+// levelGroupProgress, bir grubun sözlük ve kullanıcı ilerlemesi özetidir.
+type levelGroupProgress struct {
+	Grp             int
+	TotalWords      int
+	StartedWords    int // ilerleme kaydı olan kelimeler (kutu fark etmez)
+	RemainingInBox1 int // kaydı olmayan ya da kutu 1'deki kelimeler
+}
+
+// levelProgressQuery, seviyenin sözlük kelimelerini kullanıcının ilerlemesiyle
+// eşler. İlerleme satırı yalnızca kendi seviyesi sözlük satırınınkiyle aynıysa
+// sayılır (eski kayıtlarda seviye farklı yazılmış olabilir).
+const levelProgressQuery = `
+	FROM dictionary_words d
+	LEFT JOIN word_progresses wp
+	  ON wp.user_id = ? AND wp.word_id = d.id AND wp.level = d.level
+	WHERE d.level = ?`
+
 // computeLevelGroups, bir seviye için grup durumlarını (kilit/tamamlanma) hesaplar.
-func (h *Handlers) computeLevelGroups(userID, level string) []dto.LevelGroupDTO {
-	previousLevelCompleted := h.isPreviousLevelCompletedFast(userID, level)
-
-	// 1) Bu seviyenin dictionary kelimeleri (sadece id + grup).
-	var dictWords []models.DictionaryWord
-	h.DB.Select("id", "grp").Where("level = ?", level).Find(&dictWords)
-
-	groupToWordIDs := map[int][]string{}
-	for _, w := range dictWords {
-		groupToWordIDs[w.Grp] = append(groupToWordIDs[w.Grp], w.ID)
+// Sözlük ve ilerleme satırları belleğe alınmaz; grup başına sayılar tek bir
+// aggregate sorguyla gelir.
+func (h *Handlers) computeLevelGroups(userID, level string) ([]dto.LevelGroupDTO, error) {
+	previousLevelCompleted, err := h.isPreviousLevelCompleted(userID, level)
+	if err != nil {
+		return nil, err
 	}
+
+	var rows []levelGroupProgress
+	if err := h.DB.Raw(`SELECT d.grp AS grp,
+		       COUNT(*) AS total_words,
+		       COUNT(wp.id) AS started_words,
+		       COUNT(*) FILTER (WHERE wp.id IS NULL OR wp.box = 1) AS remaining_in_box1`+
+		levelProgressQuery+`
+		GROUP BY d.grp
+		ORDER BY d.grp`, userID, level).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	// Grup grup hesapla (sıralı-kilit mantığı korunur).
 	result := []dto.LevelGroupDTO{}
-	if len(groupToWordIDs) == 0 {
-		return result
-	}
-
-	// 2) Bu seviyedeki kullanıcı ilerlemesi.
-	var progress []models.WordProgress
-	h.DB.Select("word_id", "box").Where("user_id = ? AND level = ?", userID, level).Find(&progress)
-	progByWordID := map[string]models.WordProgress{}
-	for _, p := range progress {
-		progByWordID[p.WordID] = p
-	}
-
-	// 3) Grup grup hesapla (sıralı-kilit mantığı korunur).
 	previousCompleted := true
-	for _, gnum := range sortedIntKeys(groupToWordIDs) {
-		wordIDs := groupToWordIDs[gnum]
-		totalWords := len(wordIDs)
-
-		hasStarted := false
-		remainingInBox1 := 0
-		for _, wid := range wordIDs {
-			if p, ok := progByWordID[wid]; ok {
-				hasStarted = true
-				if p.Box == 1 {
-					remainingInBox1++
-				}
-			} else {
-				remainingInBox1++
-			}
-		}
-
-		isCompleted := totalWords > 0 && hasStarted && remainingInBox1 == 0
+	for _, r := range rows {
+		hasStarted := r.StartedWords > 0
+		isCompleted := r.TotalWords > 0 && hasStarted && r.RemainingInBox1 == 0
 
 		var isUnlocked bool
 		switch {
@@ -71,59 +73,74 @@ func (h *Handlers) computeLevelGroups(userID, level string) []dto.LevelGroupDTO 
 		case !hasStarted && !previousCompleted:
 			isUnlocked = false
 		default:
-			isUnlocked = totalWords > 0
+			isUnlocked = r.TotalWords > 0
 		}
 
 		result = append(result, dto.LevelGroupDTO{
-			GroupNumber:     gnum,
-			TotalWords:      totalWords,
-			RemainingInBox1: remainingInBox1,
+			GroupNumber:     r.Grp,
+			TotalWords:      r.TotalWords,
+			RemainingInBox1: r.RemainingInBox1,
 			IsCompleted:     isCompleted,
 			IsUnlocked:      isUnlocked,
 			HasStarted:      hasStarted,
 		})
 
-		if totalWords > 0 {
+		if r.TotalWords > 0 {
 			previousCompleted = isCompleted
 		}
 	}
-	return result
+	return result, nil
 }
 
-// isPreviousLevelCompletedFast: earnedBadges hızlı yolu, yoksa tarama fallback'i.
-func (h *Handlers) isPreviousLevelCompletedFast(userID, level string) bool {
+// isPreviousLevelCompleted: earnedBadges hızlı yolu, yoksa önceki seviyenin
+// tamamlanma sayımı. A1'in önceki seviyesi yoktur.
+func (h *Handlers) isPreviousLevelCompleted(userID, level string) (bool, error) {
 	idx := services.IndexOfLevel(level)
 	if idx <= 0 {
-		return true // A1 için önceki seviye yok
+		return true, nil // A1 için önceki seviye yok
 	}
 	prev := services.Levels[idx-1]
 
 	var cnt int64
-	h.DB.Model(&models.EarnedBadge{}).Where("user_id = ? AND badge_id = ?", userID, "level_"+prev).Count(&cnt)
-	if cnt > 0 {
-		return true
+	if err := h.DB.Model(&models.EarnedBadge{}).
+		Where("user_id = ? AND badge_id = ?", userID, "level_"+prev).Count(&cnt).Error; err != nil {
+		return false, err
 	}
-	return h.isLevelCompletedByScan(userID, prev)
+	if cnt > 0 {
+		return true, nil
+	}
+	return h.isLevelCompleted(userID, prev)
 }
 
-func (h *Handlers) isLevelCompletedByScan(userID, level string) bool {
-	groups := h.computeLevelGroups(userID, level)
-	if len(groups) == 0 {
-		return false
+// isLevelCompleted, seviyenin bütün grupları tamamlanmış mı söyler: seviyede
+// kelime vardır ve hiçbiri kaydı olmayan ya da kutu 1'de değildir. Bir grubun
+// tamamlanması kilit durumuna bağlı olmadığı için önceki seviyelere inmek
+// gerekmez.
+func (h *Handlers) isLevelCompleted(userID, level string) (bool, error) {
+	var r levelGroupProgress
+	if err := h.DB.Raw(`SELECT COUNT(*) AS total_words,
+		       COUNT(*) FILTER (WHERE wp.id IS NULL OR wp.box = 1) AS remaining_in_box1`+
+		levelProgressQuery, userID, level).Scan(&r).Error; err != nil {
+		return false, err
 	}
-	for _, g := range groups {
-		if !g.IsCompleted {
-			return false
-		}
-	}
-	return true
+	return r.TotalWords > 0 && r.RemainingInBox1 == 0, nil
+}
+
+// maxGroupForLevel, seviyenin sözlükteki en büyük grup numarasıdır (seviye
+// boşsa ya da tanınmıyorsa 0).
+func maxGroupForLevel(db *gorm.DB, level string) (int, error) {
+	var maxGroup int
+	err := db.Model(&models.DictionaryWord{}).Where("level = ?", level).
+		Select("COALESCE(MAX(grp),0)").Scan(&maxGroup).Error
+	return maxGroup, err
 }
 
 // MaxGroupForLevel: GET /map/levels/:level/max-group
 func (h *Handlers) MaxGroupForLevel(c *fiber.Ctx) error {
-	var maxGroup int
-	h.DB.Model(&models.DictionaryWord{}).Where("level = ?", c.Params("level")).
-		Select("COALESCE(MAX(grp),0)").Scan(&maxGroup)
+	maxGroup, err := maxGroupForLevel(h.DB, c.Params("level"))
+	if err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"maxGroup": maxGroup})
 }
 
@@ -131,6 +148,9 @@ func (h *Handlers) MaxGroupForLevel(c *fiber.Ctx) error {
 func (h *Handlers) ActiveBoxesCount(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	var cnt int64
-	h.DB.Model(&models.WordProgress{}).Where("user_id = ? AND box IN ?", userID, []int{2, 3, 4, 5}).Count(&cnt)
+	if err := h.DB.Model(&models.WordProgress{}).
+		Where("user_id = ? AND box IN ?", userID, []int{2, 3, 4, 5}).Count(&cnt).Error; err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"count": cnt})
 }

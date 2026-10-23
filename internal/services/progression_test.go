@@ -45,6 +45,23 @@ func TestAdvanceGroup(t *testing.T) {
 			level: "C2", group: 20, maxGroup: 20,
 			wantLevel: "C2", wantGroup: 0, wantChanged: false,
 		},
+		{
+			// Tümü tamamlandıysa ikinci çağrı C2 Grup 1'e geri sarmaz.
+			name:  "C2 tamamlanmisken degismez",
+			level: "C2", group: 0, maxGroup: 20,
+			wantLevel: "C2", wantGroup: 0, wantChanged: false,
+		},
+		{
+			name:  "taninmayan seviyede degismez",
+			level: "a1", group: 3, maxGroup: 0,
+			wantLevel: "a1", wantGroup: 3, wantChanged: false,
+		},
+		{
+			// Eski doğrulamasız yazımdan kalan grup 0, seviyenin başıdır.
+			name:  "son seviye disinda grup 0 ilk gruba gecer",
+			level: "A1", group: 0, maxGroup: 12,
+			wantLevel: "A1", wantGroup: 1, wantChanged: false,
+		},
 	}
 
 	for _, c := range cases {
@@ -56,5 +73,34 @@ func TestAdvanceGroup(t *testing.T) {
 					c.wantLevel, c.wantGroup, c.wantChanged)
 			}
 		})
+	}
+}
+
+func TestCompareGroupPositions(t *testing.T) {
+	cases := []struct {
+		aLevel string
+		aGroup int
+		bLevel string
+		bGroup int
+		want   int
+	}{
+		{"A1", 2, "A1", 3, -1},
+		{"A1", 3, "A1", 3, 0},
+		{"A2", 1, "A1", 30, 1},
+		{"B1", 5, "C1", 1, -1},
+		// C2:0 "tüm seviyeler bitti": her konumun ötesinde.
+		{"C2", 0, "C2", 40, 1},
+		{"C2", 40, "C2", 0, -1},
+		{"C2", 0, "C2", 0, 0},
+		// Son seviye dışında grup 0, seviyenin başıdır.
+		{"A1", 0, "A1", 1, -1},
+		// Tanınmayan seviye her konumun gerisinde.
+		{"XYZ", 9, "A1", 1, -1},
+	}
+	for _, c := range cases {
+		if got := CompareGroupPositions(c.aLevel, c.aGroup, c.bLevel, c.bGroup); got != c.want {
+			t.Errorf("CompareGroupPositions(%s:%d, %s:%d) = %d, beklenen %d",
+				c.aLevel, c.aGroup, c.bLevel, c.bGroup, got, c.want)
+		}
 	}
 }

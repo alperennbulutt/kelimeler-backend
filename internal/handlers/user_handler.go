@@ -3,6 +3,7 @@ package handlers
 import (
 	"errors"
 	"time"
+	"unicode/utf8"
 
 	"kelimeler-backend/internal/dto"
 	"kelimeler-backend/internal/middleware"
@@ -26,58 +27,172 @@ func (h *Handlers) UpdateProfile(c *fiber.Ctx) error {
 		if err != nil {
 			return apiErr(fiber.StatusBadRequest, "invalid_display_name", err.Error())
 		}
-		h.DB.Model(&models.User{}).Where("id = ?", userID).Update("display_name", name)
+		if err := h.DB.Model(&models.User{}).Where("id = ?", userID).Update("display_name", name).Error; err != nil {
+			return err
+		}
 	}
-	return h.respondUser(c, userID)
+	return h.respondMe(c, userID)
+}
+
+// current-group gövdesindeki serbest metin ve sayıların sınırları.
+const (
+	maxGroupTitleLen       = 120
+	maxGroupDescriptionLen = 500
+	maxGroupTotalWords     = 500
+)
+
+// errInvalidGroup, seviye/grup doğrulamasının ortak hatasıdır.
+var errInvalidGroup = apiErr(fiber.StatusBadRequest, "invalid_group", "geçersiz seviye ya da grup")
+
+// findUser, kullanıcıyı okur: satır yoksa 404 user_not_found, diğer
+// veritabanı hataları olduğu gibi (500) döner. Bağlantı hatasını "hesap yok"
+// diye bildirmek istemciyi yanlış yönlendirir.
+func findUser(db *gorm.DB, userID string, user *models.User) error {
+	err := db.First(user, "id = ?", userID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return apiErr(fiber.StatusNotFound, "user_not_found", "kullanıcı bulunamadı")
+	}
+	return err
+}
+
+// lockUser, kullanıcı satırını transaction sonuna kadar kilitleyerek okur.
+func lockUser(tx *gorm.DB, userID string, user *models.User) error {
+	return findUser(tx.Clauses(clause.Locking{Strength: "UPDATE"}), userID, user)
+}
+
+// respondMe, güncel kullanıcıyı bugünkü {"user": ...} şeklinde döner.
+func (h *Handlers) respondMe(c *fiber.Ctx, userID string) error {
+	var user models.User
+	if err := findUser(h.DB, userID, &user); err != nil {
+		return err
+	}
+	return c.JSON(fiber.Map{"user": h.userJSON(&user)})
+}
+
+// userJSON, /users/me uçlarının bugünkü yanıt şeklidir ({"user": ...}).
+func (h *Handlers) userJSON(user *models.User) *dto.UserDTO {
+	return dto.NewUserDTO(user, h.linkedProviders(user.ID))
 }
 
 // SetCurrentGroup: PUT /users/me/current-group — user_profile_repository.setCurrentGroup.
+//
+// level A1..C2 olmalı, group 1 ile seviyedeki grup sayısı arasında olmalıdır;
+// aksi halde 400 invalid_group. İşaretçi yalnızca İLERİ yazılır: hedef mevcut
+// konumun gerisindeyse hiçbir alan değişmez ve güncel kullanıcı 200 ile döner
+// (eski bir gruba dönmek "kaldığın yer"i geri almaz).
 func (h *Handlers) SetCurrentGroup(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	var req dto.SetCurrentGroupRequest
 	if err := c.BodyParser(&req); err != nil {
 		return apiErr(fiber.StatusBadRequest, "invalid_request", "geçersiz istek")
 	}
-	updates := map[string]any{
-		"current_level": req.Level,
-		"current_group": req.Group,
+	if services.IndexOfLevel(req.Level) < 0 || req.Group < 1 {
+		return errInvalidGroup
 	}
-	if req.Title != nil {
-		updates["current_group_title"] = *req.Title
+	if (req.Title != nil && utf8.RuneCountInString(*req.Title) > maxGroupTitleLen) ||
+		(req.Description != nil && utf8.RuneCountInString(*req.Description) > maxGroupDescriptionLen) ||
+		(req.TotalWords != nil && (*req.TotalWords < 1 || *req.TotalWords > maxGroupTotalWords)) {
+		return apiErr(fiber.StatusBadRequest, "invalid_request", "başlık, açıklama ya da kelime sayısı sınır dışında")
 	}
-	if req.Description != nil {
-		updates["current_group_description"] = *req.Description
+
+	var user models.User
+	err := h.DB.Transaction(func(tx *gorm.DB) error {
+		maxGroup, err := maxGroupForLevel(tx, req.Level)
+		if err != nil {
+			return err
+		}
+		if req.Group > maxGroup {
+			return errInvalidGroup
+		}
+		if err := lockUser(tx, userID, &user); err != nil {
+			return err
+		}
+		if services.CompareGroupPositions(req.Level, req.Group, user.CurrentLevel, user.CurrentGroup) < 0 {
+			return nil
+		}
+
+		updates := map[string]any{
+			"current_level": req.Level,
+			"current_group": req.Group,
+		}
+		if req.Title != nil {
+			updates["current_group_title"] = *req.Title
+		}
+		if req.Description != nil {
+			updates["current_group_description"] = *req.Description
+		}
+		if req.TotalWords != nil {
+			updates["current_group_total_words"] = *req.TotalWords
+		}
+		if err := tx.Model(&models.User{}).Where("id = ?", userID).Updates(updates).Error; err != nil {
+			return err
+		}
+		return tx.First(&user, "id = ?", userID).Error
+	})
+	if err != nil {
+		return err
 	}
-	if req.TotalWords != nil {
-		updates["current_group_total_words"] = *req.TotalWords
-	}
-	h.DB.Model(&models.User{}).Where("id = ?", userID).Updates(updates)
-	return h.respondUser(c, userID)
+	return c.JSON(fiber.Map{"user": h.userJSON(&user)})
 }
 
 // AdvanceGroup: POST /users/me/advance-group — sonraki level/grup'u sunucu hesaplar.
+//
+// İsteğe bağlı gövde {"level","group"}, istemcinin tamamladığı gruptur:
+// işaretçi tam o gruptaysa bir ileri gider, değilse (zaten ileride ya da
+// geride) hiçbir şey değişmez. Yanıtı kaybolan isteğin yeniden denenmesi bu
+// yüzden grup atlatmaz. Gövdesiz istek (eski istemciler) işaretçiyi koşulsuz
+// bir ileri götürür.
+//
+// İki yolda da kullanıcı satırı kilitlenir: eşzamanlı istekler aynı işaretçiyi
+// okuyup birbirinin yazdığını ezmez. C2'nin son grubu bitince işaretçi
+// "tümü tamamlandı"da (C2, grup 0) kalır, başa sarılmaz.
 func (h *Handlers) AdvanceGroup(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
-	var user models.User
-	if err := h.DB.First(&user, "id = ?", userID).Error; err != nil {
-		return apiErr(fiber.StatusNotFound, "user_not_found", "kullanıcı bulunamadı")
+	var completed *dto.AdvanceGroupRequest
+	if len(c.Body()) > 0 {
+		var req dto.AdvanceGroupRequest
+		if err := c.BodyParser(&req); err != nil {
+			return apiErr(fiber.StatusBadRequest, "invalid_request", "geçersiz istek")
+		}
+		if req.Level != "" {
+			completed = &req
+		}
 	}
 
-	var maxGroup int
-	h.DB.Model(&models.DictionaryWord{}).Where("level = ?", user.CurrentLevel).
-		Select("COALESCE(MAX(grp),0)").Scan(&maxGroup)
+	var user models.User
+	levelChanged := false
+	err := h.DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockUser(tx, userID, &user); err != nil {
+			return err
+		}
+		if completed != nil && (completed.Level != user.CurrentLevel || completed.Group != user.CurrentGroup) {
+			return nil
+		}
 
-	nextLevel, nextGroup, levelChanged := services.AdvanceGroup(user.CurrentLevel, user.CurrentGroup, maxGroup)
-	user.CurrentLevel = nextLevel
-	user.CurrentGroup = nextGroup
-	h.DB.Model(&models.User{}).Where("id = ?", userID).
-		Updates(map[string]any{"current_level": nextLevel, "current_group": nextGroup})
+		maxGroup, err := maxGroupForLevel(tx, user.CurrentLevel)
+		if err != nil {
+			return err
+		}
+		nextLevel, nextGroup, changed := services.AdvanceGroup(user.CurrentLevel, user.CurrentGroup, maxGroup)
+		if nextLevel == user.CurrentLevel && nextGroup == user.CurrentGroup {
+			return nil
+		}
+		if err := tx.Model(&models.User{}).Where("id = ?", userID).
+			Updates(map[string]any{"current_level": nextLevel, "current_group": nextGroup}).Error; err != nil {
+			return err
+		}
+		levelChanged = changed
+		return tx.First(&user, "id = ?", userID).Error
+	})
+	if err != nil {
+		return err
+	}
 
 	return c.JSON(fiber.Map{
-		"user":         dto.NewUserDTO(&user, h.linkedProviders(userID)),
+		"user":         h.userJSON(&user),
 		"levelChanged": levelChanged,
-		"newLevel":     nextLevel,
-		"newGroup":     nextGroup,
+		"newLevel":     user.CurrentLevel,
+		"newGroup":     user.CurrentGroup,
 	})
 }
 
@@ -103,10 +218,7 @@ func usageDTO(u *models.User) dto.DailyUsageDTO {
 // respondUsage, kullanıcının güncel günlük kullanım durumunu döner.
 func (h *Handlers) respondUsage(c *fiber.Ctx, userID string) error {
 	var user models.User
-	if err := h.DB.First(&user, "id = ?", userID).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return apiErr(fiber.StatusNotFound, "user_not_found", "kullanıcı bulunamadı")
-		}
+	if err := findUser(h.DB, userID, &user); err != nil {
 		return err
 	}
 	return c.JSON(usageDTO(&user))
@@ -161,7 +273,9 @@ func (h *Handlers) GetDailyUsage(c *fiber.Ctx) error {
 // ResetDailyUsage: POST /users/me/usage/reset
 func (h *Handlers) ResetDailyUsage(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
-	h.DB.Model(&models.User{}).Where("id = ?", userID).Updates(usageResetValues(time.Now()))
+	if err := h.DB.Model(&models.User{}).Where("id = ?", userID).Updates(usageResetValues(time.Now())).Error; err != nil {
+		return err
+	}
 	return h.respondUsage(c, userID)
 }
 
@@ -281,8 +395,8 @@ func (h *Handlers) GrantNoFillPass(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 
 	var user models.User
-	if err := h.DB.First(&user, "id = ?", userID).Error; err != nil {
-		return apiErr(fiber.StatusNotFound, "user_not_found", "kullanıcı bulunamadı")
+	if err := findUser(h.DB, userID, &user); err != nil {
+		return err
 	}
 	now := time.Now()
 	if err := resetUsageIfStale(h.DB, userID, now); err != nil {

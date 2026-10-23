@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -19,8 +20,12 @@ import (
 func (h *Handlers) GetUserWord(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	var wp models.WordProgress
-	if err := h.DB.Where("user_id = ? AND word_id = ?", userID, c.Params("wordId")).First(&wp).Error; err != nil {
+	err := h.DB.Where("user_id = ? AND word_id = ?", userID, c.Params("wordId")).First(&wp).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return apiErr(fiber.StatusNotFound, "not_found", "kelime ilerlemesi bulunamadı")
+	}
+	if err != nil {
+		return err
 	}
 	return c.JSON(&wp)
 }
@@ -38,7 +43,17 @@ func (h *Handlers) GetProgressForGroup(c *fiber.Ctx) error {
 	return c.JSON(list)
 }
 
-// LearnWord: POST /progress/learn — yeni kelimeyi kutu 2'ye alır (idempotent upsert).
+// LearnWord: POST /progress/learn — yeni kelimeyi kutu 2'ye alır.
+//
+// Kelime sözlükte olmalıdır; seviye, grup ve metinler istemciden değil sözlük
+// satırından alınır (gövdedeki level/group/english/turkish yok sayılır; mevcut
+// istemci onları göndermeye devam edebilir).
+//
+// İdempotenttir: kelimenin zaten ilerlemesi varsa (kutu 2 ve üstü) ilerleme
+// değiştirilmez (yalnızca sözlükten farklı yazılmış seviye/grup/metin
+// düzeltilir) ve mevcut durum döner. Aksi halde iki cihaz ya da bayat bir
+// öğrenme destesi, ilerlemiş bir kelimeyi sessizce kutu 2'ye geri atardı.
+// Yalnızca kutu 1'deki eski (Firestore'dan gelen) kayıtlar kutu 2'ye alınır.
 func (h *Handlers) LearnWord(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	var req dto.LearnRequest
@@ -46,25 +61,58 @@ func (h *Handlers) LearnWord(c *fiber.Ctx) error {
 		return apiErr(fiber.StatusBadRequest, "invalid_request", "wordId gerekli")
 	}
 
+	var word models.DictionaryWord
+	if err := h.DB.First(&word, "id = ?", req.WordID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return apiErr(fiber.StatusNotFound, "unknown_word", "kelime sözlükte bulunamadı")
+		}
+		return err
+	}
+
 	wp := models.WordProgress{
 		UserID:  userID,
-		WordID:  req.WordID,
-		Level:   req.Level,
-		Grp:     req.Group,
-		English: req.English,
-		Turkish: req.Turkish,
+		WordID:  word.ID,
+		Level:   word.Level,
+		Grp:     word.Grp,
+		English: word.English,
+		Turkish: word.Turkish,
 		Box:     1,
 	}
 	services.LearnNewWord(&wp)
 
-	if err := h.DB.Clauses(clause.OnConflict{
+	// Çakışmada yalnızca kutu 1'deki satır güncellenir; diğerlerinde INSERT
+	// hiçbir satırı değiştirmez ve mevcut kayıt okunup döner.
+	res := h.DB.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "user_id"}, {Name: "word_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"level", "grp", "box", "last_review_date", "next_review_date",
 			"wrong_count", "learned", "english", "turkish", "updated_at",
 		}),
-	}).Create(&wp).Error; err != nil {
-		return err
+		Where: clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: "word_progresses.box <= 1"}}},
+	}).Create(&wp)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		// İlerleme (kutu, tarihler, sayaçlar) korunur; yalnızca sözlükten gelen
+		// alanlar sözlük satırıyla eşitlenir. Seviyesi/grubu farklı yazılmış eski
+		// bir kayıt aksi halde ne öğrenme ekranının grup sorgusunda ne de harita
+		// tamamlanmasında görünür: kelime her seferinde yeniden sorulur ve grup
+		// hiçbir zaman tamamlanmış sayılmaz (eski kod bunu kutu 2'ye sıfırlayarak
+		// düzeltiyordu).
+		if err := h.DB.Model(&models.WordProgress{}).
+			Where("user_id = ? AND word_id = ? AND (level <> ? OR grp <> ? OR english <> ? OR turkish <> ?)",
+				userID, word.ID, word.Level, word.Grp, word.English, word.Turkish).
+			Updates(map[string]any{
+				"level": word.Level, "grp": word.Grp, "english": word.English, "turkish": word.Turkish,
+			}).Error; err != nil {
+			return err
+		}
+		var existing models.WordProgress
+		if err := h.DB.Where("user_id = ? AND word_id = ?", userID, word.ID).First(&existing).Error; err != nil {
+			return err
+		}
+		return c.JSON(&existing)
 	}
 	return c.JSON(&wp)
 }
@@ -72,28 +120,24 @@ func (h *Handlers) LearnWord(c *fiber.Ctx) error {
 // Swipe: POST /progress/swipe {wordId, direction} — box matematiği sunucuda.
 // Tekrar cevapları (swipe öncesi kutu 2..5) günlük review_answers_today
 // sayacına da yazılır; yanıt gövdesi yalnızca kelime ilerlemesidir.
+//
+// Kelime satırı transaction boyunca kilitlidir (SELECT ... FOR UPDATE): aynı
+// kelimeye eşzamanlı gelen cevaplar sıraya girer ve her biri öncekinin
+// yazdığı kutuyu görür. Vadesi gelmemiş kelimeye (bkz. services.AcceptsSwipe)
+// gelen swipe hiçbir şeyi değiştirmez, sayılmaz ve mevcut durumu döner; böylece
+// yinelenen ya da eşzamanlı cevap kelimeyi iki kez ilerletmez.
 func (h *Handlers) Swipe(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	var req dto.SwipeRequest
 	if err := c.BodyParser(&req); err != nil || req.WordID == "" {
 		return apiErr(fiber.StatusBadRequest, "invalid_request", "wordId gerekli")
 	}
-
-	var wp models.WordProgress
-	if err := h.DB.Where("user_id = ? AND word_id = ?", userID, req.WordID).First(&wp).Error; err != nil {
-		return apiErr(fiber.StatusNotFound, "not_found", "kelime ilerlemesi bulunamadı")
-	}
-
-	// Cevabın tekrar sayılıp sayılmayacağı swipe ÖNCESİ kutuya bağlıdır; aşağıdaki
-	// mutasyon kutuyu değiştirir (öğrenme ekranının 1 → 2 swipe'ı sonradan
-	// bakılırsa tekrar cevabı gibi görünür).
-	preBox := wp.Box
-
+	var apply func(*models.WordProgress)
 	switch req.Direction {
 	case "right":
-		services.OnRightSwipe(&wp)
+		apply = services.OnRightSwipe
 	case "left":
-		services.OnLeftSwipe(&wp)
+		apply = services.OnLeftSwipe
 	default:
 		return apiErr(fiber.StatusBadRequest, "invalid_request", "direction 'right' veya 'left' olmalı")
 	}
@@ -102,7 +146,26 @@ func (h *Handlers) Swipe(c *fiber.Ctx) error {
 	// sayılmazsa kapı gevşer, cevap sayılıp kelime ilerlemezse aynı kelime
 	// yeniden gelir ve iki kez sayılır.
 	now := time.Now()
+	_, endOfToday := reviewDayBounds(now)
+	var wp models.WordProgress
 	err := h.DB.Transaction(func(tx *gorm.DB) error {
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("user_id = ? AND word_id = ?", userID, req.WordID).First(&wp).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return apiErr(fiber.StatusNotFound, "not_found", "kelime ilerlemesi bulunamadı")
+		}
+		if err != nil {
+			return err
+		}
+		if !services.AcceptsSwipe(&wp, endOfToday) {
+			return nil
+		}
+
+		// Cevabın tekrar sayılıp sayılmayacağı swipe ÖNCESİ kutuya bağlıdır;
+		// mutasyon kutuyu değiştirir (öğrenme ekranının 1 → 2 swipe'ı sonradan
+		// bakılırsa tekrar cevabı gibi görünür).
+		preBox := wp.Box
+		apply(&wp)
 		if err := tx.Save(&wp).Error; err != nil {
 			return err
 		}
@@ -112,38 +175,91 @@ func (h *Handlers) Swipe(c *fiber.Ctx) error {
 		if err := resetUsageIfStale(tx, userID, now); err != nil {
 			return err
 		}
-		return tx.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
+		if err := tx.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
 			"review_answers_today": gorm.Expr("review_answers_today + 1"),
 			"last_reset_date":      usageTouchedAt(now),
-		}).Error
+		}).Error; err != nil {
+			return err
+		}
+		if (preBox == 6) == (wp.Box == 6) {
+			return nil
+		}
+		// Kullanıcı satırı yukarıdaki UPDATE'ten beri bu transaction'da kilitli:
+		// aynı kullanıcının eşzamanlı başka bir swipe'ı burada sayımı yapmadan
+		// önce bekler ve bu transaction'ın commit'ini görür.
+		return syncTotalLearned(tx, userID)
 	})
 	if err != nil {
 		return err
 	}
-	h.syncTotalLearned(userID)
 	return c.JSON(&wp)
 }
 
 // syncTotalLearned, users.total_learned cache'ini count(box==6) ile eşitler.
-func (h *Handlers) syncTotalLearned(userID string) {
-	var cnt int64
-	h.DB.Model(&models.WordProgress{}).Where("user_id = ? AND box = 6", userID).Count(&cnt)
-	h.DB.Model(&models.User{}).Where("id = ?", userID).Update("total_learned", cnt)
+func syncTotalLearned(tx *gorm.DB, userID string) error {
+	return tx.Model(&models.User{}).Where("id = ?", userID).Update("total_learned",
+		tx.Model(&models.WordProgress{}).Select("COUNT(*)").Where("user_id = ? AND box = 6", userID),
+	).Error
 }
 
-// ReviewWordsForBox: GET /progress/review/box/:box?date=YYYY-MM-DD
-// nextReviewDate <= bugün filtresi sunucuda (Postgres index'i kullanır).
+// maxReviewListLimit, tekrar listesinde ?limit ile istenebilecek en çok kelime.
+const maxReviewListLimit = 200
+
+// reviewBox, kullanıcının bir kutusundaki kelime ilerlemeleridir.
+func reviewBox(userID string, box int) func(*gorm.DB) *gorm.DB {
+	return func(db *gorm.DB) *gorm.DB {
+		return db.Model(&models.WordProgress{}).Where("user_id = ? AND box = ?", userID, box)
+	}
+}
+
+// dueForReview, "bugün tekrar edilecek" kümesinin tek tanımıdır: sonraki
+// tekrar tarihi yok ya da bugünün bitişinden (end, hariç) önce. Liste ucu ve
+// /counts'taki today aynı kümeyi bu koşulla sayar; swipe vadesi
+// (services.AcceptsSwipe) de aynı kuraldır.
+func dueForReview(end time.Time) func(*gorm.DB) *gorm.DB {
+	return func(db *gorm.DB) *gorm.DB {
+		return db.Where("(next_review_date IS NULL OR next_review_date < ?)", end)
+	}
+}
+
+// reviewDay, tekrar uçlarının "bugün"ünü çözer: ?date=YYYY-MM-DD verilmişse o
+// takvim günü, yoksa şimdi; ikisi de kullanım saat diliminde
+// (services.UsageLocation). Çözülemeyen tarih "şimdi" sayılır.
+//
+// next_review_date bir timestamptz'dir (mutlak an): sınırları burada saat
+// dilimiyle hesaplayıp anla karşılaştırmak, oturumun ya da sürecin saat
+// diliminden etkilenmez.
+func reviewDay(dateParam string) (start, end time.Time) {
+	if dateParam != "" {
+		if d, err := time.ParseInLocation("2006-01-02", dateParam, services.UsageLocation()); err == nil {
+			return reviewDayBounds(d)
+		}
+	}
+	return reviewDayBounds(time.Now())
+}
+
+// ReviewWordsForBox: GET /progress/review/box/:box?date=YYYY-MM-DD&limit=N
+// Bugün vadesi gelmiş kelimeler (bkz. dueForReview), sabit sırayla: önce
+// tarihsizler, sonra en eski vade; eşitlikte eklenme sırası. limit (1..200)
+// verilmezse liste sınırsızdır (eski istemciler).
 func (h *Handlers) ReviewWordsForBox(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	box, _ := strconv.Atoi(c.Params("box"))
-	today := parseQueryDate(c.Query("date"))
-	endOfToday := startOfDay(today).AddDate(0, 0, 1) // ertesi gün 00:00 (exclusive üst sınır)
+	limit := -1
+	if raw := c.Query("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > maxReviewListLimit {
+			return apiErr(fiber.StatusBadRequest, "invalid_limit",
+				fmt.Sprintf("limit 1 ile %d arasında olmalı", maxReviewListLimit))
+		}
+		limit = n
+	}
+	_, end := reviewDay(c.Query("date"))
 
-	var list []models.WordProgress
-	if err := h.DB.Where(
-		"user_id = ? AND box = ? AND (next_review_date IS NULL OR next_review_date < ?)",
-		userID, box, endOfToday,
-	).Find(&list).Error; err != nil {
+	list := []models.WordProgress{}
+	if err := h.DB.Scopes(reviewBox(userID, box), dueForReview(end)).
+		Order("next_review_date ASC NULLS FIRST").Order("id").
+		Limit(limit).Find(&list).Error; err != nil {
 		return err
 	}
 	return c.JSON(list)
@@ -151,34 +267,33 @@ func (h *Handlers) ReviewWordsForBox(c *fiber.Ctx) error {
 
 // UpcomingCountsForBox: GET /progress/review/box/:box/counts?date=YYYY-MM-DD
 // user_word_repository.getUpcomingCountsForBox portu (0..30 gün dağılımı + en yoğun gün).
+// Gün farkları kullanım saat diliminin takvim günleriyle hesaplanır; 0. gün
+// (today) liste ucuyla aynı koşuldan (dueForReview) sayılır.
 func (h *Handlers) UpcomingCountsForBox(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	box, _ := strconv.Atoi(c.Params("box"))
-	todayDate := startOfDay(parseQueryDate(c.Query("date")))
+	start, end := reviewDay(c.Query("date"))
 
-	var list []models.WordProgress
-	if err := h.DB.Where("user_id = ? AND box = ?", userID, box).Find(&list).Error; err != nil {
+	var today int64
+	if err := h.DB.Scopes(reviewBox(userID, box), dueForReview(end)).Count(&today).Error; err != nil {
+		return err
+	}
+	// 1..30. günler: [end, start+31 gün) aralığındaki vadeler.
+	var upcoming []time.Time
+	if err := h.DB.Scopes(reviewBox(userID, box)).
+		Where("next_review_date >= ? AND next_review_date < ?", end, start.AddDate(0, 0, 31)).
+		Pluck("next_review_date", &upcoming).Error; err != nil {
 		return err
 	}
 
 	dailyCounts := map[int]int{}
-	totalMonth := 0
-	for _, wp := range list {
-		if wp.NextReviewDate == nil {
-			dailyCounts[0]++
-			totalMonth++
-			continue
-		}
-		nextDate := startOfDay(*wp.NextReviewDate)
-		diffDays := int(nextDate.Sub(todayDate).Hours() / 24)
-		switch {
-		case diffDays <= 0:
-			dailyCounts[0]++
-			totalMonth++
-		case diffDays <= 30:
-			dailyCounts[diffDays]++
-			totalMonth++
-		}
+	if today > 0 {
+		dailyCounts[0] = int(today)
+	}
+	totalMonth := int(today)
+	for _, next := range upcoming {
+		dailyCounts[usageDaysBetween(start, next)]++
+		totalMonth++
 	}
 
 	busiestIdx, maxCount := -1, -1
@@ -205,7 +320,7 @@ func (h *Handlers) UpcomingCountsForBox(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(dto.UpcomingCounts{
-		Today:           dailyCounts[0],
+		Today:           int(today),
 		Tomorrow:        dailyCounts[1],
 		Later:           later,
 		DailyCounts:     dcStr,
