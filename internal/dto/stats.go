@@ -35,6 +35,11 @@ type StatsSummaryDTO struct {
 	LastLearnedWords  []LearnedWordDTO `json:"lastLearnedWords"`
 	TotalWordsByLevel map[string]int   `json:"totalWordsByLevel"`
 	NewlyEarnedBadges []BadgeDTO       `json:"newlyEarnedBadges"`
+
+	// LevelTotals, sözlükteki seviye başına gerçek kelime sayısı (K5). Yalnızca
+	// kelimesi olan seviyeler yer alır; sözlük boşsa alan hiç gönderilmez ve
+	// istemci eski sabitlerine düşer.
+	LevelTotals map[string]int `json:"levelTotals,omitempty"`
 }
 
 type LearnedWordsPageDTO struct {

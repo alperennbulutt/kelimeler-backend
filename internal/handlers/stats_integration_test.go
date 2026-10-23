@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"kelimeler-backend/internal/config"
 	"kelimeler-backend/internal/db"
 	"kelimeler-backend/internal/middleware"
+	"kelimeler-backend/internal/models"
 	"kelimeler-backend/internal/services"
 
 	"github.com/gofiber/fiber/v2"
@@ -35,7 +37,7 @@ func statsApp(h *Handlers, userID string) *fiber.App {
 	return app
 }
 
-func get(t *testing.T, app *fiber.App, path string) (int, map[string]any) {
+func statsGet(t *testing.T, app *fiber.App, path string) (int, map[string]any) {
 	t.Helper()
 	return send(t, app, httptest.NewRequest(http.MethodGet, path, nil))
 }
@@ -131,11 +133,11 @@ func kayitliGunler(t *testing.T, gdb *gorm.DB, userID string) []string {
 	return gunler
 }
 
-// loginDates, GET /stats/login-dates yanıtındaki tarihleri döner.
-func loginDates(t *testing.T, app *fiber.App) []string {
+// statsLoginDates, GET /stats/login-dates yanıtındaki tarihleri döner.
+func statsLoginDates(t *testing.T, app *fiber.App) []string {
 	t.Helper()
 
-	status, body := get(t, app, "/stats/login-dates")
+	status, body := statsGet(t, app, "/stats/login-dates")
 	if status != fiber.StatusOK {
 		t.Fatalf("GET /stats/login-dates status = %d (body: %v)", status, body)
 	}
@@ -171,7 +173,7 @@ func TestLogDailyLogin_GunTRGeceYarisindaDoner(t *testing.T) {
 	if got, want := kayitliGunler(t, gdb, u.ID), []string{"2026-10-23", "2026-10-24", "2026-10-25"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("kayıtlı günler = %v, beklenen %v", got, want)
 	}
-	if got, want := loginDates(t, app), []string{"2026-10-25", "2026-10-24", "2026-10-23"}; !reflect.DeepEqual(got, want) {
+	if got, want := statsLoginDates(t, app), []string{"2026-10-25", "2026-10-24", "2026-10-23"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("login-dates = %v, beklenen %v", got, want)
 	}
 }
@@ -226,7 +228,7 @@ func TestStatsSummary_HaftalikVeriVeSeriTRGunuyle(t *testing.T) {
 	girisYap(t, app, utcAn(t, "2026-10-22T10:00:00Z")) // TR 22 Ekim 13:00
 	girisYap(t, app, utcAn(t, "2026-10-22T23:30:00Z")) // TR 23 Ekim 02:30
 
-	status, body := get(t, app, "/stats/summary")
+	status, body := statsGet(t, app, "/stats/summary")
 	if status != fiber.StatusOK {
 		t.Fatalf("GET /stats/summary status = %d (body: %v)", status, body)
 	}
@@ -346,11 +348,171 @@ func TestStatsSummary_YeniRozetEszamanliIsteklerdeBirKezDoner(t *testing.T) {
 	}
 
 	// Sonraki çağrı artık yeni rozet döndürmez.
-	status, body := get(t, app, "/stats/summary")
+	status, body := statsGet(t, app, "/stats/summary")
 	if status != fiber.StatusOK {
 		t.Fatalf("GET /stats/summary status = %d (body: %v)", status, body)
 	}
 	if ids := yeniRozetler(t, body); len(ids) != 0 {
 		t.Errorf("ikinci çağrıda yeni rozet döndü: %v", ids)
 	}
+}
+
+// testSozlukKelimeleri, sözlüğe verilen seviyede n kelime ekler, seviye
+// toplamları önbelleğini boşaltır ve test bitince kelimeleri siler. Sözlük
+// paylaşılan bir tablodur: testler mevcut içeriğe değil, eklediklerine ve
+// veritabanındaki gerçek sayılara bakar.
+func testSozlukKelimeleri(t *testing.T, gdb *gorm.DB, level string, n int) []string {
+	t.Helper()
+
+	onek := "itest_bb_" + time.Now().Format("150405.000000000") + "_"
+	ids := make([]string, 0, n)
+	for i := 1; i <= n; i++ {
+		id := fmt.Sprintf("%s%d", onek, i)
+		w := &models.DictionaryWord{ID: id, English: "word" + id, Turkish: "kelime", Level: level, Grp: 1, WordOrder: 1000 + i}
+		if err := gdb.Create(w).Error; err != nil {
+			t.Fatalf("sözlük kelimesi eklenemedi: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	services.ResetLevelTotalsCache()
+	t.Cleanup(func() {
+		gdb.Where("id IN ?", ids).Delete(&models.DictionaryWord{})
+		services.ResetLevelTotalsCache()
+	})
+	return ids
+}
+
+// sozlukSayilari, veritabanındaki seviye başına sözlük kelime sayısını okur.
+func sozlukSayilari(t *testing.T, gdb *gorm.DB) map[string]int {
+	t.Helper()
+
+	var rows []struct {
+		Level string
+		N     int
+	}
+	if err := gdb.Raw("SELECT level, COUNT(*) AS n FROM dictionary_words GROUP BY level").Scan(&rows).Error; err != nil {
+		t.Fatalf("sözlük sayılamadı: %v", err)
+	}
+	out := map[string]int{}
+	for _, r := range rows {
+		if services.IndexOfLevel(r.Level) >= 0 {
+			out[r.Level] = r.N
+		}
+	}
+	return out
+}
+
+func statsIntMap(t *testing.T, body map[string]any, key string) map[string]int {
+	t.Helper()
+
+	raw, ok := body[key].(map[string]any)
+	if !ok {
+		t.Fatalf("%q alanı yok ya da nesne değil (body: %v)", key, body)
+	}
+	out := make(map[string]int, len(raw))
+	for k, v := range raw {
+		out[k] = int(v.(float64))
+	}
+	return out
+}
+
+func rozetKazanildi(t *testing.T, body map[string]any, id string) bool {
+	t.Helper()
+
+	raw, _ := body["badges"].([]any)
+	for _, b := range raw {
+		m := b.(map[string]any)
+		if m["id"] == id {
+			return m["isEarned"].(bool)
+		}
+	}
+	t.Fatalf("%s rozeti yanıtta yok", id)
+	return false
+}
+
+func statsOzet(t *testing.T, app *fiber.App) map[string]any {
+	t.Helper()
+
+	status, body := statsGet(t, app, "/stats/summary")
+	if status != fiber.StatusOK {
+		t.Fatalf("GET /stats/summary status = %d (body: %v)", status, body)
+	}
+	return body
+}
+
+func TestStatsSummary_LevelTotalsSozluktenGelir(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	app := statsApp(New(gdb, &config.Config{AppEnv: "test"}, nil, nil), u.ID)
+
+	testSozlukKelimeleri(t, gdb, "C2", 3)
+	want := sozlukSayilari(t, gdb)
+
+	body := statsOzet(t, app)
+	if got := statsIntMap(t, body, "levelTotals"); !reflect.DeepEqual(got, want) {
+		t.Errorf("levelTotals = %v, beklenen (sözlükteki sayılar) %v", got, want)
+	}
+	total := statsIntMap(t, body, "totalWordsByLevel")
+	for _, lvl := range services.Levels {
+		beklenen := want[lvl]
+		if beklenen == 0 {
+			beklenen = services.FallbackLevelTotals[lvl]
+		}
+		if total[lvl] != beklenen {
+			t.Errorf("totalWordsByLevel[%s] = %d, beklenen %d", lvl, total[lvl], beklenen)
+		}
+	}
+}
+
+func TestStatsSummary_SeviyeRozetiSozluktekiTumKelimelerleKazanilir(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	app := statsApp(New(gdb, &config.Config{AppEnv: "test"}, nil, nil), u.ID)
+
+	ids := testSozlukKelimeleri(t, gdb, "C2", 3)
+
+	// Kullanıcı sözlükteki bütün C2 kelimelerini kutu 2'ye taşımış, biri hariç.
+	if err := gdb.Exec(`INSERT INTO word_progresses (user_id, word_id, level, grp, box, created_at, updated_at)
+		SELECT ?, id, level, grp, 2, now(), now() FROM dictionary_words WHERE level = 'C2'`, u.ID).Error; err != nil {
+		t.Fatalf("ilerleme yazılamadı: %v", err)
+	}
+	if err := gdb.Exec("UPDATE word_progresses SET box = 1 WHERE user_id = ? AND word_id = ?", u.ID, ids[0]).Error; err != nil {
+		t.Fatalf("ilerleme güncellenemedi: %v", err)
+	}
+	// Sözlükte olmayan (silinmiş) bir kelimenin ilerlemesi eksik kelimeyi telafi etmemeli.
+	statsTestWord(t, gdb, u.ID, "itest_bb_sozlukte_yok", "C2", 2)
+
+	if body := statsOzet(t, app); rozetKazanildi(t, body, "level_C2") {
+		t.Fatalf("level_C2 bir kelime kutu 1'deyken kazanıldı")
+	}
+
+	if err := gdb.Exec("UPDATE word_progresses SET box = 2 WHERE user_id = ? AND word_id = ?", u.ID, ids[0]).Error; err != nil {
+		t.Fatalf("ilerleme güncellenemedi: %v", err)
+	}
+	body := statsOzet(t, app)
+	if !rozetKazanildi(t, body, "level_C2") {
+		t.Errorf("level_C2 sözlükteki bütün kelimeler kutu 2'deyken kazanılmadı")
+	}
+	if !statsIcerir(yeniRozetler(t, body), "level_C2") {
+		t.Errorf("level_C2 yeni kazanılanlarda yok: %v", yeniRozetler(t, body))
+	}
+}
+
+// statsTestWord, testWord'ün seviyesi verilebilen halidir.
+func statsTestWord(t *testing.T, gdb *gorm.DB, userID, wordID, level string, box int) {
+	t.Helper()
+
+	wp := &models.WordProgress{UserID: userID, WordID: wordID, Level: level, Grp: 1, Box: box}
+	if err := gdb.Create(wp).Error; err != nil {
+		t.Fatalf("kelime ilerlemesi oluşturulamadı: %v", err)
+	}
+}
+
+func statsIcerir(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
 }

@@ -137,8 +137,18 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 		earnedBefore[id] = true
 	}
 
+	levelTotals, err := h.levelTotals()
+	if err != nil {
+		return err
+	}
+	levelProgress, err := h.levelProgress(userID)
+	if err != nil {
+		return err
+	}
+
 	allBadges, newlyEarned := services.ComputeBadges(services.BadgeInput{
-		ActiveByLevel:    activeByLevel,
+		ActiveByLevel:    levelProgress,
+		LevelTotals:      levelTotals,
 		TotalActiveCount: len(active),
 		LearnedCount:     totalLearned,
 		CurrentStreak:    streak,
@@ -177,9 +187,55 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 		WeeklyLoginData:   weeklyLoginData,
 		Badges:            badgeDTOs,
 		LastLearnedWords:  lastLearned,
-		TotalWordsByLevel: services.LevelTargets,
+		TotalWordsByLevel: services.TotalWordsByLevel(levelTotals),
+		LevelTotals:       levelTotals,
 		NewlyEarnedBadges: newlyDTOs,
 	})
+}
+
+// levelTotals, sözlükteki seviye başına kelime sayısıdır (önbellekli; sözlük
+// yalnızca seed/import ile değişir). Yalnızca kelimesi olan seviyeler döner.
+func (h *Handlers) levelTotals() (map[string]int, error) {
+	return services.CachedLevelTotals(time.Now(), func() (map[string]int, error) {
+		var rows []struct {
+			Level string
+			N     int
+		}
+		if err := h.DB.Model(&models.DictionaryWord{}).
+			Select("level, COUNT(*) AS n").Group("level").
+			Scan(&rows).Error; err != nil {
+			return nil, err
+		}
+		totals := map[string]int{}
+		for _, r := range rows {
+			if services.IndexOfLevel(r.Level) >= 0 && r.N > 0 {
+				totals[r.Level] = r.N
+			}
+		}
+		return totals, nil
+	})
+}
+
+// levelProgress, kullanıcının box>=2 kelimelerini sözlükteki seviyesine göre
+// sayar. Seviye rozeti bununla levelTotals'ı karşılaştırır; haritanın grup
+// tamamlama ölçütüyle (her kelime ilerlemeli ve kutu 1'de değil) aynıdır.
+func (h *Handlers) levelProgress(userID string) (map[string]int, error) {
+	var rows []struct {
+		Level string
+		N     int
+	}
+	if err := h.DB.Raw(`SELECT dw.level, COUNT(*) AS n
+		FROM word_progresses wp
+		JOIN dictionary_words dw ON dw.id = wp.word_id
+		WHERE wp.user_id = ? AND wp.box >= 2
+		GROUP BY dw.level`, userID).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]int, len(rows))
+	for _, r := range rows {
+		out[r.Level] = r.N
+	}
+	return out, nil
 }
 
 // insertEarnedBadges, rozetleri earned_badges'e ekler (zaten varsa dokunmaz) ve
