@@ -643,3 +643,80 @@ func TestLearnedWords_SayfalamaSinirliVeKaymaz(t *testing.T) {
 		t.Errorf("sayfalar %d farklı kelime döndü, beklenen 205", len(gorulen))
 	}
 }
+
+func TestLoginDates_Son365GunYenidenEskiye(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	app := statsApp(New(gdb, &config.Config{AppEnv: "test"}, nil, nil), u.ID)
+
+	now := utcAn(t, "2026-10-23T09:00:00Z") // TR 23 Ekim 12:00
+	sabitSaat(t, now)
+
+	for _, r := range []struct{ gun, an string }{
+		{"2025-09-01", "2025-09-01T09:00:00Z"}, // pencere dışında
+		// 366 gün önce yazılmış eski UTC kaydı; created_at TR'de 365 gün önceye düşer.
+		{"2025-10-22", "2025-10-22T22:30:00Z"},
+		{"2026-01-15", "2026-01-15T12:00:00Z"},
+		{"2026-10-22", "2026-10-22T12:00:00Z"},
+	} {
+		if err := gdb.Exec(`INSERT INTO daily_logins (user_id, login_date, created_at)
+			VALUES (?, CAST(? AS date), ?)`, u.ID, r.gun, utcAn(t, r.an)).Error; err != nil {
+			t.Fatalf("giriş kaydı yazılamadı: %v", err)
+		}
+	}
+
+	want := []string{"2026-10-22", "2026-01-15", "2025-10-23"}
+	if got := statsLoginDates(t, app); !reflect.DeepEqual(got, want) {
+		t.Errorf("login-dates = %v, beklenen %v", got, want)
+	}
+
+	// Bugün girilmediği için seri 0 (dün girişli olsa bile).
+	if got := intField(t, statsOzet(t, app), "currentStreak"); got != 0 {
+		t.Errorf("currentStreak = %d, beklenen 0", got)
+	}
+}
+
+func TestLogDailyLogin_AyniGunTekrarIdempotent(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	app := statsApp(New(gdb, &config.Config{AppEnv: "test"}, nil, nil), u.ID)
+
+	at := utcAn(t, "2026-10-23T09:00:00Z")
+	for i := 0; i < 3; i++ {
+		if got := girisYap(t, app, at); got != 1 {
+			t.Errorf("%d. giriş serisi = %d, beklenen 1", i+1, got)
+		}
+	}
+	if got := kayitliGunler(t, gdb, u.ID); !reflect.DeepEqual(got, []string{"2026-10-23"}) {
+		t.Errorf("kayıtlı günler = %v, beklenen [2026-10-23]", got)
+	}
+}
+
+func TestStatsSummary_YanitSekliGeriyeUyumlu(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	app := statsApp(New(gdb, &config.Config{AppEnv: "test"}, nil, nil), u.ID)
+
+	// Yeni kullanıcı (ilerleme ve giriş yok): yayındaki istemcinin okuduğu
+	// alanların hepsi bulunmalı; diziler null değil [] olmalı.
+	body := statsOzet(t, app)
+	for _, alan := range []string{
+		"totalLearned", "currentStreak", "learnedByLevel", "box6ByLevel",
+		"box2Count", "box3Count", "box4Count", "box5Count", "weeklyLoginData",
+		"badges", "lastLearnedWords", "totalWordsByLevel", "newlyEarnedBadges",
+	} {
+		if _, ok := body[alan]; !ok {
+			t.Errorf("%q alanı yanıtta yok", alan)
+		}
+	}
+	for _, alan := range []string{"lastLearnedWords", "newlyEarnedBadges", "badges"} {
+		if _, ok := body[alan].([]any); !ok {
+			t.Errorf("%q dizi değil: %v", alan, body[alan])
+		}
+	}
+	for _, lvl := range services.Levels {
+		if statsIntMap(t, body, "totalWordsByLevel")[lvl] <= 0 {
+			t.Errorf("totalWordsByLevel[%s] pozitif değil (istemci paydası)", lvl)
+		}
+	}
+}
