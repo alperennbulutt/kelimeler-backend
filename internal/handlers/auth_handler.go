@@ -164,7 +164,8 @@ func (h *Handlers) Register(c *fiber.Ctx) error {
 	}
 	displayName := req.DisplayName
 	if displayName == "" {
-		displayName = emailLocalPart(req.Email)
+		// Yerel kısım 64 karaktere kadar çıkabilir: ad sınırına kesilir.
+		displayName = dto.SanitizeDisplayName(emailLocalPart(req.Email))
 	}
 
 	user := models.User{
@@ -472,6 +473,13 @@ func (h *Handlers) Refresh(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	// Yanıt da commit'ten önce hazırlanır: rotasyon commit edildikten sonra
+	// yanıt hazırlanamasaydı istemci 500 alır, yeni token'ı hiç görmez ve
+	// yeniden denemesi tolerans süresini aşarsa oturum ailesi iptal edilirdi.
+	resp, err := h.authResponse(&user, pair)
+	if err != nil {
+		return err
+	}
 
 	// Karar, token satırı kilitliyken taze haliyle verilir ve bütün yazımlar
 	// tek transaction'dadır. Ayrı yazılsalardı, iptalden sonra başarısız olan
@@ -489,12 +497,6 @@ func (h *Handlers) Refresh(c *fiber.Ctx) error {
 	}
 	switch outcome {
 	case refreshIssued:
-		// Yanıt hazırlanamazsa istemci 500 alıp aynı token'la yeniden dener;
-		// rotasyon commit edildiği için deneme tolerans yolundan geçer.
-		resp, err := h.authResponse(&user, pair)
-		if err != nil {
-			return err
-		}
 		return c.JSON(resp)
 	case refreshReused:
 		log.Printf("auth: iptal edilmiş refresh token yeniden kullanıldı, oturum ailesi iptal edildi (user=%s, token=%d)",
@@ -670,10 +672,20 @@ func (h *Handlers) linkProvider(c *fiber.Ctx, userID, provider string, si *auth.
 	}).Error; err != nil {
 		// Kimlik bu arada başka bir hesaba bağlandı ya da hesapta bu sağlayıcının
 		// başka bir kimliği var. Diğer hatalar geçicidir: 500 döner.
-		if isUniqueViolation(err) {
-			return apiErr(fiber.StatusConflict, "provider_already_linked", "bağlama başarısız")
+		if !isUniqueViolation(err) {
+			return err
 		}
-		return err
+		// Aynı bağlama isteği eşzamanlı iki kez geldiyse (çift dokunuş) öteki
+		// istek kimliği bu kullanıcıya bağlamıştır: tekrar istek gibi 200 döner.
+		var winner models.AuthIdentity
+		rerr := h.DB.Where("provider = ? AND provider_subject = ?", provider, si.Subject).First(&winner).Error
+		if rerr == nil && winner.UserID == userID {
+			return h.respondUser(c, userID)
+		}
+		if rerr != nil && !errors.Is(rerr, gorm.ErrRecordNotFound) {
+			return rerr
+		}
+		return apiErr(fiber.StatusConflict, "provider_already_linked", "bağlama başarısız")
 	}
 	return h.respondUser(c, userID)
 }

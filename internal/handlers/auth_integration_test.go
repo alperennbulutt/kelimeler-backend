@@ -1355,3 +1355,230 @@ func TestUnlinkApple_SonKimlikseTokenIptalEdilmez(t *testing.T) {
 		t.Errorf("reddedilen kaldırmada token iptal edildi: %v", revoked)
 	}
 }
+
+// --- QA: eşzamanlılık ve yayındaki istemciyle uyumluluk ---
+
+// QA: aynı kimliği bağlama isteği aynı anda iki kez gelirse (çift dokunuş)
+// ikinci istek unique kısıta çarpar. Kimlik aynı kullanıcıya bağlandığı için bu
+// bir çakışma değil, tekrar istektir: 200 ve güncel kullanıcı dönmeli.
+func TestLinkProvider_EszamanliAyniKimlikIkisi200(t *testing.T) {
+	gdb := testDB(t)
+	h := New(gdb, &config.Config{AppEnv: "test"}, testTokens(), nil)
+	u := testUser(t, gdb)
+	testIdentity(t, gdb, u, "google")
+	si := &auth.SocialIdentity{Subject: "apple-cift-" + u.ID, Email: u.Email}
+
+	// Öteki istek kimliği yazmış ama henüz commit etmemiş.
+	oteki := gdb.Begin()
+	defer oteki.Rollback()
+	sub := si.Subject
+	if err := oteki.Create(&models.AuthIdentity{UserID: u.ID, Provider: "apple", ProviderSubject: &sub}).Error; err != nil {
+		t.Fatalf("öteki istek kimliği yazamadı: %v", err)
+	}
+
+	done := make(chan int, 1)
+	go func() {
+		res, err := linkApp(h, u.ID, "apple", si).Test(httptest.NewRequest(http.MethodPost, "/link", nil), -1)
+		if err != nil {
+			done <- 0
+			return
+		}
+		res.Body.Close()
+		done <- res.StatusCode
+	}()
+
+	var bekleyen int64
+	for son := time.Now().Add(10 * time.Second); bekleyen < 1 && time.Now().Before(son); {
+		time.Sleep(10 * time.Millisecond)
+		gdb.Raw(`SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&bekleyen)
+	}
+	if bekleyen < 1 {
+		t.Error("istek öteki transaction'ı beklemedi; yarış sıralaması kurulamadı")
+	}
+	if err := oteki.Commit().Error; err != nil {
+		t.Fatalf("öteki istek commit edilemedi: %v", err)
+	}
+
+	if status := <-done; status != fiber.StatusOK {
+		t.Errorf("eşzamanlı ikinci bağlama: status = %d, beklenen 200", status)
+	}
+	if n := identityCount(t, gdb, u.ID, "apple"); n != 1 {
+		t.Errorf("apple kimliği sayısı = %d, beklenen 1", n)
+	}
+}
+
+// QA: yayındaki istemci DELETE /auth/account'u gövdesiz gönderir; Dio yine de
+// Content-Type: application/json başlığı ekleyebilir. Boş ya da bozuk gövde
+// silmeyi engellememeli, saklı Apple token yine iptal edilmeli.
+func TestDeleteAccount_BosVeyaBozukGovdeSilmeyiEngellemez(t *testing.T) {
+	for _, c := range []struct{ name, body string }{
+		{"json başlıklı boş gövde", ""},
+		{"bozuk json", "{bozuk"},
+		{"yanlış tip", `{"appleAuthorizationCode": 123}`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			gdb := testDB(t)
+			u := testUser(t, gdb)
+			testIdentity(t, gdb, u, "google")
+			testAppleIdentity(t, gdb, u, "sakli")
+			revoker, fake := testAppleRevoker(t)
+			h := New(gdb, &config.Config{AppEnv: "test"}, testTokens(), nil).WithAppleRevoker(revoker)
+
+			req := authRequest(t, h, u, http.MethodDelete, "/api/v1/auth/account", nil)
+			req.Body = http.NoBody
+			if c.body != "" {
+				req = httptest.NewRequest(http.MethodDelete, "/api/v1/auth/account", strings.NewReader(c.body))
+				access, _ := h.Tokens.GenerateAccessToken(u.ID, u.Email)
+				req.Header.Set(fiber.HeaderAuthorization, "Bearer "+access)
+			}
+			req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+
+			if status, body := send(t, authApp(h), req); status != fiber.StatusNoContent {
+				t.Fatalf("status = %d, beklenen 204 (body: %v)", status, body)
+			}
+			if userExists(t, gdb, u.ID) {
+				t.Error("hesap silinmedi")
+			}
+			if _, revoked := fake.snapshot(); len(revoked) != 1 || revoked[0] != "sakli" {
+				t.Errorf("iptal edilen token'lar = %v, beklenen [sakli]", revoked)
+			}
+		})
+	}
+}
+
+// QA: hesap silme aynı anda iki kez gönderilirse (çift dokunuş, yanıtı
+// kaybolan yeniden deneme) ikisi de 204 almalı; ikinci istek 500 vermemeli.
+func TestDeleteAccount_EszamanliCiftIstekIkisi204(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	testIdentity(t, gdb, u, "google")
+	testRefreshToken(t, gdb, u.ID, time.Now().Add(time.Hour), nil)
+	h := New(gdb, &config.Config{AppEnv: "test"}, testTokens(), nil)
+	app := authApp(h)
+
+	// Kullanıcı satırı kilitliyken iki istek de silmeye ulaşıp sırayla bekler.
+	statuses := satirKilidiAltindaEszamanli(t, gdb, app,
+		"SELECT 1 FROM users WHERE id = ? FOR UPDATE", u.ID, 2,
+		func(int) *http.Request {
+			return authRequest(t, h, u, http.MethodDelete, "/api/v1/auth/account", nil)
+		})
+	for _, s := range statuses {
+		if s != fiber.StatusNoContent {
+			t.Errorf("status dağılımı = %v, beklenen iki adet 204", statuses)
+			break
+		}
+	}
+	if userExists(t, gdb, u.ID) {
+		t.Error("hesap silinmedi")
+	}
+}
+
+// QA: aynı refresh token'la tolerans dışında yeniden kullanım eşzamanlı
+// gelirse hiçbiri yeni çift almamalı, aile tamamen ölmeli.
+func TestRefresh_ToleransDisiEszamanliYenidenKullanimHicbirineCiftVermez(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	app := refreshApp(New(gdb, &config.Config{AppEnv: "test"}, testTokens(), nil))
+	once, halef := testRotatedToken(t, gdb, u.ID, 2*refreshReuseGrace)
+
+	const n = 5
+	var wg sync.WaitGroup
+	statuses := make([]int, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			res, err := app.Test(refreshRequest(once), -1)
+			if err != nil {
+				return
+			}
+			res.Body.Close()
+			statuses[i] = res.StatusCode
+		}(i)
+	}
+	wg.Wait()
+	for _, s := range statuses {
+		if s != fiber.StatusUnauthorized {
+			t.Fatalf("status dağılımı = %v, beklenen hepsi 401", statuses)
+		}
+	}
+	if loadRefreshToken(t, gdb, halef).RevokedAt == nil {
+		t.Error("aile iptal edilmedi")
+	}
+	if got := activeRefreshTokens(t, gdb, u.ID); got != 0 {
+		t.Errorf("etkin token sayısı = %d, beklenen 0", got)
+	}
+}
+
+// QA: logout ile tolerans içi yeniden deneme aynı anda gelirse logout'tan sonra
+// ailede etkin token kalmamalı ya da kalan tek token logout'u izleyen bir
+// yeniden denemenin sonucu olmalı; her durumda logout yapılan token ölü kalır.
+func TestLogout_SonrasiEskiVeYeniTokenOlu(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	app := logoutApp(New(gdb, &config.Config{AppEnv: "test"}, testTokens(), nil))
+	eski := testRefreshToken(t, gdb, u.ID, time.Now().Add(time.Hour), nil)
+
+	status, body := send(t, app, refreshRequest(eski))
+	if status != fiber.StatusOK {
+		t.Fatalf("yenileme: status = %d (body: %v)", status, body)
+	}
+	yeni, _ := body["refreshToken"].(string)
+
+	// İstemci eski token'la çıkış yapar (yenileme yanıtı ona ulaşmadan).
+	if status, _ := postJSON(t, app, "/logout", fiber.Map{"refreshToken": eski}); status != fiber.StatusNoContent {
+		t.Fatalf("logout: status = %d, beklenen 204", status)
+	}
+	for name, tok := range map[string]string{"eski": eski, "yeni": yeni} {
+		if status, _ := send(t, app, refreshRequest(tok)); status != fiber.StatusUnauthorized {
+			t.Errorf("%s token logout'tan sonra: status = %d, beklenen 401", name, status)
+		}
+	}
+	if got := activeRefreshTokens(t, gdb, u.ID); got != 0 {
+		t.Errorf("etkin token sayısı = %d, beklenen 0", got)
+	}
+}
+
+// QA: yanıt (bağlı yöntem listesi) hazırlanamazsa rotasyon commit edilmemeli.
+// Aksi halde istemci 500 alır, yeni token'ı hiç görmez; yeniden denemesi
+// tolerans süresini aşarsa yeniden kullanım sayılıp oturumdan düşerdi.
+func TestRefresh_YanitHazirlanamazsaTokenIptalEdilmez(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	app := refreshApp(New(gdb, &config.Config{AppEnv: "test"}, testTokens(), nil))
+	token := testRefreshToken(t, gdb, u.ID, time.Now().Add(time.Hour), nil)
+
+	const hook = "test:kimlikler_okunamaz"
+	err := gdb.Callback().Query().Before("gorm:query").Register(hook, func(tx *gorm.DB) {
+		if tx.Statement.Schema != nil && tx.Statement.Schema.Table == "auth_identities" {
+			tx.AddError(errors.New("kimlikler okunamadı"))
+		}
+	})
+	if err != nil {
+		t.Fatalf("hook kaydedilemedi: %v", err)
+	}
+	removed := false
+	removeHook := func() {
+		if !removed {
+			removed = true
+			_ = gdb.Callback().Query().Remove(hook)
+		}
+	}
+	t.Cleanup(removeHook)
+
+	status, body := send(t, app, refreshRequest(token))
+	removeHook()
+	if status != fiber.StatusInternalServerError {
+		t.Fatalf("status = %d, beklenen 500 (body: %v)", status, body)
+	}
+	if loadRefreshToken(t, gdb, token).RevokedAt != nil {
+		t.Fatal("yanıt hazırlanamadığı halde token rotasyonla iptal edildi")
+	}
+	if n := activeRefreshTokens(t, gdb, u.ID); n != 1 {
+		t.Errorf("etkin token sayısı = %d, beklenen 1", n)
+	}
+	if status, body := send(t, app, refreshRequest(token)); status != fiber.StatusOK {
+		t.Errorf("yeniden deneme: status = %d, beklenen 200 (body: %v)", status, body)
+	}
+}
