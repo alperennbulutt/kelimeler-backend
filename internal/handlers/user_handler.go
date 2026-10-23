@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"slices"
 	"time"
 	"unicode/utf8"
 
@@ -385,6 +386,10 @@ func (h *Handlers) incrementUsage(c *fiber.Ctx, column string) error {
 	return h.respondUsage(c, userID)
 }
 
+// freeGroupColumn, günün ücretsiz grup açılışının sayacıdır
+// (POST /users/me/usage/group-started).
+const freeGroupColumn = "groups_started_today_count"
+
 // UnlockGroup: POST /users/me/usage/group-started ve /group-unlocked-by-ad
 // Gövde (isteğe bağlı): {"level":"A1","group":3}
 //
@@ -392,6 +397,16 @@ func (h *Handlers) incrementUsage(c *fiber.Ctx, column string) error {
 // zaten kümedeyse hiçbir şey değişmez. Böylece yanıtı kaybolan bir isteği
 // yeniden denemek ya da aynı gruba gün içinde tekrar girmek, hakkı ikinci kez
 // tüketmez.
+//
+// Ücretsiz açılış (group-started) günde birdir: bugün zaten ücretsiz bir grup
+// açılmışsa (groups_started_today_count ≥ 1) ve grup kümede değilse bu bir
+// kapı ihlalidir (neden free_group_reused). GATE_ENFORCEMENT=off'ta kabul
+// edilir, log'da kabul edilip raporlanır, enforce'ta 403 gate_required döner
+// ve hiçbir şey yazılmaz. Dürüst istemci group-started'ı yalnızca sayaç 0
+// iken çağırır; sonraki gruplar reklamla (group-unlocked-by-ad) açılır.
+//
+// Kullanıcı satırı karar ile yazım arasında kilitlidir: farklı iki gruba
+// aynı anda gelen ücretsiz açılışlardan yalnızca biri ücretsiz sayılır.
 //
 // Gövde göndermeyen (ya da geçersiz gönderen) istemcilerde uç yalnızca sayacı
 // artırır.
@@ -408,25 +423,41 @@ func (h *Handlers) UnlockGroup(column string) fiber.Handler {
 
 		userID := middleware.UserID(c)
 		now := time.Now()
-		if err := resetUsageIfStale(h.DB, userID, now); err != nil {
-			return err
-		}
+		err := h.DB.Transaction(func(tx *gorm.DB) error {
+			if err := resetUsageIfStale(tx, userID, now); err != nil {
+				return err
+			}
+			var user models.User
+			if err := lockUser(tx, userID, &user); err != nil {
+				return err
+			}
+			if slices.Contains(services.SplitUnlockedGroups(user.UnlockedGroupsToday), key) {
+				return nil
+			}
+			if column == freeGroupColumn && user.GroupsStartedTodayCount >= 1 {
+				if err := h.applyGate(c, services.GateViolation{
+					Kind:   services.GateKindLearn,
+					Reason: services.GateReasonFreeGroupReused,
+					UserID: userID,
+					Level:  req.Level,
+					Group:  req.Group,
+				}, false, now, errGateRequired); err != nil {
+					return err
+				}
+			}
 
-		// "Kümede yoksa ekle + artır" tek koşullu UPDATE'tir: aynı anahtarla
-		// eşzamanlı gelen isteklerden yalnızca biri satırı değiştirir.
-		//
-		// concat_ws değişken sayıda ve her tipte argüman alır; parametrenin tipi
-		// açıkça verilmezse PostgreSQL onu yalnızca değer sorgu metnine gömülü
-		// gittiğinde (basit protokol) çözebilir, hazırlanan sorguda çözemez.
-		res := h.DB.Model(&models.User{}).
-			Where("id = ? AND NOT (? = ANY(string_to_array(unlocked_groups_today, ',')))", userID, key).
-			Updates(map[string]any{
+			// concat_ws değişken sayıda ve her tipte argüman alır; parametrenin
+			// tipi açıkça verilmezse PostgreSQL onu yalnızca değer sorgu
+			// metnine gömülü gittiğinde (basit protokol) çözebilir, hazırlanan
+			// sorguda çözemez.
+			return tx.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
 				column:                  gorm.Expr(column + " + 1"),
 				"unlocked_groups_today": gorm.Expr("concat_ws(',', NULLIF(unlocked_groups_today, ''), ?::text)", key),
 				"last_reset_date":       usageTouchedAt(now),
-			})
-		if res.Error != nil {
-			return res.Error
+			}).Error
+		})
+		if err != nil {
+			return err
 		}
 		return h.respondUsage(c, userID)
 	}

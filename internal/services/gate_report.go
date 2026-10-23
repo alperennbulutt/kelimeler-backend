@@ -100,8 +100,11 @@ func formatGateViolation(v GateViolation, count int) string {
 		" request_id=" + v.RequestID
 	switch v.Kind {
 	case GateKindLearn:
-		line += " word=" + strconv.Quote(v.WordID) +
-			" group=" + v.Level + ":" + strconv.Itoa(v.Group)
+		// Grup açılışı ihlalinde (free_group_reused) kelime yoktur.
+		if v.WordID != "" {
+			line += " word=" + strconv.Quote(v.WordID)
+		}
+		line += " group=" + v.Level + ":" + strconv.Itoa(v.Group)
 	case GateKindReview:
 		line += " answers_today=" + strconv.Itoa(v.ReviewAnswers) +
 			" passes=" + strconv.Itoa(v.ReviewAdPasses)

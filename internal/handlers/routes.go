@@ -103,7 +103,7 @@ func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService, authLi
 	users.Get("/me/usage", h.GetDailyUsage)
 	// Grup açma uçları gövdedeki {level, group} ile idempotenttir: aynı grup gün
 	// içinde yalnızca bir kez sayılır.
-	users.Post("/me/usage/group-started", h.UnlockGroup("groups_started_today_count"))
+	users.Post("/me/usage/group-started", h.UnlockGroup(freeGroupColumn))
 	users.Post("/me/usage/group-unlocked-by-ad", h.UnlockGroup("groups_unlocked_by_ad_today"))
 	// Gövdedeki {checkpoint} ile idempotenttir: aynı reklam kapısı bir kez sayılır.
 	users.Post("/me/usage/review-ad-pass", h.RecordReviewAdPass)

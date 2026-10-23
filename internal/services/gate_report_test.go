@@ -49,10 +49,16 @@ func TestGateReporter_SatirBicimi(t *testing.T) {
 		Kind: GateKindReview, Reason: GateReasonReviewCheckpoint, Mode: config.GateEnforce,
 		UserID: "u1", RequestID: "req-2", ReviewAnswers: 30, ReviewAdPasses: 0,
 	}, now)
+	// Grup açılışı ihlalinde kelime yoktur.
+	r.Report(GateViolation{
+		Kind: GateKindLearn, Reason: GateReasonFreeGroupReused, Mode: config.GateEnforce,
+		UserID: "u2", RequestID: "req-3", Level: "A1", Group: 3,
+	}, now)
 
 	want := []string{
 		`gate_violation kind=learn reason=group_not_unlocked mode=log user=u1 request_id=req-1 word="A1_2_5" group=A1:2 count=1`,
 		`gate_violation kind=review reason=review_checkpoint mode=enforce user=u1 request_id=req-2 answers_today=30 passes=0 count=1`,
+		`gate_violation kind=learn reason=free_group_reused mode=enforce user=u2 request_id=req-3 group=A1:3 count=1`,
 	}
 	if strings.Join(k.lines, "\n") != strings.Join(want, "\n") {
 		t.Errorf("log satırları:\n%s\nbeklenen:\n%s", strings.Join(k.lines, "\n"), strings.Join(want, "\n"))

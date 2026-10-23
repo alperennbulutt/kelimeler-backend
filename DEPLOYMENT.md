@@ -361,6 +361,8 @@ Kaynak: `git diff 6b85321..HEAD -- internal/models`. Yalnızca `refresh_tokens` 
 - **Sosyal kayıt:** Google/Apple'dan gelen görünen ad temizlenir ve 60 karaktere kısaltılır. Eşzamanlı ilk girişte 500 yerine aynı kullanıcı döner.
 - **Gözlemlenebilirlik:** Her yanıtta `X-Request-ID` başlığı vardır; 5xx'ler istek kimliğiyle loglanır ve Sentry'ye gider. SIGTERM'de süren istekler beklenir (düzgün kapanma).
 - **Reklam kapısı (`GATE_ENFORCEMENT`):** `log` kipinde ihlal loglanır ve Sentry'ye bilgi olarak gider, istek kabul edilir. `enforce` kipinde öğrenme `403 gate_required`, tekrar cevabı `403 review_gate_required` ile reddedilir.
+  - **Günde bir ücretsiz grup:** `POST /users/me/usage/group-started` (gövdeli) bugün zaten ücretsiz bir grup açılmışken başka bir grup için gelirse ihlaldir (`reason=free_group_reused`): `off`'ta kabul, `log`'da kabul + rapor, `enforce`'ta `403 gate_required` ve hiçbir şey yazılmaz. Aynı gruba yeniden istek (yanıtı kaybolan deneme) ihlal değildir. Yayındaki istemci bu ucu yalnızca `groupsStartedTodayCount == 0` iken çağırır; dürüst kullanımda yalnızca iki cihazdan aynı anda farklı gruba ilk girişte görülebilir.
+  - **Sınır:** Reklam kayıtları (`group-unlocked-by-ad`, `review-ad-pass`) sunucuda doğrulanamaz (AdMob sunucu tarafı doğrulaması, SSV, yok). `enforce` yalnızca kaydı hiç yapmayan ya da ücretsiz hakkı yeniden kullanan istemcileri durdurur; reklam izlemeden kayıt çağrısını yapan değiştirilmiş bir istemciyi durduramaz.
 
 ### Güvenli yayın sırası
 

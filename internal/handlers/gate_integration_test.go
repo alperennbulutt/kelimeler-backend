@@ -654,6 +654,142 @@ func TestReviewGate_EszamanliCevaplarKontrolNoktasiniAsamaz(t *testing.T) {
 	}
 }
 
+// --- POST /users/me/usage/group-started: günde bir ücretsiz grup ---
+
+func TestFreeGroupGate_IkinciUcretsizGrupKipeGore(t *testing.T) {
+	cases := []struct {
+		name       string
+		mode       config.GateEnforcement
+		wantStatus int
+		wantWrite  bool
+		wantReport int
+		wantSentry int
+	}{
+		{"off", config.GateOff, 200, true, 0, 0},
+		{"log", config.GateLog, 200, true, 1, 1},
+		{"enforce", config.GateEnforce, 403, false, 1, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			kayit := kapiRaporunuYakala(t)
+			gdb, u, app := newGateTest(t, c.mode)
+			setUsage(t, gdb, u.ID, map[string]any{"groups_started_today_count": 1, "unlocked_groups_today": "A1:1"})
+
+			status, body := postJSON(t, app, "/users/me/usage/group-started", fiber.Map{"level": "A1", "group": 2})
+			if status != c.wantStatus {
+				t.Fatalf("status = %d, beklenen %d (body: %v)", status, c.wantStatus, body)
+			}
+			if status == fiber.StatusForbidden && gateCode(body) != "gate_required" {
+				t.Errorf("code = %v, beklenen gate_required", gateCode(body))
+			}
+			after := loadUser(t, gdb, u.ID)
+			wantCount, wantSet := 1, "A1:1"
+			if c.wantWrite {
+				wantCount, wantSet = 2, "A1:1,A1:2"
+			}
+			if after.GroupsStartedTodayCount != wantCount || after.UnlockedGroupsToday != wantSet {
+				t.Errorf("sayaç/küme = %d %q, beklenen %d %q", after.GroupsStartedTodayCount, after.UnlockedGroupsToday, wantCount, wantSet)
+			}
+			if got := kayit.ihlaller(); len(got) != c.wantReport {
+				t.Errorf("ihlal satırı = %d, beklenen %d (%v)", len(got), c.wantReport, got)
+			} else if c.wantReport > 0 && !strings.Contains(got[0], "kind=learn reason=free_group_reused") ||
+				c.wantReport > 0 && !strings.Contains(got[0], " group=A1:2 ") || c.wantReport > 0 && strings.Contains(got[0], "word=") {
+				t.Errorf("ihlal satırı = %q", got[0])
+			}
+			if got := len(kayit.sentry()); got != c.wantSentry {
+				t.Errorf("Sentry olayı = %d, beklenen %d", got, c.wantSentry)
+			}
+		})
+	}
+}
+
+func TestFreeGroupGate_AcikGrubaYenidenGirisVeReklamIhlalDegil(t *testing.T) {
+	// Bugün açılmış gruba yeniden group-started (yanıtı kaybolan istek) ve
+	// reklamla açılış, ücretsiz hak kullanılmışken de ihlal değildir.
+	kayit := kapiRaporunuYakala(t)
+	gdb, u, app := newGateTest(t, config.GateEnforce)
+	setUsage(t, gdb, u.ID, map[string]any{"groups_started_today_count": 1, "unlocked_groups_today": "A1:1"})
+
+	for _, req := range []struct {
+		path  string
+		group int
+	}{
+		{"/users/me/usage/group-started", 1},
+		{"/users/me/usage/group-unlocked-by-ad", 2},
+		{"/users/me/usage/group-started", 2},
+	} {
+		if status, body := postJSON(t, app, req.path, fiber.Map{"level": "A1", "group": req.group}); status != fiber.StatusOK {
+			t.Fatalf("%s A1:%d status = %d (%v)", req.path, req.group, status, body)
+		}
+	}
+	after := loadUser(t, gdb, u.ID)
+	if after.GroupsStartedTodayCount != 1 || after.GroupsUnlockedByAdToday != 1 || after.UnlockedGroupsToday != "A1:1,A1:2" {
+		t.Errorf("kullanım = %d/%d %q, beklenen 1/1 \"A1:1,A1:2\"", after.GroupsStartedTodayCount, after.GroupsUnlockedByAdToday, after.UnlockedGroupsToday)
+	}
+	if l := kayit.ihlaller(); len(l) != 0 {
+		t.Errorf("ihlal üretildi: %v", l)
+	}
+}
+
+func TestFreeGroupGate_YeniGundeUcretsizHakYenilenir(t *testing.T) {
+	kayit := kapiRaporunuYakala(t)
+	gdb, u, app := newGateTest(t, config.GateEnforce)
+	dunkuKullanim(t, gdb, u.ID)
+
+	if status, body := postJSON(t, app, "/users/me/usage/group-started", fiber.Map{"level": "A1", "group": 3}); status != fiber.StatusOK {
+		t.Fatalf("status = %d (%v)", status, body)
+	}
+	if after := loadUser(t, gdb, u.ID); after.GroupsStartedTodayCount != 1 || after.UnlockedGroupsToday != "A1:3" {
+		t.Errorf("kullanım = %d %q, beklenen 1 \"A1:3\"", after.GroupsStartedTodayCount, after.UnlockedGroupsToday)
+	}
+	if l := kayit.ihlaller(); len(l) != 0 {
+		t.Errorf("ihlal üretildi: %v", l)
+	}
+}
+
+func TestFreeGroupGate_EszamanliIkiFarkliGrupTekUcretsiz(t *testing.T) {
+	cases := []struct {
+		mode       config.GateEnforcement
+		wantOK     int
+		wantCount  int
+		wantReport int
+	}{
+		{config.GateEnforce, 1, 1, 1},
+		{config.GateLog, 2, 2, 1},
+	}
+	for _, c := range cases {
+		t.Run(string(c.mode), func(t *testing.T) {
+			kayit := kapiRaporunuYakala(t)
+			gdb, u, app := newGateTest(t, c.mode)
+			setUsage(t, gdb, u.ID, map[string]any{"groups_started_today_count": 0, "unlocked_groups_today": ""})
+
+			statuses := kilitAltindaEszamanli(t, gdb, app, u.ID, 2, func(i int) *http.Request {
+				return jsonRequest("/users/me/usage/group-started", fiber.Map{"level": "A1", "group": i + 1})
+			})
+			ok := 0
+			for _, s := range statuses {
+				switch s {
+				case fiber.StatusOK:
+					ok++
+				case fiber.StatusForbidden:
+				default:
+					t.Fatalf("status = %d (tümü: %v)", s, statuses)
+				}
+			}
+			if ok != c.wantOK {
+				t.Errorf("kabul = %d, beklenen %d (tümü: %v)", ok, c.wantOK, statuses)
+			}
+			after := loadUser(t, gdb, u.ID)
+			if after.GroupsStartedTodayCount != c.wantCount || len(services.SplitUnlockedGroups(after.UnlockedGroupsToday)) != c.wantCount {
+				t.Errorf("sayaç/küme = %d %q, beklenen %d grup", after.GroupsStartedTodayCount, after.UnlockedGroupsToday, c.wantCount)
+			}
+			if got := len(kayit.ihlaller()); got != c.wantReport {
+				t.Errorf("ihlal satırı = %d, beklenen %d", got, c.wantReport)
+			}
+		})
+	}
+}
+
 // --- Uçtan uca: dürüst istemci ---
 
 // durustIstemci, yayındaki Flutter istemcisinin kapı kararlarını aynen

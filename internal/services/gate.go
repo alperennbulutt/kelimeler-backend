@@ -25,6 +25,9 @@ const (
 	// GateReasonMapLocked: grup haritada kilitli (sıralı kilit ya da önceki
 	// seviye bitmemiş).
 	GateReasonMapLocked = "map_locked"
+	// GateReasonFreeGroupReused: günün ücretsiz grup açılışı (group-started)
+	// zaten kullanılmışken başka bir grup ücretsiz açılmak istendi.
+	GateReasonFreeGroupReused = "free_group_reused"
 	// GateReasonReviewCheckpoint: günün tekrar cevapları bir kontrol noktasına
 	// ulaşmış ve o nokta için geçiş kaydı yok.
 	GateReasonReviewCheckpoint = "review_checkpoint"
