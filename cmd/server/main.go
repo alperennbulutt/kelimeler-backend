@@ -170,6 +170,8 @@ func run() (err error) {
 	}
 
 	h := handlers.New(database, cfg, tokens, appleVerifier).WithAppleRevoker(appleRevoker)
+	// Production'da Apple girişi açık ama revoke kapalıysa yüksek sesle uyarır.
+	h.WarnIfAppleRevokeDisabled()
 
 	app := newApp(cfg, os.Stdout)
 
@@ -195,6 +197,15 @@ func run() (err error) {
 	// Coolify her redeploy'da eski container'a SIGTERM gönderir.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Süresi dolmuş/iptal edilmiş refresh token satırlarının saatlik temizliği.
+	// Sunucu durunca (sinyal ya da hata) döngü durdurulur ve süren tur
+	// beklenir; defer sırası gereği bu, veritabanı havuzu kapanmadan önce olur.
+	stopCleanup := startPeriodicCleanup(ctx, "refresh token temizliği",
+		refreshTokenCleanupInterval, refreshTokenCleanupTimeout,
+		refreshTokenCleanup(database, refreshTokenCleanupRetention))
+	defer stopCleanup()
+
 	return serve(ctx, app, ln, cfg.ShutdownTimeout)
 }
 
@@ -323,7 +334,7 @@ func corsConfig(cfg *config.Config) (corsCfg cors.Config, ok bool) {
 		}, true
 	}
 
-	if cfg.AppEnv == "production" {
+	if cfg.IsProduction() {
 		log.Println("cors: CORS_ALLOWED_ORIGINS tanımlı değil — hiçbir origin'e CORS izni verilmeyecek")
 		return cors.Config{}, false
 	}
