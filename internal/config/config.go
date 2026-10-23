@@ -57,6 +57,12 @@ type Config struct {
 	AppEnv      string
 	DatabaseURL string
 
+	// Veritabanı bağlantı havuzu ve sorgu zaman aşımı (bkz. db.Options).
+	DBMaxOpenConns     int
+	DBMaxIdleConns     int
+	DBConnMaxLifetime  time.Duration
+	DBStatementTimeout time.Duration
+
 	JWTSecret       string
 	AccessTokenTTL  time.Duration
 	RefreshTokenTTL time.Duration
@@ -147,6 +153,10 @@ func FromEnv() (*Config, error) {
 		Port:                   getEnv("PORT", "8080"),
 		AppEnv:                 os.Getenv("APP_ENV"),
 		DatabaseURL:            getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5434/kelimeler?sslmode=disable"),
+		DBMaxOpenConns:         getPositiveInt("DB_MAX_OPEN_CONNS", 25),
+		DBMaxIdleConns:         getPositiveInt("DB_MAX_IDLE_CONNS", 10),
+		DBConnMaxLifetime:      getDuration("DB_CONN_MAX_LIFETIME", time.Hour),
+		DBStatementTimeout:     getDuration("DB_STATEMENT_TIMEOUT", 10*time.Second),
 		JWTSecret:              getEnv("JWT_SECRET", "dev-secret-change-me"),
 		AccessTokenTTL:         getDuration("ACCESS_TOKEN_TTL", 15*time.Minute),
 		RefreshTokenTTL:        getDuration("REFRESH_TOKEN_TTL", 720*time.Hour),

@@ -69,7 +69,12 @@ func run() (err error) {
 	}
 	log.Printf("kullanım günü saat dilimi: %s", services.UsageLocation())
 
-	database, err := db.Connect(cfg.DatabaseURL)
+	database, err := db.ConnectWithOptions(cfg.DatabaseURL, db.Options{
+		MaxOpenConns:     cfg.DBMaxOpenConns,
+		MaxIdleConns:     cfg.DBMaxIdleConns,
+		ConnMaxLifetime:  cfg.DBConnMaxLifetime,
+		StatementTimeout: cfg.DBStatementTimeout,
+	})
 	if err != nil {
 		return fmt.Errorf("db bağlantısı başarısız: %w", err)
 	}

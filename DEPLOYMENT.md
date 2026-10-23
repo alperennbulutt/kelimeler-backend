@@ -47,6 +47,10 @@ Depo özelse Coolify'de kaynak olarak **GitHub App** (Private Repository) kullan
 | `APP_ENV` | `production` — **tam olarak bu**, küçük harfle. Boş ya da başka bir değerde (`prod`, `Production`) sunucu açılmaz |
 | `PORT` | `8080` |
 | `DATABASE_URL` | Adım 2'deki internal URL (DB adı URL'in sonunda; ör. `.../postgres`) |
+| `DB_MAX_OPEN_CONNS` | `25` — açık bağlantı üst sınırı. Dolunca yeni istekler bekler; PostgreSQL'in `max_connections` değerini (varsayılan 100) aşmasın |
+| `DB_MAX_IDLE_CONNS` | `10` — havuzda boşta tutulan bağlantı sayısı |
+| `DB_CONN_MAX_LIFETIME` | `1h` — bir bağlantının yeniden açılmadan kullanılacağı en uzun süre |
+| `DB_STATEMENT_TIMEOUT` | `10s` — her sorguya PostgreSQL'de uygulanan üst süre (`statement_timeout`). Kaçak ya da kilitte bekleyen sorgu iptal edilir, istek 500 alır, bağlantı havuza döner. `0` kapatır. Migration ve sözlük seed'i bu sınırdan muaftır; `DATABASE_URL`'de `statement_timeout` verilmişse o geçerlidir. Sürecin ya da oturumun saat dilimine (`TimeZone`) dokunulmaz |
 | `JWT_SECRET` | `openssl rand -base64 48` çıktısı (güçlü, gizli). 32 bayttan kısa ya da `.env*.example`'daki yer tutucu girilirse sunucu açılmaz |
 | `ACCESS_TOKEN_TTL` | `15m` |
 | `REFRESH_TOKEN_TTL` | `720h` |

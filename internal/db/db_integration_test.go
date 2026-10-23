@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -166,4 +167,117 @@ func TestSeedDictionaryIfEmpty(t *testing.T) {
 			t.Fatal("kapalı veritabanında hata dönmedi")
 		}
 	})
+}
+
+func show(t *testing.T, gdb *gorm.DB, setting string) string {
+	t.Helper()
+	var v string
+	if err := gdb.Raw("SHOW " + setting).Scan(&v).Error; err != nil {
+		t.Fatalf("SHOW %s: %v", setting, err)
+	}
+	return v
+}
+
+func TestConnectWithOptions_HavuzVeSorguZamanAsimi(t *testing.T) {
+	dsn := testDSN(t)
+
+	opts := Options{MaxOpenConns: 7, MaxIdleConns: 3, ConnMaxLifetime: time.Minute, StatementTimeout: 200 * time.Millisecond}
+	gdb, err := ConnectWithOptions(dsn, opts)
+	if err != nil {
+		t.Fatalf("bağlanılamadı: %v", err)
+	}
+	closeOnCleanup(t, gdb)
+
+	sqlDB, _ := gdb.DB()
+	if got := sqlDB.Stats().MaxOpenConnections; got != 7 {
+		t.Errorf("MaxOpenConnections = %d, beklenen 7", got)
+	}
+	if got := show(t, gdb, "statement_timeout"); got != "200ms" {
+		t.Errorf("statement_timeout = %q, beklenen 200ms", got)
+	}
+
+	// Kaçak sorgu sunucu tarafında iptal edilir (SQLSTATE 57014).
+	err = gdb.Exec("SELECT pg_sleep(2)").Error
+	if err == nil || !strings.Contains(err.Error(), "57014") {
+		t.Errorf("pg_sleep(2) hatası = %v, beklenen statement timeout (57014)", err)
+	}
+
+	// İptalden sonra havuz kullanılabilir kalır.
+	if got := show(t, gdb, "statement_timeout"); got != "200ms" {
+		t.Errorf("iptal sonrası statement_timeout = %q", got)
+	}
+
+	// Seed'in çoklu statement Exec'i için simple protocol korunur.
+	if err := gdb.Exec("SELECT 1; SELECT 2").Error; err != nil {
+		t.Errorf("çoklu statement Exec başarısız (PreferSimpleProtocol kaybolmuş olabilir): %v", err)
+	}
+
+	// Oturum saat dilimi değişmez: date kolonları bu ayara göre yorumlanır.
+	plain, err := Connect(dsn)
+	if err != nil {
+		t.Fatalf("bağlanılamadı: %v", err)
+	}
+	closeOnCleanup(t, plain)
+	if a, b := show(t, gdb, "TimeZone"), show(t, plain, "TimeZone"); a != b {
+		t.Errorf("TimeZone = %q, zaman aşımsız bağlantıda %q; oturum saat dilimi değişmemeli", a, b)
+	}
+}
+
+func TestConnectWithOptions_DSNdekiZamanAsimiOncelikli(t *testing.T) {
+	dsn := withParam(t, testDSN(t), "statement_timeout", "300")
+	gdb, err := ConnectWithOptions(dsn, Options{MaxOpenConns: 2, MaxIdleConns: 1, StatementTimeout: 10 * time.Second})
+	if err != nil {
+		t.Fatalf("bağlanılamadı: %v", err)
+	}
+	closeOnCleanup(t, gdb)
+	if got := show(t, gdb, "statement_timeout"); got != "300ms" {
+		t.Errorf("statement_timeout = %q, beklenen DSN'deki 300ms", got)
+	}
+}
+
+// Migration ve seed sorgu zaman aşımına takılmamalı; ardından havuzdaki
+// bağlantılar yine zaman aşımıyla çalışmalı.
+func TestMigrateVeSeed_ZamanAsimindanEtkilenmez(t *testing.T) {
+	dsn := testDSN(t)
+	schema := fmt.Sprintf("dbtest_to_%d", time.Now().UnixNano())
+
+	admin, err := Connect(dsn)
+	if err != nil {
+		t.Fatalf("bağlanılamadı: %v", err)
+	}
+	closeOnCleanup(t, admin)
+	if err := Migrate(admin); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if err := admin.Exec("CREATE SCHEMA " + schema).Error; err != nil {
+		t.Fatalf("şema: %v", err)
+	}
+	t.Cleanup(func() { admin.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE") })
+
+	gdb, err := ConnectWithOptions(withParam(t, dsn, "search_path", schema+",public"),
+		Options{MaxOpenConns: 1, MaxIdleConns: 1, StatementTimeout: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("bağlanılamadı: %v", err)
+	}
+	closeOnCleanup(t, gdb)
+
+	// Zaman aşımı kapatılmasaydı uzun süren bir migration adımı yarıda kesilirdi.
+	if err := gdb.Connection(func(conn *gorm.DB) error {
+		return conn.Exec("SELECT pg_sleep(0.3)").Error
+	}); err == nil {
+		t.Fatal("ön koşul: 100ms zaman aşımında pg_sleep(0.3) başarısız olmalıydı")
+	}
+	if err := Migrate(gdb); err != nil {
+		t.Fatalf("zaman aşımlı havuzda migrate başarısız: %v", err)
+	}
+	yavasSeed := "INSERT INTO dictionary_words (id, english, turkish, example, level, grp, word_order) " +
+		"SELECT 'Y_1_1', 'a', 'b', 'c', 'A1', 1, 1 FROM pg_sleep(0.3);\n"
+	if n, err := SeedDictionaryIfEmpty(gdb, seedFile(t, yavasSeed)); err != nil || n != 1 {
+		t.Fatalf("zaman aşımından uzun seed = (%d, %v), beklenen (1, nil)", n, err)
+	}
+
+	// Migrate sonrası bağlantı yine zaman aşımıyla döner (MaxOpenConns=1: aynı bağlantı).
+	if got := show(t, gdb, "statement_timeout"); got != "100ms" {
+		t.Errorf("migrate sonrası statement_timeout = %q, beklenen 100ms", got)
+	}
 }
