@@ -1180,3 +1180,140 @@ func TestRegisterRoutes_GrupAcmaUclariIdempotent(t *testing.T) {
 		t.Errorf("checkpoint 90: reviewAdPassCountToday = %d, beklenen 3", got)
 	}
 }
+
+// --- Sözleşme K4: 403 sonrası istemcinin yeniden eşitlendiği alanlar ---
+
+// istemciTekrarKapisiGerekli, istemcinin (review_swipe_page.dart, _gateDue ve
+// ReviewGatingService.getCheckpointAtAnswerCount) /users/me/usage'dan okuduğu
+// iki sayaçla verdiği karardır. Sunucunun kendi kuralından bağımsız yazıldı:
+// sunucu reddettiğinde istemcinin aynı sayaçlarla kapıyı göstereceğini sınar.
+func istemciTekrarKapisiGerekli(answersToday, passes int) (bool, int) {
+	n := answersToday + 1
+	checkpoint := 90
+	switch {
+	case n <= 30:
+		checkpoint = 0
+	case n <= 60:
+		checkpoint = 30
+	case n <= 90:
+		checkpoint = 60
+	}
+	if passes > 3 {
+		passes = 3
+	}
+	return checkpoint > passes*30, checkpoint
+}
+
+func TestGetDailyUsage_KapiReddindenSonraIstemciAyniSayaclarlaKapiyiBulur(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	tokens := auth.NewTokenService("test-secret", time.Minute, time.Hour)
+	h := New(gdb, &config.Config{AppEnv: "test", GateEnforcement: config.GateEnforce}, tokens, nil)
+	app := fiber.New(fiber.Config{ErrorHandler: middleware.ErrorHandler})
+	RegisterRoutes(app.Group("/api/v1"), h, tokens, func(c *fiber.Ctx) error { return c.Next() })
+	kapiRaporunuYakala(t)
+
+	token, err := tokens.GenerateAccessToken(u.ID, u.Email)
+	if err != nil {
+		t.Fatalf("token üretilemedi: %v", err)
+	}
+	call := func(method, path string, payload any) (int, map[string]any) {
+		t.Helper()
+		req := httptest.NewRequest(method, "/api/v1"+path, nil)
+		if payload != nil {
+			req = jsonRequest("/api/v1"+path, payload)
+			req.Method = method
+		}
+		req.Header.Set(fiber.HeaderAuthorization, "Bearer "+token)
+		return send(t, app, req)
+	}
+	usage := func() map[string]any {
+		t.Helper()
+		status, body := call(http.MethodGet, "/users/me/usage", nil)
+		if status != fiber.StatusOK {
+			t.Fatalf("GET /users/me/usage status = %d (%v)", status, body)
+		}
+		// İstemci bu alanların yokluğunu "sunucu saymıyor" diye okur ve kapıyı
+		// yerel sayaçla verir; o zaman sunucu reddetmeyi sürdürürdü.
+		for _, key := range []string{"unlockedGroupsToday", "reviewAnswersToday", "reviewAdPassCountToday", "groupsStartedTodayCount"} {
+			if _, ok := body[key]; !ok {
+				t.Fatalf("usage yanıtında %q yok: %v", key, body)
+			}
+		}
+		return body
+	}
+
+	// Öğrenme: grup bugün açılmamış.
+	w := testDictWord(t, gdb, "itest_k4_learn", "A1", 1, 1)
+	status, body := call(http.MethodPost, "/progress/learn", fiber.Map{"wordId": w.ID})
+	if status != fiber.StatusForbidden || body["code"] != "gate_required" {
+		t.Fatalf("learn status = %d code = %v, beklenen 403 gate_required", status, body["code"])
+	}
+	body = usage()
+	if keys := unlockedGroups(t, body); containsString(keys, "A1:1") {
+		t.Fatalf("reddedilen grup açık görünüyor: %v", keys)
+	}
+	// İstemci (_openGroupForToday): grup kümede yok, sayaç 0 → ücretsiz hak.
+	if got := intField(t, body, "groupsStartedTodayCount"); got != 0 {
+		t.Fatalf("groupsStartedTodayCount = %d, beklenen 0", got)
+	}
+	if status, body := call(http.MethodPost, "/users/me/usage/group-started", fiber.Map{"level": "A1", "group": 1}); status != fiber.StatusOK {
+		t.Fatalf("group-started status = %d (%v)", status, body)
+	}
+	if got := unlockedGroups(t, usage()); !containsString(got, "A1:1") {
+		t.Fatalf("group-started sonrası küme = %v", got)
+	}
+	if status, body := call(http.MethodPost, "/progress/learn", fiber.Map{"wordId": w.ID}); status != fiber.StatusOK {
+		t.Fatalf("kapıdan sonra learn status = %d (%v)", status, body)
+	}
+
+	// Tekrar: günün 30 cevabı verilmiş, kapı geçilmemiş.
+	ids := dueWords(t, gdb, u.ID, "itest_k4_rev", 2, 2)
+	setUsage(t, gdb, u.ID, map[string]any{"review_answers_today": 30})
+	status, body = call(http.MethodPost, "/progress/swipe", fiber.Map{"wordId": ids[0], "direction": "right"})
+	if status != fiber.StatusForbidden || body["code"] != "review_gate_required" {
+		t.Fatalf("swipe status = %d code = %v, beklenen 403 review_gate_required", status, body["code"])
+	}
+	body = usage()
+	answers, passes := intField(t, body, "reviewAnswersToday"), intField(t, body, "reviewAdPassCountToday")
+	due, checkpoint := istemciTekrarKapisiGerekli(answers, passes)
+	if !due || checkpoint != 30 {
+		t.Fatalf("istemci sayaçlarla (cevap=%d, geçiş=%d) kapıyı bulamıyor: due=%v checkpoint=%d", answers, passes, due, checkpoint)
+	}
+	if status, body := call(http.MethodPost, "/users/me/usage/review-ad-pass", fiber.Map{"checkpoint": checkpoint}); status != fiber.StatusOK {
+		t.Fatalf("review-ad-pass status = %d (%v)", status, body)
+	}
+	if status, body := call(http.MethodPost, "/progress/swipe", fiber.Map{"wordId": ids[0], "direction": "right"}); status != fiber.StatusOK {
+		t.Fatalf("kapıdan sonra swipe status = %d (%v)", status, body)
+	}
+	body = usage()
+	if got := intField(t, body, "reviewAnswersToday"); got != 31 {
+		t.Errorf("reviewAnswersToday = %d, beklenen 31", got)
+	}
+	if due, _ := istemciTekrarKapisiGerekli(intField(t, body, "reviewAnswersToday"), intField(t, body, "reviewAdPassCountToday")); due {
+		t.Error("geçişten sonra istemci yeniden kapı istiyor")
+	}
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+func TestIstemciTekrarKapisi_SunucuKuraliylaAyni(t *testing.T) {
+	// İstemcinin kapı kararı ile sunucunun ret kararı her sayaç çiftinde aynı
+	// olmalı; ayrışırsa ya sunucu reddeder ve istemci kapıyı bulamaz (sessiz
+	// kayıp), ya da istemci gereksiz reklam ister.
+	for answers := 0; answers <= 130; answers++ {
+		for passes := 0; passes <= 5; passes++ {
+			clientDue, _ := istemciTekrarKapisiGerekli(answers, passes)
+			if serverAllows := services.ReviewAnswerAllowed(answers, passes); serverAllows == clientDue {
+				t.Errorf("cevap=%d geçiş=%d: sunucu izin=%v, istemci kapı=%v", answers, passes, serverAllows, clientDue)
+			}
+		}
+	}
+}

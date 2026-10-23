@@ -16,13 +16,16 @@ import (
 // için "bugünkü hak" onların gece yarısında yenilenmelidir.
 const DefaultUsageTimezone = "Europe/Istanbul"
 
-// usageLocation, kullanım gününün hesaplandığı konumdur.
+// usageLocation, kullanım gününün hesaplandığı konumdur. "Bugün" her yerde
+// bu konumdaki gündür:
 //
-// Bu konumu YALNIZCA günlük kullanım sayaçları kullanır. Seri/giriş kaydı
-// (stats_handler.go) ve tekrar listesi (startOfDay) sürecin yerel gününde
-// kalır: login_date bir "date" kolonudur ve bağlantı PreferSimpleProtocol ile
-// açıldığından, oradaki saat dilimini değiştirmek kayıtlı tarihleri bir gün
-// kaydırabilir.
+//   - günlük kullanım sayaçları ve reklam kapısı kararları (gate.go),
+//   - tekrar listesi, /counts ve swipe vadesi (timestamptz; sınırlar burada
+//     hesaplanıp mutlak anla karşılaştırılır),
+//   - yanlış cevabın "ertesi gün" tarihi (leitner.go),
+//   - seri/giriş kaydı (stats_handler.go). login_date bir "date" kolonudur ve
+//     bağlantı PreferSimpleProtocol ile açılır; bu yüzden gün time.Time olarak
+//     değil, UsageDate ile üretilen "YYYY-MM-DD" metni olarak yazılır/okunur.
 var usageLocation = defaultUsageLocation()
 
 func defaultUsageLocation() *time.Location {

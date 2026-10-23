@@ -92,6 +92,42 @@ func (h *Handlers) computeLevelGroups(userID, level string) ([]dto.LevelGroupDTO
 	return result, nil
 }
 
+// groupLockedOnMap, (level, grp) grubunun haritada (computeLevelGroups)
+// kilitli görünüp görünmediğini söyler. Öğrenme yazımının kapısı bunu sorar
+// (bkz. LearnWord): haritada kilitli bir grubu yalnızca değiştirilmiş bir
+// istemci açabilir.
+//
+// Ucuz yol: grupta ilerleme varsa (başlanmış grup) sıralı kilit artık
+// uygulanmaz, yalnızca önceki seviyenin tamamlanmasına bakılır. Seviyenin
+// bütün gruplarını sayan computeLevelGroups yalnızca başlanmamış bir grubun
+// ilk kelimesinde çalışır.
+func (h *Handlers) groupLockedOnMap(userID, level string, grp int) (bool, error) {
+	if h.Cfg != nil && h.Cfg.TestModeUnlockAll {
+		return false, nil
+	}
+	var started bool
+	if err := h.DB.Raw(`SELECT EXISTS (SELECT 1`+levelProgressQuery+`
+		  AND d.grp = ? AND wp.id IS NOT NULL)`, userID, level, grp).Scan(&started).Error; err != nil {
+		return false, err
+	}
+	if started {
+		done, err := h.isPreviousLevelCompleted(userID, level)
+		return !done, err
+	}
+	groups, err := h.computeLevelGroups(userID, level)
+	if err != nil {
+		return false, err
+	}
+	for _, g := range groups {
+		if g.GroupNumber == grp {
+			return !g.IsUnlocked, nil
+		}
+	}
+	// Grup sözlükte yok: kelime sözlükten okunduğu için olmamalı; kilit
+	// kararı verilecek bir veri de yok.
+	return false, nil
+}
+
 // isPreviousLevelCompleted: earnedBadges hızlı yolu, yoksa önceki seviyenin
 // tamamlanma sayımı. A1'in önceki seviyesi yoktur.
 func (h *Handlers) isPreviousLevelCompleted(userID, level string) (bool, error) {
