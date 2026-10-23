@@ -73,6 +73,16 @@ func GenerateRefreshToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// GenerateFamilyID, bir girişte açılan oturumun (refresh token ailesinin)
+// kimliğini üretir. Rotasyonla üretilen her token aynı kimliği taşır.
+func GenerateFamilyID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
 // HashToken, refresh token'ın DB'de saklanacak hash'ini döndürür.
 func HashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))

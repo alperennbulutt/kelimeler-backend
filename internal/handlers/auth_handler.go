@@ -14,6 +14,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // --- ortak yardımcılar ---
@@ -37,7 +38,10 @@ type tokenPair struct {
 // newTokenPair, access + refresh token üretir ve refresh hash'ini taşıyan
 // satırı hazırlar. Satırı yazmak çağırana kalır: rotasyon onu eski token'ın
 // iptaliyle aynı transaction'da yazar.
-func (h *Handlers) newTokenPair(user *models.User) (tokenPair, *models.RefreshToken, error) {
+//
+// family boşsa yeni bir oturum (token ailesi) başlatılır; rotasyon eski
+// token'ın ailesini taşır.
+func (h *Handlers) newTokenPair(user *models.User, family string) (tokenPair, *models.RefreshToken, error) {
 	access, err := h.Tokens.GenerateAccessToken(user.ID, user.Email)
 	if err != nil {
 		return tokenPair{}, nil, err
@@ -46,9 +50,15 @@ func (h *Handlers) newTokenPair(user *models.User) (tokenPair, *models.RefreshTo
 	if err != nil {
 		return tokenPair{}, nil, err
 	}
+	if family == "" {
+		if family, err = auth.GenerateFamilyID(); err != nil {
+			return tokenPair{}, nil, err
+		}
+	}
 	row := &models.RefreshToken{
 		UserID:    user.ID,
 		TokenHash: auth.HashToken(refresh),
+		FamilyID:  &family,
 		ExpiresAt: time.Now().Add(h.Tokens.RefreshTTL()),
 	}
 	return tokenPair{access: access, refresh: refresh}, row, nil
@@ -64,7 +74,7 @@ func (h *Handlers) authResponse(user *models.User, pair tokenPair) *dto.AuthResp
 
 // issueTokens, access + refresh token üretir ve refresh hash'ini DB'ye yazar.
 func (h *Handlers) issueTokens(user *models.User) (*dto.AuthResponse, error) {
-	pair, row, err := h.newTokenPair(user)
+	pair, row, err := h.newTokenPair(user, "")
 	if err != nil {
 		return nil, err
 	}
@@ -332,15 +342,32 @@ func (h *Handlers) authenticateSocial(provider string, si *auth.SocialIdentity, 
 	return &user, nil
 }
 
-// errRefreshTokenUsed, rotasyon sırasında token'ın başka bir istekçe çoktan
-// iptal edildiğini bildirir.
-var errRefreshTokenUsed = errors.New("refresh token zaten kullanılmış")
+// refreshReuseGrace, rotasyonla iptal edilmiş bir refresh token'ın yeniden
+// kabul edildiği süredir. Sunucu yenilemeyi commit edip yanıt mobil ağda
+// kaybolursa istemci aynı (artık iptal edilmiş) token'la yeniden dener; bu
+// süre içinde ve halef hiç kullanılmamışsa yeni bir çift verilir. Süre
+// dışındaki yeniden kullanım çalınmış token belirtisidir.
+const refreshReuseGrace = 60 * time.Second
+
+// refreshOutcome, yenileme transaction'ının sonucudur.
+type refreshOutcome int
+
+const (
+	refreshIssued   refreshOutcome = iota // yeni çift verildi
+	refreshRejected                       // token geçersiz, hiçbir şey değişmedi
+	refreshReused                         // yeniden kullanım: aile iptal edildi
+)
 
 // Refresh: refresh token'ı doğrular, rotasyonla yeni çift üretir.
 //
 // 401 yalnızca token'ın kendisi reddedildiğinde döner: istemci 401'i kesin ret
 // sayıp saklı token'ları siler. Veritabanına ulaşılamaması gibi geçici hatalar
 // 500 döner ki istemci oturumu koruyup yeniden denesin.
+//
+// Rotasyonla iptal edilmiş bir token refreshReuseGrace içinde yeniden gelirse
+// ve halefi hiç kullanılmamışsa, halef iptal edilip yeni bir çift verilir
+// (yanıtı kaybolan yenileme). Bunun dışındaki her yeniden kullanımda token'ın
+// ailesindeki bütün token'lar iptal edilir ve 401 döner.
 func (h *Handlers) Refresh(c *fiber.Ctx) error {
 	var req dto.RefreshRequest
 	if err := c.BodyParser(&req); err != nil || req.RefreshToken == "" {
@@ -353,7 +380,11 @@ func (h *Handlers) Refresh(c *fiber.Ctx) error {
 		}
 		return err
 	}
-	if rt.RevokedAt != nil || time.Now().After(rt.ExpiresAt) {
+	if time.Now().After(rt.ExpiresAt) {
+		return apiErr(fiber.StatusUnauthorized, "invalid_refresh_token", "refresh token süresi dolmuş")
+	}
+	// Logout ile iptal edilmiş (halefsiz) token'ın yeniden deneneceği bir şey yok.
+	if rt.RevokedAt != nil && rt.ReplacedByID == nil {
 		return apiErr(fiber.StatusUnauthorized, "invalid_refresh_token", "refresh token süresi dolmuş")
 	}
 	var user models.User
@@ -366,36 +397,112 @@ func (h *Handlers) Refresh(c *fiber.Ctx) error {
 
 	// Çift, hiçbir şey iptal edilmeden önce üretilir: üretim hatası eski token'ı
 	// geçerli bırakmalıdır.
-	pair, row, err := h.newTokenPair(&user)
+	family := ""
+	if rt.FamilyID != nil {
+		family = *rt.FamilyID
+	}
+	pair, row, err := h.newTokenPair(&user, family)
 	if err != nil {
 		return err
 	}
 
-	// İptal ile yeni satır birlikte yazılır. Ayrı yazılsalardı, iptalden sonra
-	// başarısız olan bir yazım istemciye geçici hata (500) döner ama oturumu
-	// sunucuda yok etmiş olurdu; yeniden deneme 401 alır ve kullanıcı çıkış
-	// yapmış sayılırdı.
+	// Karar, token satırı kilitliyken taze haliyle verilir ve bütün yazımlar
+	// tek transaction'dadır. Ayrı yazılsalardı, iptalden sonra başarısız olan
+	// bir yazım istemciye geçici hata (500) döner ama oturumu sunucuda yok etmiş
+	// olurdu. Kilit, aynı token'la eşzamanlı gelen istekleri sıraya sokar:
+	// ilki rotasyon yapar, sonrakiler tolerans yolundan geçer.
+	var outcome refreshOutcome
 	txErr := h.DB.Transaction(func(tx *gorm.DB) error {
-		// İptal koşulludur: aynı token'la eşzamanlı gelen isteklerden yalnızca
-		// biri satırı değiştirir ve yeni çift alır.
-		res := tx.Model(&models.RefreshToken{}).
-			Where("id = ? AND revoked_at IS NULL", rt.ID).
-			Update("revoked_at", time.Now())
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected == 0 {
-			return errRefreshTokenUsed
-		}
-		return tx.Create(row).Error
+		var err error
+		outcome, err = rotateRefreshToken(tx, rt.ID, row, time.Now())
+		return err
 	})
-	if errors.Is(txErr, errRefreshTokenUsed) {
-		return apiErr(fiber.StatusUnauthorized, "invalid_refresh_token", "refresh token süresi dolmuş")
-	}
 	if txErr != nil {
 		return txErr
 	}
-	return c.JSON(h.authResponse(&user, pair))
+	switch outcome {
+	case refreshIssued:
+		return c.JSON(h.authResponse(&user, pair))
+	case refreshReused:
+		log.Printf("auth: iptal edilmiş refresh token yeniden kullanıldı, oturum ailesi iptal edildi (user=%s, token=%d)",
+			user.ID, rt.ID)
+	}
+	return apiErr(fiber.StatusUnauthorized, "invalid_refresh_token", "refresh token süresi dolmuş")
+}
+
+// rotateRefreshToken, id'li token'ı kilitleyip yeniden okur ve kararı verir:
+//   - token etkinse iptal edilir, yerine row yazılır;
+//   - rotasyonla iptal edileli refreshReuseGrace olmamışsa ve halefi hiç
+//     kullanılmamışsa halef iptal edilir, yerine row yazılır;
+//   - aksi halde token'ın ailesi iptal edilir (yeniden kullanım).
+//
+// row'un ailesi, kilitli satırın ailesine eşitlenir.
+func rotateRefreshToken(tx *gorm.DB, id uint64, row *models.RefreshToken, now time.Time) (refreshOutcome, error) {
+	var rt models.RefreshToken
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&rt, "id = ?", id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return refreshRejected, nil // bu arada silinmiş (hesap silme)
+		}
+		return refreshRejected, err
+	}
+	if now.After(rt.ExpiresAt) {
+		return refreshRejected, nil
+	}
+	if rt.FamilyID != nil {
+		row.FamilyID = rt.FamilyID
+	}
+
+	// Etkin token: olağan rotasyon.
+	if rt.RevokedAt == nil {
+		if err := tx.Create(row).Error; err != nil {
+			return refreshRejected, err
+		}
+		err := tx.Model(&models.RefreshToken{}).Where("id = ?", rt.ID).Updates(map[string]any{
+			"revoked_at":     now,
+			"replaced_by_id": row.ID,
+			"family_id":      *row.FamilyID, // eski satırda boş olabilir
+		}).Error
+		return refreshIssued, err
+	}
+	if rt.ReplacedByID == nil {
+		return refreshRejected, nil // logout ya da aile iptali
+	}
+
+	// İptal edilmiş token: tolerans içinde ve halef hiç kullanılmamışsa yanıtı
+	// kaybolan bir yenilemedir.
+	if now.Sub(*rt.RevokedAt) <= refreshReuseGrace {
+		var successor models.RefreshToken
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&successor, "id = ?", *rt.ReplacedByID).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return refreshRejected, err
+		}
+		if err == nil && successor.RevokedAt == nil {
+			if err := tx.Create(row).Error; err != nil {
+				return refreshRejected, err
+			}
+			if err := tx.Model(&models.RefreshToken{}).Where("id = ?", successor.ID).Updates(map[string]any{
+				"revoked_at":     now,
+				"replaced_by_id": row.ID,
+			}).Error; err != nil {
+				return refreshRejected, err
+			}
+			// Aynı eski token'la bir deneme daha gelirse yeni halefi görsün.
+			err := tx.Model(&models.RefreshToken{}).Where("id = ?", rt.ID).
+				Update("replaced_by_id", row.ID).Error
+			return refreshIssued, err
+		}
+	}
+
+	// Yeniden kullanım: aynı oturumdan türeyen bütün token'lar iptal edilir.
+	// Çalınan token'ı önce saldırgan kullandıysa gerçek kullanıcı da çıkış
+	// yapar; ama saldırganın oturumu da biter ve rotasyonla uzatılamaz.
+	if rt.FamilyID == nil {
+		return refreshRejected, nil
+	}
+	err := tx.Model(&models.RefreshToken{}).
+		Where("family_id = ? AND revoked_at IS NULL", *rt.FamilyID).
+		Update("revoked_at", now).Error
+	return refreshReused, err
 }
 
 // Me: oturum sahibinin profilini döndürür.
@@ -403,13 +510,29 @@ func (h *Handlers) Me(c *fiber.Ctx) error {
 	return h.respondUser(c, middleware.UserID(c))
 }
 
-// Logout: verilen refresh token'ı iptal eder.
+// Logout: verilen refresh token'ı ve aynı oturumdan türeyen token'ları iptal eder.
+//
+// Bilinmeyen ya da hiç verilmemiş token sessizce 204 alır (istemci çıkışı
+// yerelde zaten tamamlar); veritabanı hatası ise 500 döner.
 func (h *Handlers) Logout(c *fiber.Ctx) error {
 	var req dto.LogoutRequest
-	if err := c.BodyParser(&req); err == nil && req.RefreshToken != "" {
-		h.DB.Model(&models.RefreshToken{}).
-			Where("token_hash = ?", auth.HashToken(req.RefreshToken)).
-			Update("revoked_at", time.Now())
+	if err := c.BodyParser(&req); err != nil || req.RefreshToken == "" {
+		return c.SendStatus(fiber.StatusNoContent)
+	}
+	var rt models.RefreshToken
+	err := h.DB.Where("token_hash = ?", auth.HashToken(req.RefreshToken)).First(&rt).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return c.SendStatus(fiber.StatusNoContent)
+	}
+	if err != nil {
+		return err
+	}
+	q := h.DB.Model(&models.RefreshToken{}).Where("id = ?", rt.ID)
+	if rt.FamilyID != nil {
+		q = h.DB.Model(&models.RefreshToken{}).Where("(id = ? OR family_id = ?)", rt.ID, *rt.FamilyID)
+	}
+	if err := q.Where("revoked_at IS NULL").Update("revoked_at", time.Now()).Error; err != nil {
+		return err
 	}
 	return c.SendStatus(fiber.StatusNoContent)
 }
