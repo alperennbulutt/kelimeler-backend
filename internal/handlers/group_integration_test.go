@@ -569,3 +569,57 @@ func TestAdvanceGroup_EskiIstemciGovdeleriBirIleri(t *testing.T) {
 		})
 	}
 }
+
+// --- QA: eşzamanlı current-group ---
+
+func TestSetCurrentGroup_EszamanliIleriVeGeriSonuctaIleride(t *testing.T) {
+	// Haritadan iki gruba art arda dokunulup istekler aynı anda gelir: sıra ne
+	// olursa olsun işaretçi ilerideki grupta, başlığı da onunki kalır.
+	gdb, u, app := newGroupTest(t, nil)
+	seedGroupLevels(t, gdb)
+	setPointer(t, gdb, u.ID, "A1", 1)
+
+	bodies := []fiber.Map{
+		{"level": "A1", "group": 3, "title": "uc"},
+		{"level": "A1", "group": 2, "title": "iki"},
+	}
+	statuses := kilitAltindaEszamanli(t, gdb, app, u.ID, len(bodies), func(i int) *http.Request {
+		return currentGroupRequest(bodies[i])
+	})
+	for _, s := range statuses {
+		if s != fiber.StatusOK {
+			t.Fatalf("status = %d (tümü: %v)", s, statuses)
+		}
+	}
+	assertPointer(t, gdb, u.ID, "A1", 3)
+	if got := loadUser(t, gdb, u.ID).CurrentGroupTitle; got == nil || *got != "uc" {
+		t.Errorf("başlık = %v, beklenen \"uc\" (geri yazım başlığı değiştirmemeli)", got)
+	}
+}
+
+func TestAdvanceGroup_GovdeliIstekSonGruptaSeviyeAtlarYanitAlanlari(t *testing.T) {
+	// Seviyenin son grubu gövdeyle tamamlanınca bir sonraki seviyeye geçilir;
+	// yanıt şekli (user, levelChanged, newLevel, newGroup) değişmemiştir.
+	gdb, u, app := newGroupTest(t, nil)
+	seedGroupLevels(t, gdb)
+	setPointer(t, gdb, u.ID, "A1", 3)
+
+	status, body := send(t, app, advanceRequest(fiber.Map{"level": "A1", "group": 3}))
+	if status != fiber.StatusOK {
+		t.Fatalf("status = %d (body: %v)", status, body)
+	}
+	if body["levelChanged"] != true || body["newLevel"] != "A2" || body["newGroup"] != float64(1) {
+		t.Errorf("yanıt = %v, beklenen levelChanged=true newLevel=A2 newGroup=1", body)
+	}
+	if usr := userField(t, body); usr["currentLevel"] != "A2" || usr["currentGroup"] != float64(1) {
+		t.Errorf("user = %v, beklenen A2:1", usr)
+	}
+	assertPointer(t, gdb, u.ID, "A2", 1)
+
+	// Aynı gövdeyle yeniden deneme: değişmez, levelChanged=false.
+	status, body = send(t, app, advanceRequest(fiber.Map{"level": "A1", "group": 3}))
+	if status != fiber.StatusOK || body["levelChanged"] != false || body["newLevel"] != "A2" {
+		t.Errorf("yeniden deneme: status=%d body=%v", status, body)
+	}
+	assertPointer(t, gdb, u.ID, "A2", 1)
+}
