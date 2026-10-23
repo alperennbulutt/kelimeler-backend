@@ -6,11 +6,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"testing"
 	"time"
 
 	"kelimeler-backend/internal/config"
+	"kelimeler-backend/internal/db"
 	"kelimeler-backend/internal/dto"
 	"kelimeler-backend/internal/middleware"
 	"kelimeler-backend/internal/models"
@@ -586,5 +588,86 @@ func TestReviewBox_GecersizKutuBosListe(t *testing.T) {
 		if counts := reviewCounts(t, app, "/progress/review/box/"+box+"/counts"); counts.Today != 0 || counts.TotalMonthCount != 0 {
 			t.Errorf("kutu %s: sayılar %+v, beklenen sıfır", box, counts)
 		}
+	}
+}
+
+// --- Veritabanı hataları ---
+
+func TestUclar_VeritabaniHatasindaSahte200Donmez(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+
+	// Kapalı havuz her sorguda hata verir: ulaşılamayan veritabanının karşılığı.
+	kopuk, err := db.Connect(os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatalf("ikinci bağlantı açılamadı: %v", err)
+	}
+	sqlDB, err := kopuk.DB()
+	if err != nil {
+		t.Fatalf("havuz alınamadı: %v", err)
+	}
+	sqlDB.Close()
+	h := New(kopuk, &config.Config{AppEnv: "test"}, nil, nil)
+
+	app := fiber.New(fiber.Config{ErrorHandler: middleware.ErrorHandler})
+	app.Use(func(c *fiber.Ctx) error {
+		c.Locals("userID", u.ID)
+		return c.Next()
+	})
+	app.Get("/progress/word/:wordId", h.GetUserWord)
+	app.Get("/progress/group", h.GetProgressForGroup)
+	app.Post("/progress/learn", h.LearnWord)
+	app.Post("/progress/swipe", h.Swipe)
+	app.Get("/progress/review/box/:box", h.ReviewWordsForBox)
+	app.Get("/progress/review/box/:box/counts", h.UpcomingCountsForBox)
+	app.Patch("/users/me", h.UpdateProfile)
+	app.Put("/users/me/current-group", h.SetCurrentGroup)
+	app.Post("/users/me/advance-group", h.AdvanceGroup)
+	app.Post("/users/me/usage/reset", h.ResetDailyUsage)
+	app.Post("/users/me/usage/no-fill-pass", h.GrantNoFillPass)
+	app.Get("/map/levels/:level/groups", h.LevelGroups)
+	app.Get("/map/levels/:level/max-group", h.MaxGroupForLevel)
+	app.Get("/map/active-boxes-count", h.ActiveBoxesCount)
+	app.Get("/home/learned-count", h.LearnedCount)
+	app.Get("/home/current-group", h.CurrentGroup)
+	app.Get("/dictionary/words", h.GetWordsForGroup)
+	app.Post("/dictionary/words/batch", h.GetWordsByIds)
+
+	jsonReq := func(method, path string, body any) *http.Request {
+		req := jsonRequest(path, body)
+		req.Method = method
+		return req
+	}
+	get := func(path string) *http.Request { return httptest.NewRequest(http.MethodGet, path, nil) }
+	cases := []struct {
+		name string
+		req  *http.Request
+	}{
+		{"kelime ilerlemesi", get("/progress/word/w1")},
+		{"grup ilerlemesi", get("/progress/group?level=A1&group=1")},
+		{"learn", jsonRequest("/progress/learn", fiber.Map{"wordId": "w1"})},
+		{"swipe", jsonRequest("/progress/swipe", fiber.Map{"wordId": "w1", "direction": "right"})},
+		{"tekrar listesi", get("/progress/review/box/2")},
+		{"tekrar sayilari", get("/progress/review/box/2/counts")},
+		{"profil", jsonReq(http.MethodPatch, "/users/me", fiber.Map{"displayName": "Ad"})},
+		{"kaldigin grup", jsonReq(http.MethodPut, "/users/me/current-group", fiber.Map{"level": "A1", "group": 1})},
+		{"sonraki grup", httptest.NewRequest(http.MethodPost, "/users/me/advance-group", nil)},
+		{"sayac sifirlama", httptest.NewRequest(http.MethodPost, "/users/me/usage/reset", nil)},
+		{"no-fill gecisi", httptest.NewRequest(http.MethodPost, "/users/me/usage/no-fill-pass", nil)},
+		{"harita gruplari", get("/map/levels/A2/groups")},
+		{"max grup", get("/map/levels/A1/max-group")},
+		{"aktif kutular", get("/map/active-boxes-count")},
+		{"ogrenilen sayisi", get("/home/learned-count")},
+		{"ana sayfa grubu", get("/home/current-group")},
+		{"sozluk grubu", get("/dictionary/words?level=A1&group=1")},
+		{"sozluk toplu", jsonRequest("/dictionary/words/batch", fiber.Map{"ids": []string{"w1"}})},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			status, body := send(t, app, c.req)
+			if status != fiber.StatusInternalServerError {
+				t.Errorf("status = %d, beklenen 500 (body: %v)", status, body)
+			}
+		})
 	}
 }

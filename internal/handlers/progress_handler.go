@@ -20,8 +20,12 @@ import (
 func (h *Handlers) GetUserWord(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	var wp models.WordProgress
-	if err := h.DB.Where("user_id = ? AND word_id = ?", userID, c.Params("wordId")).First(&wp).Error; err != nil {
+	err := h.DB.Where("user_id = ? AND word_id = ?", userID, c.Params("wordId")).First(&wp).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return apiErr(fiber.StatusNotFound, "not_found", "kelime ilerlemesi bulunamadı")
+	}
+	if err != nil {
+		return err
 	}
 	return c.JSON(&wp)
 }

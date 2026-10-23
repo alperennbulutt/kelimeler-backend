@@ -27,9 +27,11 @@ func (h *Handlers) UpdateProfile(c *fiber.Ctx) error {
 		if err != nil {
 			return apiErr(fiber.StatusBadRequest, "invalid_display_name", err.Error())
 		}
-		h.DB.Model(&models.User{}).Where("id = ?", userID).Update("display_name", name)
+		if err := h.DB.Model(&models.User{}).Where("id = ?", userID).Update("display_name", name).Error; err != nil {
+			return err
+		}
 	}
-	return h.respondUser(c, userID)
+	return h.respondMe(c, userID)
 }
 
 // current-group gövdesindeki serbest metin ve sayıların sınırları.
@@ -42,13 +44,29 @@ const (
 // errInvalidGroup, seviye/grup doğrulamasının ortak hatasıdır.
 var errInvalidGroup = apiErr(fiber.StatusBadRequest, "invalid_group", "geçersiz seviye ya da grup")
 
-// lockUser, kullanıcı satırını transaction sonuna kadar kilitleyerek okur.
-func lockUser(tx *gorm.DB, userID string, user *models.User) error {
-	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(user, "id = ?", userID).Error
+// findUser, kullanıcıyı okur: satır yoksa 404 user_not_found, diğer
+// veritabanı hataları olduğu gibi (500) döner. Bağlantı hatasını "hesap yok"
+// diye bildirmek istemciyi yanlış yönlendirir.
+func findUser(db *gorm.DB, userID string, user *models.User) error {
+	err := db.First(user, "id = ?", userID).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return apiErr(fiber.StatusNotFound, "user_not_found", "kullanıcı bulunamadı")
 	}
 	return err
+}
+
+// lockUser, kullanıcı satırını transaction sonuna kadar kilitleyerek okur.
+func lockUser(tx *gorm.DB, userID string, user *models.User) error {
+	return findUser(tx.Clauses(clause.Locking{Strength: "UPDATE"}), userID, user)
+}
+
+// respondMe, güncel kullanıcıyı bugünkü {"user": ...} şeklinde döner.
+func (h *Handlers) respondMe(c *fiber.Ctx, userID string) error {
+	var user models.User
+	if err := findUser(h.DB, userID, &user); err != nil {
+		return err
+	}
+	return c.JSON(fiber.Map{"user": h.userJSON(&user)})
 }
 
 // userJSON, /users/me uçlarının bugünkü yanıt şeklidir ({"user": ...}).
@@ -200,10 +218,7 @@ func usageDTO(u *models.User) dto.DailyUsageDTO {
 // respondUsage, kullanıcının güncel günlük kullanım durumunu döner.
 func (h *Handlers) respondUsage(c *fiber.Ctx, userID string) error {
 	var user models.User
-	if err := h.DB.First(&user, "id = ?", userID).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return apiErr(fiber.StatusNotFound, "user_not_found", "kullanıcı bulunamadı")
-		}
+	if err := findUser(h.DB, userID, &user); err != nil {
 		return err
 	}
 	return c.JSON(usageDTO(&user))
@@ -258,7 +273,9 @@ func (h *Handlers) GetDailyUsage(c *fiber.Ctx) error {
 // ResetDailyUsage: POST /users/me/usage/reset
 func (h *Handlers) ResetDailyUsage(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
-	h.DB.Model(&models.User{}).Where("id = ?", userID).Updates(usageResetValues(time.Now()))
+	if err := h.DB.Model(&models.User{}).Where("id = ?", userID).Updates(usageResetValues(time.Now())).Error; err != nil {
+		return err
+	}
 	return h.respondUsage(c, userID)
 }
 
@@ -378,8 +395,8 @@ func (h *Handlers) GrantNoFillPass(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 
 	var user models.User
-	if err := h.DB.First(&user, "id = ?", userID).Error; err != nil {
-		return apiErr(fiber.StatusNotFound, "user_not_found", "kullanıcı bulunamadı")
+	if err := findUser(h.DB, userID, &user); err != nil {
+		return err
 	}
 	now := time.Now()
 	if err := resetUsageIfStale(h.DB, userID, now); err != nil {

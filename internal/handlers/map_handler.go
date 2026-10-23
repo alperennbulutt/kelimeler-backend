@@ -148,6 +148,9 @@ func (h *Handlers) MaxGroupForLevel(c *fiber.Ctx) error {
 func (h *Handlers) ActiveBoxesCount(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	var cnt int64
-	h.DB.Model(&models.WordProgress{}).Where("user_id = ? AND box IN ?", userID, []int{2, 3, 4, 5}).Count(&cnt)
+	if err := h.DB.Model(&models.WordProgress{}).
+		Where("user_id = ? AND box IN ?", userID, []int{2, 3, 4, 5}).Count(&cnt).Error; err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"count": cnt})
 }
