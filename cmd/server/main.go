@@ -56,7 +56,7 @@ func run() (err error) {
 		}
 	}()
 
-	log.Printf("ortam: APP_ENV=%s", cfg.AppEnv)
+	log.Printf("ortam: APP_ENV=%s GATE_ENFORCEMENT=%s", cfg.AppEnv, cfg.GateEnforcement)
 	for _, w := range cfg.Warnings() {
 		log.Printf("config: uyarı: %s", w)
 		observability.CaptureWarning("config: " + w)

@@ -21,6 +21,23 @@ const (
 	EnvDevelopment = "development"
 )
 
+// GateEnforcement, reklam kapısı ihlallerine (açılmamış gruba öğrenme, geçiş
+// kaydı olmadan kontrol noktası sonrası tekrar cevabı) sunucunun tepkisidir.
+type GateEnforcement string
+
+const (
+	// GateOff: ihlal denetlenmez.
+	GateOff GateEnforcement = "off"
+	// GateLog: ihlal loglanır ve Sentry'ye bilgi olarak gider, istek kabul edilir.
+	GateLog GateEnforcement = "log"
+	// GateEnforce: ihlal eden istek 403 ile reddedilir.
+	GateEnforce GateEnforcement = "enforce"
+)
+
+// DefaultGateEnforcement, GATE_ENFORCEMENT verilmezse kullanılır: yayındaki
+// istemciyi bozmadan ihlalleri görünür kılar.
+const DefaultGateEnforcement = GateLog
+
 // MinJWTSecretBytes, production'da kabul edilen en kısa JWT_SECRET uzunluğudur
 // (HS256 anahtarı en az özet boyu kadar olmalı).
 const MinJWTSecretBytes = 32
@@ -67,6 +84,9 @@ type Config struct {
 	// Günlük kullanım sayaçlarının gün sınırını belirleyen IANA saat dilimi adı
 	// (sayaçlar bu dilimin gece yarısında sıfırlanır).
 	UsageTimezone string
+
+	// Reklam kapısı ihlallerinin ele alınışı (GATE_ENFORCEMENT: off | log | enforce).
+	GateEnforcement GateEnforcement
 
 	// --- Gözlemlenebilirlik ---
 
@@ -140,6 +160,7 @@ func FromEnv() (*Config, error) {
 		FirebaseServiceAccount: getEnv("FIREBASE_SERVICE_ACCOUNT", ""),
 		TestModeUnlockAll:      getBool("TEST_MODE_UNLOCK_ALL", false),
 		UsageTimezone:          getEnv("USAGE_TIMEZONE", "Europe/Istanbul"),
+		GateEnforcement:        GateEnforcement(getEnv("GATE_ENFORCEMENT", string(DefaultGateEnforcement))),
 
 		SentryDSN:     getEnv("SENTRY_DSN", ""),
 		SentryRelease: getEnv("SENTRY_RELEASE", ""),
@@ -179,6 +200,12 @@ func (c *Config) Validate() error {
 		return errors.New(`APP_ENV tanımlı değil: "production" ya da "development" olmalı`)
 	default:
 		return fmt.Errorf(`APP_ENV=%q geçersiz: tam olarak "production" ya da "development" olmalı`, c.AppEnv)
+	}
+
+	switch c.GateEnforcement {
+	case GateOff, GateLog, GateEnforce:
+	default:
+		return fmt.Errorf(`GATE_ENFORCEMENT=%q geçersiz: "off", "log" ya da "enforce" olmalı`, c.GateEnforcement)
 	}
 
 	if c.IsProduction() {

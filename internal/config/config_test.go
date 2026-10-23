@@ -180,3 +180,40 @@ func TestWarnings(t *testing.T) {
 		})
 	}
 }
+
+func TestFromEnv_GateEnforcement(t *testing.T) {
+	cases := []struct {
+		value   string
+		want    GateEnforcement
+		wantErr bool
+	}{
+		{"", GateLog, false}, // varsayılan
+		{"off", GateOff, false},
+		{"log", GateLog, false},
+		{"enforce", GateEnforce, false},
+		{"ENFORCE", "", true},
+		{"on", "", true},
+		{"true", "", true},
+	}
+
+	for _, c := range cases {
+		t.Run("deger="+c.value, func(t *testing.T) {
+			t.Setenv("APP_ENV", "development")
+			t.Setenv("GATE_ENFORCEMENT", c.value)
+
+			cfg, err := FromEnv()
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("FromEnv() hata vermedi, GateEnforcement = %q", cfg.GateEnforcement)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("FromEnv() = %v", err)
+			}
+			if cfg.GateEnforcement != c.want {
+				t.Errorf("GateEnforcement = %q, beklenen %q", cfg.GateEnforcement, c.want)
+			}
+		})
+	}
+}

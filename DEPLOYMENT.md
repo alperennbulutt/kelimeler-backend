@@ -56,6 +56,7 @@ Depo özelse Coolify'de kaynak olarak **GitHub App** (Private Repository) kullan
 | `APPLE_KEY_ID` | "Sign in with Apple" için üretilen anahtarın Key ID'si — **iOS yayını için zorunlu** |
 | `APPLE_PRIVATE_KEY` | O anahtarın `.p8` içeriği (satır sonları `\n` olarak kaçırılabilir) — **iOS yayını için zorunlu**, gizli |
 | `USAGE_TIMEZONE` | `Europe/Istanbul` — günlük kullanım sayaçları bu saat diliminin gece yarısında sıfırlanır (girilmezse varsayılan da budur) |
+| `GATE_ENFORCEMENT` | `log` (varsayılan). Reklam kapısı ihlallerinde sunucunun tepkisi: `off` denetlemez, `log` ihlali loglayıp Sentry'ye bilgi olarak gönderir ama isteği kabul eder, `enforce` isteği `403 gate_required` / `review_gate_required` ile reddeder. `enforce`'a ancak istemcinin bu kodları işleyen sürümü yaygınlaştıktan ve `log` kipinde ihlal kalmadığı görüldükten sonra geç. Başka bir değerde sunucu açılmaz |
 | `API_RATE_LIMIT` | `600` — genel API hız sınırı, IP başına istek/dk. Mobil operatörler çok sayıda kullanıcıyı tek IP arkasına koyduğu (CGNAT) için düşük tutma |
 | `AUTH_RATE_LIMIT` | `10` — Google/Apple giriş uçlarının sıkı hız sınırı, IP başına istek/dk. `/auth/refresh` buna değil `API_RATE_LIMIT`'e tabidir |
 | `CORS_ALLOWED_ORIGINS` | **Boş bırak** (API'yi çağıran bir web sitesi yoksa). Gerekirse virgülle ayrılmış origin listesi, ör. `https://panel.example.com` |
