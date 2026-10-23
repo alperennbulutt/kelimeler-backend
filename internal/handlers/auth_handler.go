@@ -21,14 +21,38 @@ import (
 
 // --- ortak yardımcılar ---
 
-// linkedProviders, kullanıcının bağlı giriş yöntemlerini ('password','google','apple') döndürür.
-func (h *Handlers) linkedProviders(userID string) []string {
+// loadLinkedProviders, kullanıcının bağlı giriş yöntemlerini ('password','google','apple') döndürür.
+func (h *Handlers) loadLinkedProviders(userID string) ([]string, error) {
 	providers := []string{}
-	h.DB.Model(&models.AuthIdentity{}).
+	err := h.DB.Model(&models.AuthIdentity{}).
 		Where("user_id = ?", userID).
 		Order("provider").
-		Pluck("provider", &providers)
+		Pluck("provider", &providers).Error
+	return providers, err
+}
+
+// linkedProviders, loadLinkedProviders'ın hatayı döndürmeyen eski biçimidir;
+// hata log'lanır ve boş liste döner. Yeni kod loadLinkedProviders kullanmalı.
+func (h *Handlers) linkedProviders(userID string) []string {
+	providers, err := h.loadLinkedProviders(userID)
+	if err != nil {
+		log.Printf("auth: bağlı giriş yöntemleri okunamadı (user=%s): %v", userID, err)
+		return []string{}
+	}
 	return providers
+}
+
+// usableSignInMethod, sağlayıcının bu ortamda giriş için kullanılabilir olup
+// olmadığını söyler. Production'da parola uçları kapalıdır (bkz. routes.go);
+// eski 'password' kimliği orada giriş yöntemi sayılmaz.
+func (h *Handlers) usableSignInMethod(provider string) bool {
+	switch provider {
+	case "google", "apple":
+		return true
+	case "password":
+		return h.Cfg == nil || h.Cfg.AppEnv != "production"
+	}
+	return false
 }
 
 // tokenPair, bir oturum için üretilen access + refresh token çiftidir.
@@ -66,12 +90,16 @@ func (h *Handlers) newTokenPair(user *models.User, family string) (tokenPair, *m
 	return tokenPair{access: access, refresh: refresh}, row, nil
 }
 
-func (h *Handlers) authResponse(user *models.User, pair tokenPair) *dto.AuthResponse {
+func (h *Handlers) authResponse(user *models.User, pair tokenPair) (*dto.AuthResponse, error) {
+	providers, err := h.loadLinkedProviders(user.ID)
+	if err != nil {
+		return nil, err
+	}
 	return &dto.AuthResponse{
 		AccessToken:  pair.access,
 		RefreshToken: pair.refresh,
-		User:         dto.NewUserDTO(user, h.linkedProviders(user.ID)),
-	}
+		User:         dto.NewUserDTO(user, providers),
+	}, nil
 }
 
 // issueTokens, access + refresh token üretir ve refresh hash'ini DB'ye yazar.
@@ -83,15 +111,22 @@ func (h *Handlers) issueTokens(user *models.User) (*dto.AuthResponse, error) {
 	if err := h.DB.Create(row).Error; err != nil {
 		return nil, err
 	}
-	return h.authResponse(user, pair), nil
+	return h.authResponse(user, pair)
 }
 
 func (h *Handlers) respondUser(c *fiber.Ctx, userID string) error {
 	var user models.User
 	if err := h.DB.First(&user, "id = ?", userID).Error; err != nil {
-		return apiErr(fiber.StatusNotFound, "user_not_found", "kullanıcı bulunamadı")
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return apiErr(fiber.StatusNotFound, "user_not_found", "kullanıcı bulunamadı")
+		}
+		return err
 	}
-	return c.JSON(fiber.Map{"user": dto.NewUserDTO(&user, h.linkedProviders(user.ID))})
+	providers, err := h.loadLinkedProviders(user.ID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(fiber.Map{"user": dto.NewUserDTO(&user, providers)})
 }
 
 // --- endpoint'ler ---
@@ -424,7 +459,13 @@ func (h *Handlers) Refresh(c *fiber.Ctx) error {
 	}
 	switch outcome {
 	case refreshIssued:
-		return c.JSON(h.authResponse(&user, pair))
+		// Yanıt hazırlanamazsa istemci 500 alıp aynı token'la yeniden dener;
+		// rotasyon commit edildiği için deneme tolerans yolundan geçer.
+		resp, err := h.authResponse(&user, pair)
+		if err != nil {
+			return err
+		}
+		return c.JSON(resp)
 	case refreshReused:
 		log.Printf("auth: iptal edilmiş refresh token yeniden kullanıldı, oturum ailesi iptal edildi (user=%s, token=%d)",
 			user.ID, rt.ID)
@@ -601,23 +642,48 @@ func (h *Handlers) linkProvider(c *fiber.Ctx, userID, provider string, si *auth.
 
 // UnlinkProvider: belirtilen provider kimliğini kaldırır (son kimlik korunur).
 //
+// Sayım ve silme, kullanıcının kimlik satırları kilitliyken tek transaction'da
+// yapılır: aynı anda gelen DELETE /link/google ve DELETE /link/apple'dan
+// yalnızca biri geçer, hesap girişsiz kalmaz. Kalan kimlikler arasında bu
+// ortamda kullanılabilir bir giriş yöntemi yoksa 400 last_identity döner.
+// Bağlı olmayan sağlayıcıyı kaldırmak değişiklik yapmadan 200 döner (yeniden
+// deneme güvenli).
+//
 // Apple kimliği kaldırılırken saklı refresh token'ı Apple'da iptal edilir:
 // satır silindikten sonra hesap silme sırasında iptal edilecek token kalmaz.
 func (h *Handlers) UnlinkProvider(provider string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		userID := middleware.UserID(c)
-		var count int64
-		h.DB.Model(&models.AuthIdentity{}).Where("user_id = ?", userID).Count(&count)
-		if count <= 1 {
-			return apiErr(fiber.StatusBadRequest, "last_identity", "son giriş yöntemi kaldırılamaz")
-		}
-		var identities []models.AuthIdentity
-		if err := h.DB.Clauses(clause.Returning{}).
-			Where("user_id = ? AND provider = ?", userID, provider).
-			Delete(&identities).Error; err != nil {
+		var removed []models.AuthIdentity
+		err := h.DB.Transaction(func(tx *gorm.DB) error {
+			var identities []models.AuthIdentity
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("user_id = ?", userID).Order("id").
+				Find(&identities).Error; err != nil {
+				return err
+			}
+			usable := 0
+			for _, identity := range identities {
+				if identity.Provider == provider {
+					removed = append(removed, identity)
+				} else if h.usableSignInMethod(identity.Provider) {
+					usable++
+				}
+			}
+			if len(removed) == 0 {
+				return nil
+			}
+			if usable == 0 {
+				removed = nil
+				return apiErr(fiber.StatusBadRequest, "last_identity", "son giriş yöntemi kaldırılamaz")
+			}
+			return tx.Where("user_id = ? AND provider = ?", userID, provider).
+				Delete(&models.AuthIdentity{}).Error
+		})
+		if err != nil {
 			return err
 		}
-		for _, identity := range identities {
+		for _, identity := range removed {
 			if provider == "apple" {
 				h.revokeAppleOnUnlink(userID, identity)
 			}

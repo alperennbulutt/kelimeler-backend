@@ -1076,3 +1076,111 @@ func TestWarnIfAppleRevokeDisabled(t *testing.T) {
 		})
 	}
 }
+
+// --- Bağlantı kaldırma: son giriş yöntemi koruması ---
+
+func unlinkRequest(t *testing.T, h *Handlers, u *models.User, provider string) *http.Request {
+	return authRequest(t, h, u, http.MethodDelete, "/api/v1/auth/link/"+provider, nil)
+}
+
+func TestUnlinkProvider_SonGirisYontemiKorunur(t *testing.T) {
+	cases := []struct {
+		name       string
+		env        string
+		identities []string
+		unlink     string
+		wantStatus int
+		wantCode   string
+		wantLeft   []string
+	}{
+		{"tek kimlik kaldırılamaz", "test", []string{"google"}, "google",
+			fiber.StatusBadRequest, "last_identity", []string{"google"}},
+		{"iki sosyal kimlikten biri kaldırılır", "test", []string{"apple", "google"}, "google",
+			fiber.StatusOK, "", []string{"apple"}},
+		// Production'da parola uçları kapalı: parola kimliği giriş yöntemi değildir.
+		{"production'da parola kimliği sayılmaz", "production", []string{"google", "password"}, "google",
+			fiber.StatusBadRequest, "last_identity", []string{"google", "password"}},
+		{"geliştirmede parola kimliği sayılır", "development", []string{"google", "password"}, "google",
+			fiber.StatusOK, "", []string{"password"}},
+		{"bağlı olmayan sağlayıcı değişiklik yapmadan 200", "test", []string{"google"}, "apple",
+			fiber.StatusOK, "", []string{"google"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gdb := testDB(t)
+			u := testUser(t, gdb)
+			for _, p := range c.identities {
+				testIdentity(t, gdb, u, p)
+			}
+			h := New(gdb, &config.Config{AppEnv: c.env}, testTokens(), nil)
+
+			status, body := send(t, authApp(h), unlinkRequest(t, h, u, c.unlink))
+			if status != c.wantStatus {
+				t.Fatalf("status = %d, beklenen %d (body: %v)", status, c.wantStatus, body)
+			}
+			if c.wantCode != "" && body["code"] != c.wantCode {
+				t.Errorf("code = %v, beklenen %s", body["code"], c.wantCode)
+			}
+			if status == fiber.StatusOK {
+				user, _ := body["user"].(map[string]any)
+				got := []string{}
+				for _, p := range user["linkedProviders"].([]any) {
+					got = append(got, p.(string))
+				}
+				if !slices.Equal(got, c.wantLeft) {
+					t.Errorf("yanıttaki linkedProviders = %v, beklenen %v", got, c.wantLeft)
+				}
+			}
+			left, err := h.loadLinkedProviders(u.ID)
+			if err != nil {
+				t.Fatalf("kimlikler okunamadı: %v", err)
+			}
+			if !slices.Equal(left, c.wantLeft) {
+				t.Errorf("kalan kimlikler = %v, beklenen %v", left, c.wantLeft)
+			}
+		})
+	}
+}
+
+// Aynı anda gelen iki bağlantı kaldırma isteğinin ikisi de "iki kimlik var"
+// görürse hesap girişsiz kalır. Kimlik satırları kilitliyken iki istek de
+// sıraya girer; yalnızca biri geçmeli.
+func TestUnlinkProvider_EszamanliIstekHesabiGirissizBirakmaz(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	testIdentity(t, gdb, u, "google")
+	testIdentity(t, gdb, u, "apple")
+	h := New(gdb, &config.Config{AppEnv: "test"}, testTokens(), nil)
+	app := authApp(h)
+
+	providers := []string{"google", "apple"}
+	statuses := satirKilidiAltindaEszamanli(t, gdb, app,
+		"SELECT 1 FROM auth_identities WHERE user_id = ? FOR UPDATE", u.ID,
+		len(providers), func(i int) *http.Request { return unlinkRequest(t, h, u, providers[i]) })
+
+	sayim := map[int]int{}
+	for _, status := range statuses {
+		sayim[status]++
+	}
+	if sayim[fiber.StatusOK] != 1 || sayim[fiber.StatusBadRequest] != 1 {
+		t.Errorf("status dağılımı = %v, beklenen bir 200 ve bir 400", sayim)
+	}
+	left, err := h.loadLinkedProviders(u.ID)
+	if err != nil {
+		t.Fatalf("kimlikler okunamadı: %v", err)
+	}
+	if len(left) != 1 {
+		t.Errorf("kalan kimlikler = %v, beklenen tam bir kimlik", left)
+	}
+}
+
+func TestUnlinkProvider_VeritabaniHatasi500Doner(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	h := New(kopukDB(t), &config.Config{AppEnv: "test"}, testTokens(), nil)
+
+	status, body := send(t, authApp(h), unlinkRequest(t, h, u, "google"))
+	if status != fiber.StatusInternalServerError {
+		t.Errorf("status = %d, beklenen 500 (body: %v)", status, body)
+	}
+}
