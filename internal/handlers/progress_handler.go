@@ -238,6 +238,15 @@ func (h *Handlers) learnGate(c *fiber.Ctx, tx *gorm.DB, userID string, word *mod
 		// Eski istemci grubu gövdesiz kaydetmiş olabilir: hangi grubu açtığı
 		// bilinmez, yalnızca kaç grup açtığı bilinir.
 		if slots := services.KeylessUnlockSlots(state); slots > 0 {
+			// Kullanıcı satırı paylaşımlı kilitli: iki farklı gruba aynı
+			// anda gelen learn'ler "bugün öğrenilen gruplar"ı birlikte boş
+			// görüp tek hakkı ikisi de kullanırdı. Bu dal kullanıcı başına
+			// sıraya girer; sonraki sorgu (READ COMMITTED) öncekinin
+			// yazdığı kelimeyi görür. Kilit transaction sonunda bırakılır;
+			// satır kilidi yükseltilmediği için kilitlenme (deadlock) olmaz.
+			if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?::text))", "gate_keyless:"+userID).Error; err != nil {
+				return err
+			}
 			learned, err := groupsLearnedToday(tx, userID, now)
 			if err != nil {
 				return err

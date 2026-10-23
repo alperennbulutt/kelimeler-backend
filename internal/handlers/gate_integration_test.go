@@ -298,6 +298,53 @@ func TestLearnGate_GovdesizKayitlarGrupSayisiKadarHakVerir(t *testing.T) {
 	}
 }
 
+func TestLearnGate_GovdesizHakEszamanliIkiGrubaYetmez(t *testing.T) {
+	// Tek gövdesiz açılış tek grubu karşılar. Kullanıcı satırı learn'de
+	// paylaşımlı kilitlendiği için iki farklı gruba aynı anda gelen ilk
+	// kelimeler "bugün öğrenilen gruplar"ı birlikte boş görüp hakkı ikisi
+	// birden kullanmamalı.
+	kayit := kapiRaporunuYakala(t)
+	gdb, u, app := newGateTest(t, config.GateEnforce)
+	g1 := testDictWord(t, gdb, "itest_gate_keyless_race_g1", "A1", 1, 1)
+	g2old := testDictWord(t, gdb, "itest_gate_keyless_race_g2a", "A1", 2, 1)
+	g2 := testDictWord(t, gdb, "itest_gate_keyless_race_g2b", "A1", 2, 2)
+	// 2. grup daha önce başlanmış (haritada açık), ama bugün değil.
+	next := time.Now().AddDate(0, 0, 5)
+	setProgress(t, gdb, u.ID, g2old, 3, &next)
+	if err := gdb.Model(&models.WordProgress{}).Where("user_id = ? AND word_id = ?", u.ID, g2old.ID).
+		Update("created_at", time.Now().AddDate(0, 0, -3)).Error; err != nil {
+		t.Fatalf("created_at yazılamadı: %v", err)
+	}
+
+	if status, _ := post(t, app, "/users/me/usage/group-started"); status != 200 {
+		t.Fatalf("gövdesiz group-started status = %d", status)
+	}
+
+	words := []models.DictionaryWord{g1, g2}
+	statuses := kilitAltindaEszamanli(t, gdb, app, u.ID, len(words), func(i int) *http.Request {
+		return learnRequest(fiber.Map{"wordId": words[i].ID})
+	})
+	ok := 0
+	for _, s := range statuses {
+		switch s {
+		case fiber.StatusOK:
+			ok++
+		case fiber.StatusForbidden:
+		default:
+			t.Fatalf("beklenmeyen status %d (tümü: %v)", s, statuses)
+		}
+	}
+	if ok != 1 {
+		t.Fatalf("kabul edilen = %d, beklenen 1 (tek gövdesiz hak; tümü: %v)", ok, statuses)
+	}
+	if got := progressRowCount(t, gdb, u.ID, g1.ID) + progressRowCount(t, gdb, u.ID, g2.ID); got != 1 {
+		t.Errorf("yazılan yeni kelime = %d, beklenen 1", got)
+	}
+	if got := len(kayit.ihlaller()); got != 1 {
+		t.Errorf("ihlal satırı = %d, beklenen 1 (%v)", got, kayit.ihlaller())
+	}
+}
+
 // --- POST /progress/swipe ---
 
 func TestReviewGate_KipVeKontrolNoktasi(t *testing.T) {
