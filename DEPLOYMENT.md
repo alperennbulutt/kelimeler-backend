@@ -90,7 +90,7 @@ Hız sınırları istemci IP'sine (kimliği doğrulanmış genel uçlarda kullan
 
 Bu kurgu Coolify'nin Traefik'inin varsayılan davranışına dayanır: Traefik, güvenmediği kaynaktan (internetteki istemci) gelen `X-Forwarded-*` başlıklarını siler ve `X-Forwarded-For`'u istemcinin gerçek adresiyle yeniden yazar. Bunun için:
 
-- Coolify → **Servers → Proxy** yapılandırmasında `--entrypoints.https.forwardedHeaders.insecure=true` **olmamalı**; `forwardedHeaders.trustedIPs` de yalnızca gerçekten önünde duran bir proxy (ör. Cloudflare) varsa ve onun aralıklarıyla doldurulmalı.
+- Coolify → **Servers → Proxy** yapılandırmasında `--entrypoints.https.forwardedHeaders.insecure=true` **olmamalı**; `forwardedHeaders.trustedIPs` de **boş** kalmalı; önde Cloudflare olsa bile (aşağıdaki Cloudflare notuna bak: güvenilen bir ön proxy istemcinin uydurduğu adresi zincirin başında bırakır).
 - Uygulama container'ının 8080 portu host'a **yayınlanmamalı** (Coolify'de "Ports Mappings" boş, yalnızca "Ports Exposes: 8080"). Yayınlanırsa docker ağ geçidinden (özel adres) gelen bağlantı güvenilir sayılır.
 - `TRUSTED_PROXIES`'i daraltmak istersen Traefik'in bağlandığı ağın CIDR'ını kullan: sunucuda `docker network inspect coolify -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}'`.
 
@@ -103,7 +103,9 @@ for i in $(seq 11); do
 done
 ```
 
-**Cloudflare'e geçilirse:** Traefik Cloudflare'e güvenmediği sürece `X-Forwarded-For` yalnızca Cloudflare kenar IP'sini taşır ve tüm kullanıcılar aynı kovaya düşer. İki yol var: (1) Traefik'te `forwardedHeaders.trustedIPs`'e Cloudflare aralıklarını girmek (önerilen; `X-Forwarded-For` başlığı istemci IP'siyle gelir), ya da (2) `PROXY_HEADER=CF-Connecting-IP` yapmak; bu durumda sunucuya **yalnızca** Cloudflare üzerinden ulaşılabildiğinden emin ol (firewall'da 80/443'ü Cloudflare aralıklarına kısıtla), yoksa başlık uydurulabilir.
+**Cloudflare'e geçilirse:** Traefik Cloudflare'e güvenmediği sürece `X-Forwarded-For` yalnızca Cloudflare kenar IP'sini taşır ve tüm kullanıcılar aynı kovaya düşer. Önerilen yol `PROXY_HEADER=CF-Connecting-IP`'dir: Cloudflare bu başlığı her istekte kendisi yazar (istemcinin gönderdiğini ezer). Bu durumda sunucuya **yalnızca** Cloudflare üzerinden ulaşılabildiğinden emin ol (firewall'da 80/443'ü Cloudflare aralıklarına kısıtla); yoksa doğrudan sunucuya gelen biri başlığı uydurabilir.
+
+> **Uyarı:** Traefik'te `forwardedHeaders.trustedIPs`'e Cloudflare aralıklarını girip `PROXY_HEADER=X-Forwarded-For` ile devam etmek hız sınırını yeniden **atlatılabilir** yapar. Cloudflare istemcinin gönderdiği `X-Forwarded-For`'u silmez, gerçek adresi sonuna ekler (`uydurma, gerçek-istemci`); Traefik de Cloudflare'e güvendiği için başlığı korur. Sunucu zincirdeki **ilk** geçerli adresi aldığından (Fiber'ın davranışı) anahtar istemcinin uydurduğu adres olur. Bu yolu kullanma; `CF-Connecting-IP`'yi kullan.
 
 ### Açılış denetimi
 

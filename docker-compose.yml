@@ -27,6 +27,11 @@ services:
     environment:
       # docker ağı içinde Postgres host'u "db"dir.
       DATABASE_URL: postgres://postgres:postgres@db:5432/kelimeler?sslmode=disable
+      # Bu düzende önde proxy yok, port doğrudan yayınlanır. Varsayılan güvenilen
+      # aralıklar (özel ağlar) kalsaydı docker ağ geçidinden (172.x) gelen
+      # bağlantılar proxy sayılır, X-Forwarded-For uydurularak hız sınırı
+      # atlatılabilirdi. Önüne bir reverse proxy koyarsanız onun adresini girin.
+      TRUSTED_PROXIES: 127.0.0.1/32
     ports:
       - "8080:8080"
 
