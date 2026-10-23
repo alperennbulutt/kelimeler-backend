@@ -1,6 +1,12 @@
 package middleware
 
-import "github.com/gofiber/fiber/v2"
+import (
+	"log"
+
+	"kelimeler-backend/internal/observability"
+
+	"github.com/gofiber/fiber/v2"
+)
 
 // APIError, istemciye dönecek yapılandırılmış hata. Code, Flutter tarafının
 // switch'lediği makine-okunur koddur (ör. "email_in_use", "invalid_credentials").
@@ -16,8 +22,25 @@ func NewAPIError(status int, code, message string) *APIError {
 	return &APIError{Status: status, Code: code, Message: message}
 }
 
+// panicLocal, isteğin panic ile bittiğini işaretler (bkz. MarkPanic).
+const panicLocal = "kelimeler.panic"
+
+// MarkPanic, isteğin panic ile bittiğini işaretler. Recover middleware'inin
+// stack yazıcısından çağrılır: panic Sentry middleware'inde zaten bildirilmiştir,
+// ErrorHandler aynı olayı ikinci kez göndermez.
+func MarkPanic(c *fiber.Ctx) {
+	c.Locals(panicLocal, true)
+}
+
 // ErrorHandler, Fiber'ın merkezi hata işleyicisidir; her hatayı {code, error} JSON'a çevirir.
+//
+// 5xx hataları istek kimliğiyle loglanır ve Sentry'ye bildirilir: istemciye
+// yalnızca genel bir mesaj döner, asıl hata başka hiçbir yerde görünmezdi.
 func ErrorHandler(c *fiber.Ctx, err error) error {
+	if status := StatusFor(err); status >= fiber.StatusInternalServerError {
+		reportServerError(c, status, err)
+	}
+
 	if apiErr, ok := err.(*APIError); ok {
 		return c.Status(apiErr.Status).JSON(fiber.Map{
 			"code":  apiErr.Code,
@@ -34,6 +57,15 @@ func ErrorHandler(c *fiber.Ctx, err error) error {
 		"code":  "internal",
 		"error": "beklenmeyen bir hata oluştu",
 	})
+}
+
+func reportServerError(c *fiber.Ctx, status int, err error) {
+	log.Printf("hata: %d %s %s request_id=%s: %v",
+		status, c.Method(), c.Path(), observability.RequestIDFrom(c), err)
+	if panicked, _ := c.Locals(panicLocal).(bool); panicked {
+		return
+	}
+	observability.CaptureRequestError(c, err)
 }
 
 // StatusFor, ErrorHandler'ın verilen hata için yazacağı HTTP durum kodudur.

@@ -2,10 +2,17 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
+	"net"
+	"net/http"
 	"os"
+	"os/signal"
+	"runtime/debug"
 	"strings"
+	"syscall"
+	"time"
 
 	"kelimeler-backend/internal/auth"
 	"kelimeler-backend/internal/config"
@@ -25,12 +32,80 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/recover"
 )
 
+// version, derleme sırasında -ldflags "-X main.version=<commit>" ile gömülür
+// (bkz. Dockerfile). Boşsa sürüm bilinmiyordur.
+var version string
+
+// seedPath, imaja gömülü sözlük dökümünün yoludur (bkz. Dockerfile).
+const seedPath = "/seed/dictionary_words.sql"
+
 func main() {
+	// Çalışma imajı distroless'tır (kabuk, curl, wget yok); container sağlık
+	// kontrolü binary'nin kendisiyle yapılır: HEALTHCHECK ["/server", "-healthcheck"].
+	if len(os.Args) > 1 && os.Args[1] == "-healthcheck" {
+		port := os.Getenv("PORT")
+		if port == "" {
+			port = "8080"
+		}
+		os.Exit(healthcheck("http://127.0.0.1:" + port + "/api/v1/health"))
+	}
+
+	// log.Fatalf defer'ları atlar; hatalar run'dan döner ki Sentry kuyruğu
+	// boşaltılsın ve veritabanı bağlantıları kapatılsın.
+	if err := run(); err != nil {
+		log.Printf("kelimeler-backend durdu: %v", err)
+		os.Exit(1)
+	}
+}
+
+func orDefault(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
+}
+
+// healthcheck, çalışan sunucunun sağlık ucuna istek atar; 200 dönerse 0, aksi
+// halde 1 döner (Docker HEALTHCHECK çıkış kodu sözleşmesi). Ucun kendisi
+// veritabanını 2 sn'lik zaman aşımıyla sınar.
+func healthcheck(url string) int {
+	client := http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "healthcheck: %s yanıtı %d\n", url, resp.StatusCode)
+		return 1
+	}
+	return 0
+}
+
+// run, sunucuyu kurar ve SIGTERM/SIGINT gelene kadar çalıştırır.
+func run() (err error) {
 	cfg := config.Load()
+	if cfg.SentryRelease == "" {
+		cfg.SentryRelease = version
+	}
+	log.Printf("kelimeler-backend sürüm: %s", orDefault(version, "bilinmiyor"))
 
 	// Hata raporlamayı en başta kur ki başlangıç hataları da yakalansın.
+	// Defer'lar ters sırayla çalışır: önce hata bildirilir, sonra kuyruk boşaltılır.
 	flushSentry := observability.InitSentry(cfg.SentryDSN, cfg.AppEnv, cfg.SentryRelease)
 	defer flushSentry()
+	defer func() {
+		if err != nil {
+			observability.CaptureError(err)
+		}
+	}()
+
+	log.Printf("ortam: APP_ENV=%s GATE_ENFORCEMENT=%s", cfg.AppEnv, cfg.GateEnforcement)
+	for _, w := range cfg.Warnings() {
+		log.Printf("config: uyarı: %s", w)
+		observability.CaptureWarning("config: " + w)
+	}
 
 	// Günlük kullanım sayaçlarının gün sınırı. Ad çözülemezse varsayılan konum
 	// korunur; hangi konumun geçerli olduğu her durumda loglanır.
@@ -39,15 +114,34 @@ func main() {
 	}
 	log.Printf("kullanım günü saat dilimi: %s", services.UsageLocation())
 
-	database, err := db.Connect(cfg.DatabaseURL)
+	database, err := db.ConnectWithOptions(cfg.DatabaseURL, db.Options{
+		MaxOpenConns:     cfg.DBMaxOpenConns,
+		MaxIdleConns:     cfg.DBMaxIdleConns,
+		ConnMaxLifetime:  cfg.DBConnMaxLifetime,
+		StatementTimeout: cfg.DBStatementTimeout,
+	})
 	if err != nil {
-		log.Fatalf("db bağlantısı başarısız: %v", err)
+		return fmt.Errorf("db bağlantısı başarısız: %w", err)
 	}
+	sqlDB, err := database.DB()
+	if err != nil {
+		return fmt.Errorf("db havuzu alınamadı: %w", err)
+	}
+	// Sunucu kapandıktan sonra çalışır: süren istekler bağlantılarını bitirmiş olur.
+	defer sqlDB.Close()
+
 	if err := db.Migrate(database); err != nil {
-		log.Fatalf("db migrate başarısız: %v", err)
+		return fmt.Errorf("db migrate başarısız: %w", err)
 	}
-	// İlk açılışta (boş DB) imaja gömülü kelime sözlüğünü yükle.
-	db.SeedDictionaryIfEmpty(database, "/seed/dictionary_words.sql")
+	// İlk açılışta (boş DB) imaja gömülü kelime sözlüğünü yükle. Production'da
+	// sözlüksüz açılmak yerine durulur: deploy başarısız görünür, Coolify eski
+	// container'ı çalıştırmaya devam eder.
+	if _, err := db.SeedDictionaryIfEmpty(database, seedPath); err != nil {
+		if cfg.IsProduction() {
+			return fmt.Errorf("sözlük yüklenemedi: %w", err)
+		}
+		log.Printf("uyarı: sözlük yüklenemedi, kelimeler gösterilemeyecek: %v", err)
+	}
 
 	tokens := auth.NewTokenService(cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
 
@@ -63,9 +157,14 @@ func main() {
 	appleRevoker, err := auth.NewAppleRevoker(
 		cfg.AppleClientID, cfg.AppleTeamID, cfg.AppleKeyID, cfg.ApplePrivateKey)
 	if err != nil {
-		log.Printf("uyarı: Apple revoker başlatılamadı, hesap silmede token iptali yapılmayacak: %v", err)
+		msg := fmt.Sprintf("Apple revoker başlatılamadı, hesap silmede token iptali yapılmayacak: %v", err)
+		log.Printf("uyarı: %s", msg)
+		if cfg.IsProduction() {
+			observability.CaptureWarning(msg)
+		}
 		appleRevoker = nil
-	} else if appleRevoker == nil && cfg.AppleClientID != "" {
+	} else if appleRevoker == nil && cfg.AppleClientID != "" && !cfg.IsProduction() {
+		// Production'da aynı uyarı cfg.Warnings() ile Sentry'ye de gider.
 		log.Printf("uyarı: APPLE_TEAM_ID/APPLE_KEY_ID/APPLE_PRIVATE_KEY eksik — " +
 			"Apple hesap silmede token iptali YAPILMAYACAK (Apple bunu şart koşar)")
 	}
@@ -81,23 +180,53 @@ func main() {
 
 	api := app.Group("/api/v1")
 
-	// Genel hız sınırı: tüm API uçları için IP başına.
-	api.Use(limiter.New(limiter.Config{
-		Max:        cfg.APIRateLimit,
-		Expiration: cfg.APIRateLimitWindow,
-		LimitReached: func(c *fiber.Ctx) error {
-			return middleware.NewAPIError(fiber.StatusTooManyRequests,
-				"rate_limited", "çok fazla istek gönderdiniz, lütfen biraz bekleyin")
-		},
-	}))
+	// Genel hız sınırı: tüm API uçları için kullanıcı ya da IP başına.
+	api.Use(apiLimiter(cfg, tokens))
 
 	handlers.RegisterRoutes(api, h, tokens, authLimiter(cfg))
 
 	addr := ":" + cfg.Port
-	log.Printf("kelimeler-backend %s adresinde dinliyor", addr)
-	if err := app.Listen(addr); err != nil {
-		log.Fatalf("server hatası: %v", err)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("%s dinlenemedi: %w", addr, err)
 	}
+	log.Printf("kelimeler-backend %s adresinde dinliyor", addr)
+
+	// Coolify her redeploy'da eski container'a SIGTERM gönderir.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return serve(ctx, app, ln, cfg.ShutdownTimeout)
+}
+
+// serve, uygulamayı ln üzerinde ctx iptal edilene kadar çalıştırır; sonra yeni
+// bağlantı kabul etmeyi bırakır ve süren isteklerin bitmesini en fazla timeout
+// kadar bekler.
+//
+// Kapanma beklenmeden süreç bitseydi o anda işlenen istekler (ör. reklam
+// sonrası grup açma) yanıtsız kalır, istemci bunları ağ hatası olarak görüp
+// yeniden denerdi.
+func serve(ctx context.Context, app *fiber.App, ln net.Listener, timeout time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- app.Listener(ln) }()
+
+	select {
+	case err := <-done:
+		// Sinyal gelmeden dinleme bitti: gerçek bir sunucu hatasıdır.
+		return fmt.Errorf("server hatası: %w", err)
+	case <-ctx.Done():
+	}
+
+	log.Printf("kapanma sinyali alındı; süren istekler en fazla %s bekleniyor", timeout)
+	if err := app.ShutdownWithTimeout(timeout); err != nil {
+		return fmt.Errorf("düzgün kapanma %s içinde tamamlanamadı: %w", timeout, err)
+	}
+	// Listener kapanınca döner; sinyal dinleme başlamadan geldiyse dönmeyebilir.
+	select {
+	case <-done:
+	case <-time.After(timeout):
+	}
+	log.Println("sunucu düzgün kapandı")
+	return nil
 }
 
 // newApp, Fiber uygulamasını ve her isteğe uygulanan middleware zincirini kurar.
@@ -115,9 +244,17 @@ func newApp(cfg *config.Config, accessLog io.Writer) *fiber.App {
 		// Devasa gövdelerle bellek şişirmeyi engeller (en büyük istek birkaç KB'dır).
 		BodyLimit: cfg.BodyLimit,
 
-		// Coolify/nginx arkasında gerçek istemci IP'si için; rate limit
+		// Coolify/Traefik arkasında gerçek istemci IP'si için; rate limit
 		// doğru IP'yi görmezse tüm trafiği tek proxy IP'sine sayar.
-		ProxyHeader: fiber.HeaderXForwardedFor,
+		//
+		// Başlık yalnızca bağlantı güvenilen bir proxy'den geliyorsa okunur:
+		// doğrudan bağlanan biri her isteğe farklı X-Forwarded-For yazıp hız
+		// sınırını atlatamaz. IP doğrulaması, "a, b" gibi zincirlerde ham
+		// metin yerine ilk geçerli adresin anahtar olmasını sağlar.
+		ProxyHeader:             cfg.ProxyHeader,
+		EnableTrustedProxyCheck: true,
+		TrustedProxies:          cfg.TrustedProxies,
+		EnableIPValidation:      true,
 	})
 
 	// Fiber'da ilk kaydedilen middleware en dışta çalışır; bir panic ise en içten
@@ -130,13 +267,18 @@ func newApp(cfg *config.Config, accessLog io.Writer) *fiber.App {
 	//   sentry  (en iç) panic'i recover'dan önce görür, olayı gönderir ve yeniden
 	//           fırlatır (Repanic). recover'ın dışında olsaydı panic ona hiç
 	//           ulaşmazdı.
-	app.Use(logger.New(logger.Config{Output: accessLog}))
-	app.Use(recover.New(recover.Config{EnableStackTrace: true}))
+	//
+	// İstek kimliği hepsinden önce atanır ki erişim logu, hata işleyici ve
+	// Sentry olayı aynı kimliği taşısın.
+	app.Use(observability.RequestID())
+	app.Use(logger.New(logger.Config{Output: accessLog, Format: accessLogFormat}))
+	app.Use(recover.New(recover.Config{EnableStackTrace: true, StackTraceHandler: stackTrace}))
 	if cfg.SentryDSN != "" {
 		app.Use(sentryfiber.New(sentryfiber.Options{
 			Repanic:         true, // yanıtı recover üretsin
 			WaitForDelivery: false,
 		}))
+		app.Use(observability.TagSentryScope)
 		// Hata yanıta en dışta (logger) çevrilir; Sentry transaction'ı ondan önce
 		// kapanır. Durum kodu burada yazılmazsa hatalı istekler Sentry'de 200 görünür.
 		app.Use(middleware.WriteErrorStatus)
@@ -147,6 +289,18 @@ func newApp(cfg *config.Config, accessLog io.Writer) *fiber.App {
 	}
 
 	return app
+}
+
+// accessLogFormat, Fiber'ın varsayılan erişim logu biçimine istek kimliğini ekler.
+const accessLogFormat = "${time} | ${status} | ${latency} | ${ip} | ${method} | ${path} | ${locals:requestid} | ${error}\n"
+
+// stackTrace, panic'in stack'ini stderr'e yazar (Fiber'ın varsayılanıyla aynı)
+// ve isteği panic'li olarak işaretler: panic Sentry'ye middleware'de zaten
+// gitmiştir, ErrorHandler tekrar göndermez.
+func stackTrace(c *fiber.Ctx, e any) {
+	middleware.MarkPanic(c)
+	_, _ = fmt.Fprintf(os.Stderr, "panic: %v (request_id=%s)\n\n%s\n",
+		e, observability.RequestIDFrom(c), debug.Stack())
 }
 
 // corsConfig, izin verilen origin'leri yapılandırır; ok=false ise CORS
@@ -177,6 +331,37 @@ func corsConfig(cfg *config.Config) (corsCfg cors.Config, ok bool) {
 	// Geliştirme kolaylığı: lokalde her origin'e izin ver.
 	log.Println("cors: geliştirme modu, tüm origin'lere izin veriliyor")
 	return cors.Config{AllowOrigins: "*"}, true
+}
+
+// apiLimiter, tüm API uçlarına uygulanan genel hız sınırıdır (API_RATE_LIMIT).
+func apiLimiter(cfg *config.Config, tokens *auth.TokenService) fiber.Handler {
+	return limiter.New(limiter.Config{
+		Max:          cfg.APIRateLimit,
+		Expiration:   cfg.APIRateLimitWindow,
+		KeyGenerator: rateLimitKey(tokens),
+		LimitReached: func(c *fiber.Ctx) error {
+			return middleware.NewAPIError(fiber.StatusTooManyRequests,
+				"rate_limited", "çok fazla istek gönderdiniz, lütfen biraz bekleyin")
+		},
+	})
+}
+
+// rateLimitKey, geçerli bir access token taşıyan isteği kullanıcısına, diğerlerini
+// istemci IP'sine sayar.
+//
+// Kimliği doğrulanmış uçlarda IP anahtarı, aynı operatör IP'sini paylaşan (CGNAT)
+// kullanıcıların sınırı birlikte doldurması demekti. Token imzası doğrulandığı
+// için uydurma bir token yeni bir kova açamaz; geçersiz ya da süresi dolmuş token
+// IP kovasına düşer.
+func rateLimitKey(tokens *auth.TokenService) func(*fiber.Ctx) string {
+	return func(c *fiber.Ctx) string {
+		if raw, ok := strings.CutPrefix(c.Get(fiber.HeaderAuthorization), "Bearer "); ok {
+			if claims, err := tokens.ParseAccessToken(raw); err == nil && claims.Subject != "" {
+				return "user:" + claims.Subject
+			}
+		}
+		return "ip:" + c.IP()
+	}
 }
 
 // authLimiter, kimlik üreten uçlar (Google/Apple girişi; production dışında

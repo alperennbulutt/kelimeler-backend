@@ -27,14 +27,23 @@ Depo özelse Coolify'de kaynak olarak **GitHub App** (Private Repository) kullan
 - Oluşunca **"Postgres URL (internal)"** değerini kopyala — Application'ın `DATABASE_URL`'i bu olacak.
   Örnek: `postgres://postgres:xxxx@abc123:5432/postgres`
 
+- **Yedekleme:** Kaynağı oluşturduktan hemen sonra, ilk kullanıcı gelmeden **Backups** bölümünden sunucu dışına (S3 uyumlu depolama) günlük zamanlanmış yedeği aç ve bir geri yükleme provası yap. Adımlar, saklama ayarları ve felaketten dönüş: [BACKUP.md](BACKUP.md). Depodaki `scripts/backup.sh` bu kurulum için **değildir** (Coolify DB'si host'tan erişilemez); yalnızca docker-compose düzeninde ve geri yükleme provasında kullanılır.
+
 ---
 
 ## 3) Coolify'de Application oluştur
 
 - **+ New Resource → Application → Private/Public Repository** → GitHub reposunu seç
-- **Build Pack:** `Dockerfile`
+- **Build Pack:** `Dockerfile` (son aşama çalışma imajıdır; hedef/target girme)
+- **Build → "Include Source Commit in Build":** açık. Coolify commit'i `SOURCE_COMMIT` build arg'ı olarak verir, binary'ye sürüm olarak gömülür (açılış logunda `kelimeler-backend sürüm: <commit>`) ve `SENTRY_RELEASE` boşsa Sentry sürümü olur. Kapalıysa sürüm `bilinmiyor` görünür.
 - **Port (Ports Exposes):** `8080`
-- **Health Check Path:** `/api/v1/health`
+- **Health Check:** aşağıdaki nota bak.
+
+> **Sağlık kontrolü ve distroless imaj:** Coolify'nin arayüzden açılan health check'i probe'u container **içinde** `curl`/`wget` ile çalıştırır. Çalışma imajı distroless'tır (kabuk, `curl`, `wget` yok); bu yüzden o probe hiç çalışamaz ve container hep "unhealthy" görünür, deploy geri alınabilir. Bunun yerine imajın kendi `HEALTHCHECK`'i kullanılır: `Dockerfile`'daki `HEALTHCHECK CMD ["/server", "-healthcheck"]` binary'nin kendisiyle `http://127.0.0.1:$PORT/api/v1/health`'e istek atar ve yalnızca 200'de başarılı sayılır.
+>
+> - Coolify → Application → **Health Check** bölümünde arayüz health check'ini **kapalı** tut; Coolify imajda `HEALTHCHECK` tanımlıysa onu kullanır. (Coolify sürümüne göre bu davranışı ilk deploy'da doğrula.)
+> - Doğrulama: sunucuda `docker ps` çıktısında container durumu `(healthy)` olmalı; ya da `docker inspect --format '{{.State.Health.Status}}' <container>` → `healthy`. `unhealthy` ise `docker inspect --format '{{json .State.Health.Log}}' <container>` probe çıktısını gösterir.
+> - `/api/v1/health` artık veritabanını 2 sn'lik zaman aşımıyla sınar: DB'ye ulaşılamazsa `503 {"status":"unavailable","code":"db_unavailable"}` döner. Başarılı yanıt değişmedi: `{"dictionaryWords":9980,"status":"ok"}`.
 
 ---
 
@@ -44,10 +53,14 @@ Depo özelse Coolify'de kaynak olarak **GitHub App** (Private Repository) kullan
 
 | Anahtar | Değer |
 |---|---|
-| `APP_ENV` | `production` |
+| `APP_ENV` | `production` — **tam olarak bu**, küçük harfle. Boş ya da başka bir değerde (`prod`, `Production`) sunucu açılmaz |
 | `PORT` | `8080` |
 | `DATABASE_URL` | Adım 2'deki internal URL (DB adı URL'in sonunda; ör. `.../postgres`) |
-| `JWT_SECRET` | `openssl rand -base64 48` çıktısı (güçlü, gizli) |
+| `DB_MAX_OPEN_CONNS` | `25` — açık bağlantı üst sınırı. Dolunca yeni istekler bekler; PostgreSQL'in `max_connections` değerini (varsayılan 100) aşmasın |
+| `DB_MAX_IDLE_CONNS` | `10` — havuzda boşta tutulan bağlantı sayısı |
+| `DB_CONN_MAX_LIFETIME` | `1h` — bir bağlantının yeniden açılmadan kullanılacağı en uzun süre |
+| `DB_STATEMENT_TIMEOUT` | `10s` — her sorguya PostgreSQL'de uygulanan üst süre (`statement_timeout`). Kaçak ya da kilitte bekleyen sorgu iptal edilir, istek 500 alır, bağlantı havuza döner. `0` kapatır. Migration ve sözlük seed'i bu sınırdan muaftır; `DATABASE_URL`'de `statement_timeout` verilmişse o geçerlidir. Sürecin ya da oturumun saat dilimine (`TimeZone`) dokunulmaz |
+| `JWT_SECRET` | `openssl rand -base64 48` çıktısı (güçlü, gizli). 32 bayttan kısa ya da `.env*.example`'daki yer tutucu girilirse sunucu açılmaz |
 | `ACCESS_TOKEN_TTL` | `15m` |
 | `REFRESH_TOKEN_TTL` | `720h` |
 | `GOOGLE_CLIENT_IDS` | `928054180858-...apps.googleusercontent.com` |
@@ -56,8 +69,13 @@ Depo özelse Coolify'de kaynak olarak **GitHub App** (Private Repository) kullan
 | `APPLE_KEY_ID` | "Sign in with Apple" için üretilen anahtarın Key ID'si — **iOS yayını için zorunlu** |
 | `APPLE_PRIVATE_KEY` | O anahtarın `.p8` içeriği (satır sonları `\n` olarak kaçırılabilir) — **iOS yayını için zorunlu**, gizli |
 | `USAGE_TIMEZONE` | `Europe/Istanbul` — günlük kullanım sayaçları bu saat diliminin gece yarısında sıfırlanır (girilmezse varsayılan da budur) |
-| `API_RATE_LIMIT` | `600` — genel API hız sınırı, IP başına istek/dk. Mobil operatörler çok sayıda kullanıcıyı tek IP arkasına koyduğu (CGNAT) için düşük tutma |
+| `GATE_ENFORCEMENT` | `log` (varsayılan). Reklam kapısı ihlallerinde sunucunun tepkisi: `off` denetlemez, `log` ihlali loglayıp Sentry'ye bilgi olarak gönderir ama isteği kabul eder, `enforce` isteği `403 gate_required` / `review_gate_required` ile reddeder. `enforce`'a ancak istemcinin bu kodları işleyen sürümü yaygınlaştıktan ve `log` kipinde ihlal kalmadığı görüldükten sonra geç. Başka bir değerde sunucu açılmaz |
+| `API_RATE_LIMIT` | `600` — genel API hız sınırı, istek/dk. Geçerli access token'lı istekler kullanıcı başına, diğerleri IP başına sayılır. Kimliksiz uçlarda aynı IP'yi paylaşan (CGNAT) kullanıcılar sınırı paylaştığı için düşük tutma |
+| `TRUSTED_PROXIES` | **Boş bırak** (varsayılan: özel ağlar + loopback). İstemci IP başlığına yalnızca bu adreslerden gelen bağlantıda güvenilir. Daraltmak istersen Coolify ağının CIDR'ını gir (aşağıya bak) |
+| `PROXY_HEADER` | `X-Forwarded-For` (varsayılan). Cloudflare'e geçilirse aşağıdaki nota bak |
 | `AUTH_RATE_LIMIT` | `10` — Google/Apple giriş uçlarının sıkı hız sınırı, IP başına istek/dk. `/auth/refresh` buna değil `API_RATE_LIMIT`'e tabidir |
+| `SENTRY_DSN` | Sentry projesinin DSN'i. Boşsa hata raporlama kapalıdır |
+| `SENTRY_RELEASE` | Boş bırakılabilir: imaj derlenirken gömülen sürüm (commit) kullanılır. Elle verilirse o geçerlidir |
 | `CORS_ALLOWED_ORIGINS` | **Boş bırak** (API'yi çağıran bir web sitesi yoksa). Gerekirse virgülle ayrılmış origin listesi, ör. `https://panel.example.com` |
 
 > `USAGE_TIMEZONE` yalnızca günlük kullanım sayaçlarını etkiler. Sürecin genel saat dilimini değiştiren `TZ` değişkenini **girme**: giriş serisi ve tekrar listesi sunucunun yerel gününe göre hesaplanır, `TZ` bunların gün sınırını da kaydırır.
@@ -65,6 +83,43 @@ Depo özelse Coolify'de kaynak olarak **GitHub App** (Private Repository) kullan
 > **Apple revoke anahtarları:** `APPLE_TEAM_ID`, `APPLE_KEY_ID` ve `APPLE_PRIVATE_KEY` üçü birden girilmezse hesap silinirken Apple'daki uygulama yetkisi iptal **edilmez** (silme yine çalışır, açılış loguna uyarı düşer). Apple bu iptali şart koşar ve hesap silme sayfası bunu vaat eder. İptal için gereken Apple refresh token'ı yalnızca anahtarlar girildikten **sonra** yapılan Apple girişlerinde saklanır; anahtarları ilk yayından önce gir.
 
 > **Hız sınırları:** `API_RATE_LIMIT` ve `AUTH_RATE_LIMIT` için `0` ya da negatif değer sınırı kapatmaz; uyarı loglanır ve varsayılana (600 / 10) dönülür.
+
+### İstemci IP'si, Traefik ve hız sınırı
+
+Hız sınırları istemci IP'sine (kimliği doğrulanmış genel uçlarda kullanıcıya) göre sayılır. IP, `X-Forwarded-For` başlığından **yalnızca** bağlantı `TRUSTED_PROXIES` içindeki bir adresten geliyorsa okunur; başlıkta birden çok adres varsa ilk geçerli IP alınır. Doğrudan internetten gelen bir bağlantının başlığı yok sayılır, bağlantının karşı ucu kullanılır.
+
+Bu kurgu Coolify'nin Traefik'inin varsayılan davranışına dayanır: Traefik, güvenmediği kaynaktan (internetteki istemci) gelen `X-Forwarded-*` başlıklarını siler ve `X-Forwarded-For`'u istemcinin gerçek adresiyle yeniden yazar. Bunun için:
+
+- Coolify → **Servers → Proxy** yapılandırmasında `--entrypoints.https.forwardedHeaders.insecure=true` **olmamalı**; `forwardedHeaders.trustedIPs` de **boş** kalmalı; önde Cloudflare olsa bile (aşağıdaki Cloudflare notuna bak: güvenilen bir ön proxy istemcinin uydurduğu adresi zincirin başında bırakır).
+- Uygulama container'ının 8080 portu host'a **yayınlanmamalı** (Coolify'de "Ports Mappings" boş, yalnızca "Ports Exposes: 8080"). Yayınlanırsa docker ağ geçidinden (özel adres) gelen bağlantı güvenilir sayılır.
+- `TRUSTED_PROXIES`'i daraltmak istersen Traefik'in bağlandığı ağın CIDR'ını kullan: sunucuda `docker network inspect coolify -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}'`.
+
+Doğrulama (deploy sonrası, uydurma başlıkla): 11. istekte `429` gelmeli. Gelmiyorsa Traefik istemci başlığını koruyordur.
+
+```bash
+for i in $(seq 11); do
+  curl -s -o /dev/null -w '%{http_code}\n' -X POST https://<domain>/api/v1/auth/google \
+    -H "X-Forwarded-For: 10.9.8.$i" -H 'Content-Type: application/json' -d '{"idToken":"x"}'
+done
+```
+
+**Cloudflare'e geçilirse:** Traefik Cloudflare'e güvenmediği sürece `X-Forwarded-For` yalnızca Cloudflare kenar IP'sini taşır ve tüm kullanıcılar aynı kovaya düşer. Önerilen yol `PROXY_HEADER=CF-Connecting-IP`'dir: Cloudflare bu başlığı her istekte kendisi yazar (istemcinin gönderdiğini ezer). Bu durumda sunucuya **yalnızca** Cloudflare üzerinden ulaşılabildiğinden emin ol (firewall'da 80/443'ü Cloudflare aralıklarına kısıtla); yoksa doğrudan sunucuya gelen biri başlığı uydurabilir.
+
+> **Uyarı:** Traefik'te `forwardedHeaders.trustedIPs`'e Cloudflare aralıklarını girip `PROXY_HEADER=X-Forwarded-For` ile devam etmek hız sınırını yeniden **atlatılabilir** yapar. Cloudflare istemcinin gönderdiği `X-Forwarded-For`'u silmez, gerçek adresi sonuna ekler (`uydurma, gerçek-istemci`); Traefik de Cloudflare'e güvendiği için başlığı korur. Sunucu zincirdeki **ilk** geçerli adresi aldığından (Fiber'ın davranışı) anahtar istemcinin uydurduğu adres olur. Bu yolu kullanma; `CF-Connecting-IP`'yi kullan.
+
+### Açılış denetimi
+
+Sunucu açılırken yapılandırmayı denetler. Şu durumlarda **açılmaz** (deploy logunda `config: ...` satırı ve sebebi görünür; Coolify eski container'ı çalıştırmaya devam eder):
+
+- `APP_ENV` tanımsız ya da `production`/`development` dışında bir değer.
+- Production'da `JWT_SECRET` 32 bayttan kısa, kod varsayılanı ya da örnek dosyalardaki yer tutuculardan biri.
+- Production'da sözlük tablosu boş ve imajdaki seed yüklenemiyor (logda `sözlük yüklenemedi`).
+
+Şunlar açılışı engellemez ama production'da açılış loguna `config: uyarı:` satırı düşer ve Sentry'ye uyarı olarak gider:
+
+- `APPLE_TEAM_ID`/`APPLE_KEY_ID`/`APPLE_PRIVATE_KEY`'den biri eksik (hesap silmede Apple token iptali yapılmaz) ya da anahtar geçersiz.
+- `GOOGLE_CLIENT_IDS` boş (her Google girişi reddedilir).
+- `TEST_MODE_UNLOCK_ALL=true` (tüm gruplar kilitsiz açılır, reklam kapıları devre dışı).
 
 ### Production'a özgü davranışlar
 
@@ -100,8 +155,8 @@ Mobil istemci parola ile giriş sunmadığı için bu satırlar gerçek bir kull
 
 1. **Deploy logu:** `db: migrate tamamlandı` satırı var (yeni kolonlar açılışta eklenir; migrate başarısızsa süreç hiç ayağa kalkmaz). Hemen üstünde `kullanım günü saat dilimi: Europe/Istanbul` görünmeli.
 2. **`GET /api/v1/users/me/usage`** (geçerli bir access token ile) yanıtında şu alanlar var: `reviewAnswersToday`, `unlockedGroupsToday`, `noFillPassesRemaining`. Biri eksikse canlıda eski derleme çalışıyordur.
-3. **Yanıt başlıkları:** herhangi bir `/api/v1/...` yanıtında `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` geliyor (başlık adlarında büyük/küçük harf fark etmez) ve `X-RateLimit-Limit` değeri `API_RATE_LIMIT` ile aynı.
-4. **Açılış logunda uyarı yok:** `Apple hesap silmede token iptali YAPILMAYACAK` satırı görünüyorsa Apple revoke anahtarları eksiktir; `config: uyarı:` ile başlayan satır geçersiz bir hız sınırı değerini gösterir.
+3. **Yanıt başlıkları:** herhangi bir `/api/v1/...` yanıtında `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` geliyor (başlık adlarında büyük/küçük harf fark etmez) ve `X-RateLimit-Limit` değeri `API_RATE_LIMIT` ile aynı. Uydurma `X-Forwarded-For` ile hız sınırı atlatılamıyor (bkz. "İstemci IP'si, Traefik ve hız sınırı").
+4. **Açılış logunda uyarı yok:** `ortam: APP_ENV=production` satırı görünmeli. `config: uyarı:` ile başlayan satırlar eksik bir ayarı (Apple revoke anahtarları, `GOOGLE_CLIENT_IDS`, `TEST_MODE_UNLOCK_ALL`) ya da geçersiz bir hız sınırı değerini gösterir.
 5. **Parola uçları kapalı:** `POST /api/v1/auth/register` 404 dönüyor. 400 ya da 201 dönüyorsa `APP_ENV` `production` değildir.
 6. **CORS kapalı** (`CORS_ALLOWED_ORIGINS` boşsa): `Origin` başlıklı isteğin yanıtında `Access-Control-Allow-Origin` yok.
 
@@ -127,7 +182,7 @@ Doğrula:
 - İlk açılışın deploy logunda `db: seed tamamlandı, 9980 kelime yüklendi` satırı var.
 - `https://<domain>/api/v1/health` yanıtında `"dictionaryWords":9980` görünüyor.
 
-> Çalışma imajı distroless'tır: içinde kabuk ve `psql` yoktur, Application terminali açılmaz. Veritabanına elle bakmak gerekirse Coolify'de **PostgreSQL kaynağının** terminalini kullan (`psql -U postgres -d <veritabanı-adı>`).
+> Çalışma imajı distroless'tır ve root olmayan kullanıcıyla (`nonroot`, uid 65532) çalışır: içinde kabuk ve `psql` yoktur, Application terminali açılmaz. Firebase import aracı (`/import`) çalışma imajında yoktur; gerekirse lokalde `make import-dictionary` ya da `docker compose run --rm import` (ayrı `import` build hedefi) kullanılır. Veritabanına elle bakmak gerekirse Coolify'de **PostgreSQL kaynağının** terminalini kullan (`psql -U postgres -d <veritabanı-adı>`).
 
 ### Sözlüğü yeniden yüklemek
 
@@ -226,7 +281,11 @@ tarayıcıda eski metni görüyorsan `curl` ile ya da gizli pencerede bak.
 
 ## Notlar
 
+- **Düzgün kapanma:** Container SIGTERM aldığında sunucu yeni bağlantı kabul etmeyi bırakır, süren isteklerin bitmesini en fazla `SHUTDOWN_TIMEOUT` (varsayılan `8s`) bekler, ardından veritabanı havuzunu kapatıp Sentry kuyruğunu boşaltır (logda `sunucu düzgün kapandı`). Docker durdurma süresi varsayılan 10 sn'dir; bu süre dolarsa süreç SIGKILL ile öldürülür. `SHUTDOWN_TIMEOUT`'u artıracaksan container'ın durdurma süresini de (Coolify'de destekleniyorsa; docker-compose'da `stop_grace_period`) ondan en az birkaç saniye uzun tut.
+- **Yedek:** Production yedeği Coolify'nin zamanlanmış yedeğidir (S3'e); ayda bir `scripts/restore-verify.sh` ile prova yapılır. Bkz. [BACKUP.md](BACKUP.md).
+- **CI:** `.github/workflows/ci.yml` her `main` push'unda ve pull request'te gofmt, `go vet`, `go build`, testleri (PostgreSQL 16 servisiyle, entegrasyon testleri dahil, `-race`) ve `docker build`'i çalıştırır. CI'da `TEST_DATABASE_URL` boşsa entegrasyon testleri atlanmaz, başarısız olur. GitHub → Settings → Branches'ta `main` için bu iki işi (`test`, `docker`) zorunlu kontrol yap; Redeploy'u yalnızca yeşil commit için bas. Lokal karşılığı: `make db-up && make ci`.
 - **Güncelleme:** `git push` sonrası Coolify'de **Redeploy**'a bas. Otomatik deploy (webhook) kurulu değildir; kurulana kadar push tek başına canlıyı güncellemez. Her deploy'dan sonra "Yayın sonrası doğrulama" listesini uygula.
 - **Google/Apple Sign-In:** OAuth client'lar Google Cloud / Apple Developer tarafında. Backend yalnızca idToken **doğrular**; production domaini eklemek gerekmez ama Google Cloud Console'da OAuth ayarlarının geçerli olduğundan emin ol.
 - **Güvenlik:** `JWT_SECRET`'i kimseyle paylaşma; sunucu root şifreni deploy sonrası değiştir.
-- **Hata raporlama:** `SENTRY_DSN` girilirse sunucudaki panic'ler Sentry'ye gönderilir; girilmezse raporlama kapalıdır. Her iki durumda da panic istemciye 500 olarak döner, stack konteyner loguna (stderr) ve istek satırı erişim loguna yazılır. Panic olmayan hatalar (ör. veritabanına ulaşılamaması) Sentry'ye olay olarak gitmez; yalnızca örneklenen performans kayıtlarında gerçek durum koduyla görünür ve erişim loguna yazılır.
+- **Hata raporlama:** `SENTRY_DSN` girilirse panic'ler ve 5xx dönen tüm hatalar (ör. veritabanına ulaşılamaması, sorgu zaman aşımı) Sentry'ye gönderilir; girilmezse raporlama kapalıdır. Her iki durumda da istemci genel bir 500 mesajı alır, asıl hata konteyner loguna `hata: <status> <method> <path> request_id=<id>: <hata>` satırıyla, panic stack'i stderr'e yazılır. 4xx yanıtlar Sentry'ye gitmez.
+- **İstek kimliği:** Her yanıtta `X-Request-ID` başlığı döner (istekte geçerli bir değer gelirse korunur, yoksa UUID üretilir). Aynı kimlik erişim logu satırında, `hata:` satırında ve Sentry olayının `request_id` etiketinde bulunur; kullanıcı bir hata bildirdiğinde bu kimlikle üçü eşleştirilebilir.

@@ -1,7 +1,10 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"log"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -10,11 +13,64 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// Geçerli APP_ENV değerleri. Başka bir değer (boş, "prod", "Production" ...)
+// kabul edilmez: production'a özgü korumalar (parola uçlarının kapanması,
+// CORS, JWT_SECRET denetimi) yalnızca tam "production" ile devreye girer ve
+// yazım hatası sunucuyu sessizce geliştirme kipinde açardı.
+const (
+	EnvProduction  = "production"
+	EnvDevelopment = "development"
+)
+
+// GateEnforcement, reklam kapısı ihlallerine (açılmamış gruba öğrenme, geçiş
+// kaydı olmadan kontrol noktası sonrası tekrar cevabı) sunucunun tepkisidir.
+type GateEnforcement string
+
+const (
+	// GateOff: ihlal denetlenmez.
+	GateOff GateEnforcement = "off"
+	// GateLog: ihlal loglanır ve Sentry'ye bilgi olarak gider, istek kabul edilir.
+	GateLog GateEnforcement = "log"
+	// GateEnforce: ihlal eden istek 403 ile reddedilir.
+	GateEnforce GateEnforcement = "enforce"
+)
+
+// DefaultGateEnforcement, GATE_ENFORCEMENT verilmezse kullanılır: yayındaki
+// istemciyi bozmadan ihlalleri görünür kılar.
+const DefaultGateEnforcement = GateLog
+
+// DefaultTrustedProxies, TRUSTED_PROXIES verilmezse güvenilen proxy adresleridir:
+// özel ağlar ve loopback. Coolify'nin Traefik'i container'a docker ağından
+// (özel bir adresten) bağlanır; internetten doğrudan gelen bir bağlantı bu
+// aralıklarda olamaz, dolayısıyla başlığı uyduramaz.
+var DefaultTrustedProxies = []string{
+	"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "::1/128", "fc00::/7",
+}
+
+// MinJWTSecretBytes, production'da kabul edilen en kısa JWT_SECRET uzunluğudur
+// (HS256 anahtarı en az özet boyu kadar olmalı).
+const MinJWTSecretBytes = 32
+
+// placeholderJWTSecrets, depoda açıkça duran JWT_SECRET değerleridir (kod
+// varsayılanı ve .env*.example yer tutucuları). Herkes bildiği için bunlarla
+// imzalanan token'lara güvenilemez; production'da reddedilirler.
+var placeholderJWTSecrets = []string{
+	"dev-secret-change-me",
+	"change-me-to-a-long-random-string",
+	"BURAYA_UZUN_RASTGELE_DEGER_KOYUN",
+}
+
 // Config, uygulamanın tüm ortam yapılandırmasını tutar.
 type Config struct {
 	Port        string
 	AppEnv      string
 	DatabaseURL string
+
+	// Veritabanı bağlantı havuzu ve sorgu zaman aşımı (bkz. db.Options).
+	DBMaxOpenConns     int
+	DBMaxIdleConns     int
+	DBConnMaxLifetime  time.Duration
+	DBStatementTimeout time.Duration
 
 	JWTSecret       string
 	AccessTokenTTL  time.Duration
@@ -44,6 +100,9 @@ type Config struct {
 	// (sayaçlar bu dilimin gece yarısında sıfırlanır).
 	UsageTimezone string
 
+	// Reklam kapısı ihlallerinin ele alınışı (GATE_ENFORCEMENT: off | log | enforce).
+	GateEnforcement GateEnforcement
+
 	// --- Gözlemlenebilirlik ---
 
 	// Boşsa hata raporlama devre dışı kalır.
@@ -57,15 +116,23 @@ type Config struct {
 	// gelen isteğin yanıtını okutmaz (mobil istemci CORS'tan etkilenmez).
 	CORSAllowedOrigins []string
 
+	// İstemci IP'sinin okunduğu başlık (varsayılan X-Forwarded-For). Başlığa
+	// yalnızca isteği TrustedProxies'teki bir adres ilettiyse güvenilir; aksi
+	// halde bağlantının karşı ucu istemci sayılır, böylece doğrudan bağlanan
+	// biri başlığı uydurarak hız sınırını atlatamaz.
+	ProxyHeader    string
+	TrustedProxies []string
+
 	// Kimlik üreten auth uçlarına dakikada izin verilen istek sayısı (IP başına).
 	AuthRateLimit       int
 	AuthRateLimitWindow time.Duration
 
-	// Genel uçlara dakikada izin verilen istek sayısı (IP başına).
+	// Genel uçlara dakikada izin verilen istek sayısı. Geçerli access token
+	// taşıyan istekler kullanıcı başına, diğerleri IP başına sayılır.
 	//
-	// Sınır kullanıcı değil IP başınadır: mobil operatörler çok sayıda kullanıcıyı
-	// tek IP arkasına koyar (CGNAT) ve bir tekrar seansı dakikada onlarca istek
-	// üretir. Dar bir sınır kötüye kullanımı değil gerçek kullanıcıları düşürür.
+	// Mobil operatörler çok sayıda kullanıcıyı tek IP arkasına koyar (CGNAT) ve
+	// bir tekrar seansı dakikada onlarca istek üretir; IP başına dar bir sınır
+	// kötüye kullanımı değil gerçek kullanıcıları düşürürdü.
 	APIRateLimit       int
 	APIRateLimitWindow time.Duration
 
@@ -74,19 +141,39 @@ type Config struct {
 	WriteTimeout time.Duration
 	IdleTimeout  time.Duration
 	BodyLimit    int
+
+	// SIGTERM/SIGINT gelince süren isteklerin bitmesi için beklenecek en uzun
+	// süre. Docker'ın durdurma süresinden (varsayılan 10 sn) kısa olmalı; yoksa
+	// süreç bu süre dolmadan SIGKILL ile öldürülür ve Sentry kuyruğu boşaltılamaz.
+	ShutdownTimeout time.Duration
 }
 
-// Load, .env dosyasını (varsa) yükler ve Config'i döndürür.
+// Load, .env dosyasını (varsa) yükler, Config'i okur ve doğrular. Yapılandırma
+// geçersizse süreci açık bir mesajla durdurur: yanlış yapılandırılmış bir
+// sunucunun açılmaması, sessizce güvensiz açılmasından iyidir.
 func Load() *Config {
 	// .env yoksa sessizce devam et (production'da gerçek env kullanılır).
 	if err := godotenv.Load(); err != nil {
 		log.Printf("config: .env bulunamadı, ortam değişkenleri kullanılacak (%v)", err)
 	}
 
+	cfg, err := FromEnv()
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+	return cfg
+}
+
+// FromEnv, Config'i ortam değişkenlerinden okur ve Validate ile doğrular.
+func FromEnv() (*Config, error) {
 	cfg := &Config{
 		Port:                   getEnv("PORT", "8080"),
-		AppEnv:                 getEnv("APP_ENV", "development"),
+		AppEnv:                 os.Getenv("APP_ENV"),
 		DatabaseURL:            getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5434/kelimeler?sslmode=disable"),
+		DBMaxOpenConns:         getPositiveInt("DB_MAX_OPEN_CONNS", 25),
+		DBMaxIdleConns:         getPositiveInt("DB_MAX_IDLE_CONNS", 10),
+		DBConnMaxLifetime:      getDuration("DB_CONN_MAX_LIFETIME", time.Hour),
+		DBStatementTimeout:     getDuration("DB_STATEMENT_TIMEOUT", 10*time.Second),
 		JWTSecret:              getEnv("JWT_SECRET", "dev-secret-change-me"),
 		AccessTokenTTL:         getDuration("ACCESS_TOKEN_TTL", 15*time.Minute),
 		RefreshTokenTTL:        getDuration("REFRESH_TOKEN_TTL", 720*time.Hour),
@@ -100,11 +187,15 @@ func Load() *Config {
 		FirebaseServiceAccount: getEnv("FIREBASE_SERVICE_ACCOUNT", ""),
 		TestModeUnlockAll:      getBool("TEST_MODE_UNLOCK_ALL", false),
 		UsageTimezone:          getEnv("USAGE_TIMEZONE", "Europe/Istanbul"),
+		GateEnforcement:        GateEnforcement(getEnv("GATE_ENFORCEMENT", string(DefaultGateEnforcement))),
 
 		SentryDSN:     getEnv("SENTRY_DSN", ""),
 		SentryRelease: getEnv("SENTRY_RELEASE", ""),
 
 		CORSAllowedOrigins: getList("CORS_ALLOWED_ORIGINS"),
+
+		ProxyHeader:    getEnv("PROXY_HEADER", "X-Forwarded-For"),
+		TrustedProxies: getListOr("TRUSTED_PROXIES", DefaultTrustedProxies),
 
 		// Parola deneme saldırılarını yavaşlatacak kadar sıkı, gerçek
 		// kullanıcıyı engellemeyecek kadar gevşek.
@@ -117,13 +208,78 @@ func Load() *Config {
 		WriteTimeout: getDuration("WRITE_TIMEOUT", 30*time.Second),
 		IdleTimeout:  getDuration("IDLE_TIMEOUT", 60*time.Second),
 		BodyLimit:    getInt("BODY_LIMIT_BYTES", 1<<20), // 1 MiB
+
+		ShutdownTimeout: getDuration("SHUTDOWN_TIMEOUT", 8*time.Second),
 	}
 
-	if cfg.JWTSecret == "dev-secret-change-me" && cfg.AppEnv == "production" {
-		log.Fatal("config: production'da JWT_SECRET ayarlanmalı")
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// IsProduction, production ortamında çalışılıp çalışılmadığını söyler.
+func (c *Config) IsProduction() bool { return c.AppEnv == EnvProduction }
+
+// Validate, sunucunun açılmasını engellemesi gereken yapılandırma hatalarını
+// döndürür. Açılışı engellemeyen ama bilinmesi gereken eksikler Warnings'tedir.
+func (c *Config) Validate() error {
+	switch c.AppEnv {
+	case EnvProduction, EnvDevelopment:
+	case "":
+		return errors.New(`APP_ENV tanımlı değil: "production" ya da "development" olmalı`)
+	default:
+		return fmt.Errorf(`APP_ENV=%q geçersiz: tam olarak "production" ya da "development" olmalı`, c.AppEnv)
 	}
 
-	return cfg
+	switch c.GateEnforcement {
+	case GateOff, GateLog, GateEnforce:
+	default:
+		return fmt.Errorf(`GATE_ENFORCEMENT=%q geçersiz: "off", "log" ya da "enforce" olmalı`, c.GateEnforcement)
+	}
+
+	for _, p := range c.TrustedProxies {
+		if _, _, err := net.ParseCIDR(p); err == nil {
+			continue
+		}
+		if net.ParseIP(p) == nil {
+			return fmt.Errorf("TRUSTED_PROXIES: %q geçerli bir IP ya da CIDR değil", p)
+		}
+	}
+
+	if c.IsProduction() {
+		for _, p := range placeholderJWTSecrets {
+			if c.JWTSecret == p {
+				return errors.New("production'da JWT_SECRET örnek/varsayılan değerde bırakılamaz; " +
+					"`openssl rand -base64 48` ile üretilmiş bir değer girin")
+			}
+		}
+		if len(c.JWTSecret) < MinJWTSecretBytes {
+			return fmt.Errorf("production'da JWT_SECRET en az %d bayt olmalı (%d bayt verildi); "+
+				"`openssl rand -base64 48` ile üretilmiş bir değer girin", MinJWTSecretBytes, len(c.JWTSecret))
+		}
+	}
+	return nil
+}
+
+// Warnings, sunucunun açılmasını engellemeyen ama production'da bir özelliği
+// bozan eksikleri döndürür. Açılışta loglanır ve Sentry'ye bildirilir.
+func (c *Config) Warnings() []string {
+	if !c.IsProduction() {
+		return nil
+	}
+	var w []string
+	if c.AppleTeamID == "" || c.AppleKeyID == "" || c.ApplePrivateKey == "" {
+		w = append(w, "APPLE_TEAM_ID/APPLE_KEY_ID/APPLE_PRIVATE_KEY eksik: "+
+			"Apple hesap silmede token iptali YAPILMAYACAK (Apple bunu şart koşar)")
+	}
+	if len(c.GoogleClientIDs) == 0 {
+		w = append(w, "GOOGLE_CLIENT_IDS boş: her Google girişi invalid_google_token ile reddedilecek")
+	}
+	if c.TestModeUnlockAll {
+		w = append(w, "TEST_MODE_UNLOCK_ALL=true: tüm gruplar kilitsiz açılıyor (reklam kapıları devre dışı)")
+	}
+	return w
 }
 
 func getEnv(key, def string) string {
@@ -146,6 +302,15 @@ func getList(key string) []string {
 		}
 	}
 	return out
+}
+
+// getListOr, getList gibi okur; değişken tanımsız ya da boşsa def'in bir
+// kopyasını döner.
+func getListOr(key string, def []string) []string {
+	if l := getList(key); len(l) > 0 {
+		return l
+	}
+	return append([]string(nil), def...)
 }
 
 func getDuration(key string, def time.Duration) time.Duration {

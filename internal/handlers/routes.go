@@ -1,23 +1,52 @@
 package handlers
 
 import (
+	"context"
+	"log"
+	"time"
+
 	"kelimeler-backend/internal/auth"
 	"kelimeler-backend/internal/middleware"
 	"kelimeler-backend/internal/models"
 
 	"github.com/gofiber/fiber/v2"
+	"gorm.io/gorm"
 )
+
+// healthTimeout, sağlık kontrolünün veritabanını bekleyeceği en uzun süredir;
+// probe'un kendi zaman aşımından kısa olmalı ki asılı DB "yanıt yok" değil 503
+// olarak görünsün.
+const healthTimeout = 2 * time.Second
+
+// health, veritabanına gerçekten ulaşılabildiğini sınar. Ulaşılamıyorsa 503
+// döner: Coolify yeni container'ı sağlıklı saymaz ve trafiği ona vermez.
+// Başarılı yanıtın biçimi değişmedi: {"status":"ok","dictionaryWords":N}.
+func health(gdb *gorm.DB) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		ctx, cancel := context.WithTimeout(c.UserContext(), healthTimeout)
+		defer cancel()
+
+		var dict int64
+		if err := gdb.WithContext(ctx).Model(&models.DictionaryWord{}).Count(&dict).Error; err != nil {
+			// Probe birkaç saniyede bir gelir; Sentry'yi doldurmamak için hata
+			// işleyiciye değil doğrudan yanıta çevrilir.
+			log.Printf("health: veritabanına ulaşılamıyor: %v", err)
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"status": "unavailable",
+				"code":   "db_unavailable",
+				"error":  "veritabanına ulaşılamıyor",
+			})
+		}
+		return c.JSON(fiber.Map{"status": "ok", "dictionaryWords": dict})
+	}
+}
 
 // RegisterRoutes, tüm API route'larını mount eder.
 //
 // authLimit, parola/sosyal giriş uçlarına uygulanan sıkı hız sınırıdır;
 // deneme saldırılarını yavaşlatmak için genel sınırdan ayrıdır.
 func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService, authLimit fiber.Handler) {
-	api.Get("/health", func(c *fiber.Ctx) error {
-		var dict int64
-		h.DB.Model(&models.DictionaryWord{}).Count(&dict)
-		return c.JSON(fiber.Map{"status": "ok", "dictionaryWords": dict})
-	})
+	api.Get("/health", health(h.DB))
 
 	guard := middleware.RequireAuth(ts)
 
