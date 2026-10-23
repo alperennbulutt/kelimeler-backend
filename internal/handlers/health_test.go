@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -70,14 +71,26 @@ func TestHealth_AsiliVeritabanindaZamanAsimiyla503(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dinlenemedi: %v", err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	// Kabul edilen bağlantılar test bitene kadar açık (yanıtsız) tutulur.
+	var mu sync.Mutex
+	var conns []net.Conn
+	t.Cleanup(func() {
+		ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			c.Close()
+		}
+	})
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			t.Cleanup(func() { conn.Close() })
+			mu.Lock()
+			conns = append(conns, conn)
+			mu.Unlock()
 		}
 	}()
 

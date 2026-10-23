@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"kelimeler-backend/internal/db/dbtest"
 	"kelimeler-backend/internal/models"
 
 	"gorm.io/gorm"
@@ -21,11 +22,7 @@ import (
 
 func testDSN(t *testing.T) string {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL tanımlı değil, entegrasyon testi atlanıyor")
-	}
-	return dsn
+	return dbtest.DSN(t)
 }
 
 // withParam, URL biçimindeki DSN'e bir bağlantı parametresi ekler.

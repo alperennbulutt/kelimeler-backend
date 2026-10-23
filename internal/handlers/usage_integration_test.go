@@ -16,6 +16,7 @@ import (
 	"kelimeler-backend/internal/auth"
 	"kelimeler-backend/internal/config"
 	"kelimeler-backend/internal/db"
+	"kelimeler-backend/internal/db/dbtest"
 	"kelimeler-backend/internal/middleware"
 	"kelimeler-backend/internal/models"
 	"kelimeler-backend/internal/services"
@@ -42,14 +43,12 @@ import (
 // Testler şemayı migrate eder ve kullanıcı satırları yazıp siler; canlı
 // veritabanını değil, test için ayrılmış bir veritabanını göster.
 //
-// TEST_DATABASE_URL tanımlı değilse testler atlanır (CI'da sessizce geçmesi için).
+// TEST_DATABASE_URL tanımlı değilse testler lokalde atlanır, CI'da (CI=true)
+// başarısız olur (bkz. dbtest.DSN).
 func testDB(t *testing.T) *gorm.DB {
 	t.Helper()
 
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL tanımlı değil, entegrasyon testi atlanıyor")
-	}
+	dsn := dbtest.DSN(t)
 
 	gdb, err := db.Connect(dsn)
 	if err != nil {
