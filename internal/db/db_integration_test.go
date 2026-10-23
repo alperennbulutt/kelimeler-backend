@@ -388,3 +388,43 @@ func TestMigrate_EszamanliBosSemadaHepsiBasarili(t *testing.T) {
 		}
 	}
 }
+
+func TestMigrate_OnceElleKurulanKolonVeIndexKorunur(t *testing.T) {
+	// DEPLOYMENT.md, büyük refresh_tokens tablosu için kolonları ve index'i
+	// deploy'dan önce elle (CONCURRENTLY) kurmayı önerir. AutoMigrate bunları
+	// görüp dokunmamalı: index yeniden kurulsaydı (ya da kolon tipi
+	// değiştirilseydi) yazmayı bekleten kilit yine alınırdı.
+	gdb := isolatedDB(t)
+	if err := gdb.Exec(`DROP INDEX idx_refresh_tokens_family_id`).Error; err != nil {
+		t.Fatalf("index silinemedi: %v", err)
+	}
+	if err := gdb.Exec(`ALTER TABLE refresh_tokens DROP COLUMN family_id, DROP COLUMN replaced_by_id`).Error; err != nil {
+		t.Fatalf("kolonlar silinemedi: %v", err)
+	}
+
+	// DEPLOYMENT.md'deki komutlar, aynen.
+	for _, sql := range []string{
+		`ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS family_id varchar(32), ADD COLUMN IF NOT EXISTS replaced_by_id bigint;`,
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_refresh_tokens_family_id ON refresh_tokens (family_id);`,
+	} {
+		if err := gdb.Exec(sql).Error; err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	indexOID := func() int64 {
+		t.Helper()
+		var oid int64
+		if err := gdb.Raw(`SELECT 'idx_refresh_tokens_family_id'::regclass::oid::bigint`).Scan(&oid).Error; err != nil {
+			t.Fatalf("index okunamadı: %v", err)
+		}
+		return oid
+	}
+	before := indexOID()
+
+	if err := Migrate(gdb); err != nil {
+		t.Fatalf("migrate başarısız: %v", err)
+	}
+	if after := indexOID(); after != before {
+		t.Errorf("index yeniden kuruldu (oid %d → %d)", before, after)
+	}
+}
