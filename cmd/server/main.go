@@ -32,6 +32,10 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/recover"
 )
 
+// version, derleme sırasında -ldflags "-X main.version=<commit>" ile gömülür
+// (bkz. Dockerfile). Boşsa sürüm bilinmiyordur.
+var version string
+
 // seedPath, imaja gömülü sözlük dökümünün yoludur (bkz. Dockerfile).
 const seedPath = "/seed/dictionary_words.sql"
 
@@ -52,6 +56,13 @@ func main() {
 		log.Printf("kelimeler-backend durdu: %v", err)
 		os.Exit(1)
 	}
+}
+
+func orDefault(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
 }
 
 // healthcheck, çalışan sunucunun sağlık ucuna istek atar; 200 dönerse 0, aksi
@@ -75,6 +86,10 @@ func healthcheck(url string) int {
 // run, sunucuyu kurar ve SIGTERM/SIGINT gelene kadar çalıştırır.
 func run() (err error) {
 	cfg := config.Load()
+	if cfg.SentryRelease == "" {
+		cfg.SentryRelease = version
+	}
+	log.Printf("kelimeler-backend sürüm: %s", orDefault(version, "bilinmiyor"))
 
 	// Hata raporlamayı en başta kur ki başlangıç hataları da yakalansın.
 	// Defer'lar ters sırayla çalışır: önce hata bildirilir, sonra kuyruk boşaltılır.

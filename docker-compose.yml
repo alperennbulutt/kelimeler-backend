@@ -29,6 +29,21 @@ services:
       DATABASE_URL: postgres://postgres:postgres@db:5432/kelimeler?sslmode=disable
     ports:
       - "8080:8080"
+
+  # Firebase'den sözlük aktarımı (isteğe bağlı): docker compose run --rm import
+  # Çalışma imajında import aracı yoktur; bu servis ayrı build hedefini kullanır.
+  import:
+    profiles: ["tools"]
+    build:
+      context: .
+      target: import
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@db:5432/kelimeler?sslmode=disable
+      FIREBASE_SERVICE_ACCOUNT: /secrets/service-account.json
     volumes:
       # import-dictionary aracının service-account JSON'ına erişimi için.
       - ./secrets:/secrets:ro

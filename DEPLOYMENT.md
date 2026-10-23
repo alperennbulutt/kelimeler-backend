@@ -32,7 +32,8 @@ Depo özelse Coolify'de kaynak olarak **GitHub App** (Private Repository) kullan
 ## 3) Coolify'de Application oluştur
 
 - **+ New Resource → Application → Private/Public Repository** → GitHub reposunu seç
-- **Build Pack:** `Dockerfile`
+- **Build Pack:** `Dockerfile` (son aşama çalışma imajıdır; hedef/target girme)
+- **Build → "Include Source Commit in Build":** açık. Coolify commit'i `SOURCE_COMMIT` build arg'ı olarak verir, binary'ye sürüm olarak gömülür (açılış logunda `kelimeler-backend sürüm: <commit>`) ve `SENTRY_RELEASE` boşsa Sentry sürümü olur. Kapalıysa sürüm `bilinmiyor` görünür.
 - **Port (Ports Exposes):** `8080`
 - **Health Check:** aşağıdaki nota bak.
 
@@ -177,7 +178,7 @@ Doğrula:
 - İlk açılışın deploy logunda `db: seed tamamlandı, 9980 kelime yüklendi` satırı var.
 - `https://<domain>/api/v1/health` yanıtında `"dictionaryWords":9980` görünüyor.
 
-> Çalışma imajı distroless'tır: içinde kabuk ve `psql` yoktur, Application terminali açılmaz. Veritabanına elle bakmak gerekirse Coolify'de **PostgreSQL kaynağının** terminalini kullan (`psql -U postgres -d <veritabanı-adı>`).
+> Çalışma imajı distroless'tır ve root olmayan kullanıcıyla (`nonroot`, uid 65532) çalışır: içinde kabuk ve `psql` yoktur, Application terminali açılmaz. Firebase import aracı (`/import`) çalışma imajında yoktur; gerekirse lokalde `make import-dictionary` ya da `docker compose run --rm import` (ayrı `import` build hedefi) kullanılır. Veritabanına elle bakmak gerekirse Coolify'de **PostgreSQL kaynağının** terminalini kullan (`psql -U postgres -d <veritabanı-adı>`).
 
 ### Sözlüğü yeniden yüklemek
 
