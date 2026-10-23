@@ -184,3 +184,31 @@ func TestOnRightSwipe_YanlistanSonraSayaciSifirlar(t *testing.T) {
 		t.Errorf("kutu=%d wrong=%d, beklenen kutu=3 wrong=0 (4→3→2→3)", wp.Box, wp.WrongCount)
 	}
 }
+
+func TestAcceptsSwipe(t *testing.T) {
+	end := time.Date(2026, 3, 11, 0, 0, 0, 0, UsageLocation())
+	at := func(d time.Duration) *time.Time { v := end.Add(d); return &v }
+
+	cases := []struct {
+		name string
+		box  int
+		next *time.Time
+		want bool
+	}{
+		{"kutu 1 her zaman", 1, at(72 * time.Hour), true},
+		{"kutu 2 tarihsiz", 2, nil, true},
+		{"kutu 2 gecmis", 2, at(-72 * time.Hour), true},
+		{"kutu 3 bugun 23:59", 3, at(-time.Minute), true},
+		{"kutu 4 yarin 00:00", 4, at(0), false},
+		{"kutu 5 bir ay sonra", 5, at(30 * 24 * time.Hour), false},
+		{"kutu 6 ogrenilmis", 6, nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			wp := &models.WordProgress{Box: c.box, NextReviewDate: c.next}
+			if got := AcceptsSwipe(wp, end); got != c.want {
+				t.Errorf("AcceptsSwipe = %v, beklenen %v", got, c.want)
+			}
+		})
+	}
+}

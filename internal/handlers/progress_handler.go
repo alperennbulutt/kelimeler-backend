@@ -101,28 +101,24 @@ func (h *Handlers) LearnWord(c *fiber.Ctx) error {
 // Swipe: POST /progress/swipe {wordId, direction} — box matematiği sunucuda.
 // Tekrar cevapları (swipe öncesi kutu 2..5) günlük review_answers_today
 // sayacına da yazılır; yanıt gövdesi yalnızca kelime ilerlemesidir.
+//
+// Kelime satırı transaction boyunca kilitlidir (SELECT ... FOR UPDATE): aynı
+// kelimeye eşzamanlı gelen cevaplar sıraya girer ve her biri öncekinin
+// yazdığı kutuyu görür. Vadesi gelmemiş kelimeye (bkz. services.AcceptsSwipe)
+// gelen swipe hiçbir şeyi değiştirmez, sayılmaz ve mevcut durumu döner; böylece
+// yinelenen ya da eşzamanlı cevap kelimeyi iki kez ilerletmez.
 func (h *Handlers) Swipe(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	var req dto.SwipeRequest
 	if err := c.BodyParser(&req); err != nil || req.WordID == "" {
 		return apiErr(fiber.StatusBadRequest, "invalid_request", "wordId gerekli")
 	}
-
-	var wp models.WordProgress
-	if err := h.DB.Where("user_id = ? AND word_id = ?", userID, req.WordID).First(&wp).Error; err != nil {
-		return apiErr(fiber.StatusNotFound, "not_found", "kelime ilerlemesi bulunamadı")
-	}
-
-	// Cevabın tekrar sayılıp sayılmayacağı swipe ÖNCESİ kutuya bağlıdır; aşağıdaki
-	// mutasyon kutuyu değiştirir (öğrenme ekranının 1 → 2 swipe'ı sonradan
-	// bakılırsa tekrar cevabı gibi görünür).
-	preBox := wp.Box
-
+	var apply func(*models.WordProgress)
 	switch req.Direction {
 	case "right":
-		services.OnRightSwipe(&wp)
+		apply = services.OnRightSwipe
 	case "left":
-		services.OnLeftSwipe(&wp)
+		apply = services.OnLeftSwipe
 	default:
 		return apiErr(fiber.StatusBadRequest, "invalid_request", "direction 'right' veya 'left' olmalı")
 	}
@@ -131,7 +127,26 @@ func (h *Handlers) Swipe(c *fiber.Ctx) error {
 	// sayılmazsa kapı gevşer, cevap sayılıp kelime ilerlemezse aynı kelime
 	// yeniden gelir ve iki kez sayılır.
 	now := time.Now()
+	_, endOfToday := reviewDayBounds(now)
+	var wp models.WordProgress
 	err := h.DB.Transaction(func(tx *gorm.DB) error {
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("user_id = ? AND word_id = ?", userID, req.WordID).First(&wp).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return apiErr(fiber.StatusNotFound, "not_found", "kelime ilerlemesi bulunamadı")
+		}
+		if err != nil {
+			return err
+		}
+		if !services.AcceptsSwipe(&wp, endOfToday) {
+			return nil
+		}
+
+		// Cevabın tekrar sayılıp sayılmayacağı swipe ÖNCESİ kutuya bağlıdır;
+		// mutasyon kutuyu değiştirir (öğrenme ekranının 1 → 2 swipe'ı sonradan
+		// bakılırsa tekrar cevabı gibi görünür).
+		preBox := wp.Box
+		apply(&wp)
 		if err := tx.Save(&wp).Error; err != nil {
 			return err
 		}
@@ -141,23 +156,31 @@ func (h *Handlers) Swipe(c *fiber.Ctx) error {
 		if err := resetUsageIfStale(tx, userID, now); err != nil {
 			return err
 		}
-		return tx.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
+		if err := tx.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
 			"review_answers_today": gorm.Expr("review_answers_today + 1"),
 			"last_reset_date":      usageTouchedAt(now),
-		}).Error
+		}).Error; err != nil {
+			return err
+		}
+		if (preBox == 6) == (wp.Box == 6) {
+			return nil
+		}
+		// Kullanıcı satırı yukarıdaki UPDATE'ten beri bu transaction'da kilitli:
+		// aynı kullanıcının eşzamanlı başka bir swipe'ı burada sayımı yapmadan
+		// önce bekler ve bu transaction'ın commit'ini görür.
+		return syncTotalLearned(tx, userID)
 	})
 	if err != nil {
 		return err
 	}
-	h.syncTotalLearned(userID)
 	return c.JSON(&wp)
 }
 
 // syncTotalLearned, users.total_learned cache'ini count(box==6) ile eşitler.
-func (h *Handlers) syncTotalLearned(userID string) {
-	var cnt int64
-	h.DB.Model(&models.WordProgress{}).Where("user_id = ? AND box = 6", userID).Count(&cnt)
-	h.DB.Model(&models.User{}).Where("id = ?", userID).Update("total_learned", cnt)
+func syncTotalLearned(tx *gorm.DB, userID string) error {
+	return tx.Model(&models.User{}).Where("id = ?", userID).Update("total_learned",
+		tx.Model(&models.WordProgress{}).Select("COUNT(*)").Where("user_id = ? AND box = 6", userID),
+	).Error
 }
 
 // ReviewWordsForBox: GET /progress/review/box/:box?date=YYYY-MM-DD

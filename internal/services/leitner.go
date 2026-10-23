@@ -27,6 +27,27 @@ func nextReview(box int, from time.Time) *time.Time {
 	return &t
 }
 
+// AcceptsSwipe, swipe'ın kelimeye uygulanıp uygulanmayacağını söyler;
+// endOfDay bugünün bitişidir (ertesi kullanım günü 00:00, hariç).
+//
+//   - Kutu 1: öğrenme ekranındaki kelime, her zaman.
+//   - Kutu 2..5: yalnızca vadesi geldiyse (sonraki tekrar tarihi yok ya da
+//     endOfDay'den önce). Tekrar listesinin "bugün" koşuluyla aynıdır.
+//   - Kutu 6: öğrenilmiş kelime bir daha sorulmaz, hiçbir zaman.
+//
+// Kabul edilmeyen swipe no-op'tur: yanıtı kaybolup yeniden gönderilen ya da
+// iki cihazdan aynı anda gelen cevap kelimeyi ikinci kez ilerletmez.
+func AcceptsSwipe(wp *models.WordProgress, endOfDay time.Time) bool {
+	switch {
+	case wp.Box <= 1:
+		return true
+	case wp.Box <= 5:
+		return wp.NextReviewDate == nil || wp.NextReviewDate.Before(endOfDay)
+	default:
+		return false
+	}
+}
+
 // LearnNewWord: yeni kelime (kutu 1 → kutu 2).
 func LearnNewWord(wp *models.WordProgress) {
 	now := time.Now()

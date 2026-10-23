@@ -11,6 +11,7 @@ import (
 	"kelimeler-backend/internal/config"
 	"kelimeler-backend/internal/middleware"
 	"kelimeler-backend/internal/models"
+	"kelimeler-backend/internal/services"
 
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
@@ -274,5 +275,160 @@ func TestLearnWord_Kutu1KaydiKutu2yeAlinir(t *testing.T) {
 	}
 	if intField(t, body, "box") != 2 {
 		t.Errorf("yanıttaki box = %v, beklenen 2", body["box"])
+	}
+}
+
+// --- POST /progress/swipe ---
+
+func progressSwipe(wordID, direction string) *http.Request {
+	return jsonRequest("/progress/swipe", fiber.Map{"wordId": wordID, "direction": direction})
+}
+
+// usageDay, şu anın kullanım günü sınırlarıdır (bugün 00:00 ve yarın 00:00).
+func usageDay() (start, end time.Time) {
+	start = services.UsageDayStart(time.Now())
+	return start, start.AddDate(0, 0, 1)
+}
+
+func TestSwipe_VadesiGelmemisKelimeDegismezVeSayilmaz(t *testing.T) {
+	_, end := usageDay()
+	cases := []struct {
+		name      string
+		box       int
+		next      *time.Time
+		direction string
+	}{
+		{"kutu 2 yarin gun basi (sag)", 2, &end, "right"},
+		{"kutu 3 uc gun sonra (sol)", 3, ptrTime(end.Add(48 * time.Hour)), "left"},
+		{"kutu 5 bir ay sonra (sag)", 5, ptrTime(end.AddDate(0, 0, 29)), "right"},
+		// Öğrenilmiş kelime bir daha sorulmaz; gelen swipe onu değiştirmez.
+		{"kutu 6 (sol)", 6, nil, "left"},
+		{"kutu 6 (sag)", 6, nil, "right"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gdb, u, app := newProgressTest(t)
+			w := models.DictionaryWord{ID: "itest_notdue", Level: "A1", Grp: 1}
+			setProgress(t, gdb, u.ID, w, c.box, c.next)
+			before := loadProgress(t, gdb, u.ID, w.ID)
+
+			status, body := send(t, app, progressSwipe(w.ID, c.direction))
+			if status != fiber.StatusOK {
+				t.Fatalf("status = %d, beklenen 200 (body: %v)", status, body)
+			}
+			after := loadProgress(t, gdb, u.ID, w.ID)
+			if after.Box != c.box || after.WrongCount != before.WrongCount || !after.UpdatedAt.Equal(before.UpdatedAt) {
+				t.Errorf("vadesi gelmemiş kelime değişti: box %d → %d, wrong %d → %d",
+					c.box, after.Box, before.WrongCount, after.WrongCount)
+			}
+			if got := intField(t, body, "box"); got != c.box {
+				t.Errorf("yanıttaki box = %d, beklenen mevcut kutu %d", got, c.box)
+			}
+			if got := loadUser(t, gdb, u.ID).ReviewAnswersToday; got != 0 {
+				t.Errorf("review_answers_today = %d, beklenen 0 (cevap sayılmamalı)", got)
+			}
+		})
+	}
+}
+
+func ptrTime(t time.Time) *time.Time { return &t }
+
+func TestSwipe_BugunBitmedenVadesiGelenKelimeIlerler(t *testing.T) {
+	// Vade, kullanım gününün sonuna (yarın 00:00, hariç) kadardır.
+	_, end := usageDay()
+	gdb, u, app := newProgressTest(t)
+	w := models.DictionaryWord{ID: "itest_due_late", Level: "A1", Grp: 1}
+	setProgress(t, gdb, u.ID, w, 2, ptrTime(end.Add(-time.Minute)))
+
+	status, body := send(t, app, progressSwipe(w.ID, "right"))
+	if status != fiber.StatusOK {
+		t.Fatalf("status = %d (body: %v)", status, body)
+	}
+	if got := loadProgress(t, gdb, u.ID, w.ID).Box; got != 3 {
+		t.Errorf("box = %d, beklenen 3", got)
+	}
+	if got := loadUser(t, gdb, u.ID).ReviewAnswersToday; got != 1 {
+		t.Errorf("review_answers_today = %d, beklenen 1", got)
+	}
+}
+
+func TestSwipe_YinelenenCevapIkinciKezIlerletmez(t *testing.T) {
+	// Yanıtı kaybolan bir swipe'ın yeniden gönderilmesi: ilk istek kelimeyi
+	// kutu 4'e taşıyıp vadesini 15 gün sonraya atmıştır, ikincisi no-op'tur.
+	gdb, u, app := newProgressTest(t)
+	w := models.DictionaryWord{ID: "itest_dup", Level: "A1", Grp: 1}
+	setProgress(t, gdb, u.ID, w, 3, nil)
+
+	for i := 0; i < 2; i++ {
+		status, body := send(t, app, progressSwipe(w.ID, "right"))
+		if status != fiber.StatusOK {
+			t.Fatalf("%d. swipe status = %d (body: %v)", i+1, status, body)
+		}
+		if got := intField(t, body, "box"); got != 4 {
+			t.Errorf("%d. swipe yanıtında box = %d, beklenen 4", i+1, got)
+		}
+	}
+	if got := loadProgress(t, gdb, u.ID, w.ID).Box; got != 4 {
+		t.Errorf("box = %d, beklenen 4 (tek ilerleme)", got)
+	}
+	if got := loadUser(t, gdb, u.ID).ReviewAnswersToday; got != 1 {
+		t.Errorf("review_answers_today = %d, beklenen 1 (tek cevap)", got)
+	}
+}
+
+func TestSwipe_AyniKelimeyeEszamanliCevaplarTekIlerleme(t *testing.T) {
+	gdb, u, app := newProgressTest(t)
+	w := models.DictionaryWord{ID: "itest_concurrent_" + u.ID, Level: "A1", Grp: 1}
+	setProgress(t, gdb, u.ID, w, 2, nil)
+
+	const n = 5
+	statuses := satirKilidiAltindaEszamanli(t, gdb, app,
+		"SELECT 1 FROM word_progresses WHERE word_id = ? FOR UPDATE", w.ID, n,
+		func(int) *http.Request { return progressSwipe(w.ID, "right") })
+	for _, s := range statuses {
+		if s != fiber.StatusOK {
+			t.Fatalf("eşzamanlı swipe status = %d, beklenen 200 (tümü: %v)", s, statuses)
+		}
+	}
+	if got := loadProgress(t, gdb, u.ID, w.ID).Box; got != 3 {
+		t.Errorf("box = %d, beklenen 3 (tek ilerleme)", got)
+	}
+	if got := loadUser(t, gdb, u.ID).ReviewAnswersToday; got != 1 {
+		t.Errorf("review_answers_today = %d, beklenen 1 (tek cevap)", got)
+	}
+}
+
+func TestSwipe_YanlisCevapBirAltKutuVeYarin(t *testing.T) {
+	_, end := usageDay()
+	gdb, u, app := newProgressTest(t)
+	w := models.DictionaryWord{ID: "itest_wrong", Level: "A1", Grp: 1}
+	setProgress(t, gdb, u.ID, w, 4, nil)
+
+	status, body := send(t, app, progressSwipe(w.ID, "left"))
+	if status != fiber.StatusOK {
+		t.Fatalf("status = %d (body: %v)", status, body)
+	}
+	wp := loadProgress(t, gdb, u.ID, w.ID)
+	if wp.Box != 3 || wp.WrongCount != 1 {
+		t.Errorf("box = %d wrong = %d, beklenen box 3 wrong 1", wp.Box, wp.WrongCount)
+	}
+	if wp.NextReviewDate == nil || !wp.NextReviewDate.Equal(end) {
+		t.Errorf("nextReviewDate = %v, beklenen yarın gün başı %v", wp.NextReviewDate, end)
+	}
+	if got := loadUser(t, gdb, u.ID).ReviewAnswersToday; got != 1 {
+		t.Errorf("review_answers_today = %d, beklenen 1", got)
+	}
+}
+
+func TestSwipe_Kutu6yaGecisTotalLearnedGunceller(t *testing.T) {
+	gdb, u, app := newProgressTest(t)
+	setProgress(t, gdb, u.ID, models.DictionaryWord{ID: "itest_learned_a", Level: "A1", Grp: 1}, 6, nil)
+	setProgress(t, gdb, u.ID, models.DictionaryWord{ID: "itest_learned_b", Level: "A1", Grp: 1}, 5, nil)
+
+	if status, body := send(t, app, progressSwipe("itest_learned_b", "right")); status != fiber.StatusOK {
+		t.Fatalf("status = %d (body: %v)", status, body)
+	}
+	if got := loadUser(t, gdb, u.ID).TotalLearned; got != 2 {
+		t.Errorf("total_learned = %d, beklenen 2", got)
 	}
 }

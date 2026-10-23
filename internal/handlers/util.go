@@ -3,6 +3,8 @@ package handlers
 import (
 	"sort"
 	"time"
+
+	"kelimeler-backend/internal/services"
 )
 
 // parseQueryDate, "YYYY-MM-DD" formatındaki query parametresini çözer; yoksa şimdi.
@@ -13,6 +15,14 @@ func parseQueryDate(s string) time.Time {
 		}
 	}
 	return time.Now()
+}
+
+// reviewDayBounds, now'ın kullanım günüdür (services.UsageLocation): bugünün
+// başı ve bitişi (ertesi gün 00:00, hariç üst sınır). Tekrar uçlarının ve
+// swipe vadesinin "bugün"ü budur.
+func reviewDayBounds(now time.Time) (start, end time.Time) {
+	start = services.UsageDayStart(now)
+	return start, start.AddDate(0, 0, 1)
 }
 
 // startOfDay, verilen zamanın gün başlangıcını (00:00) döndürür.
