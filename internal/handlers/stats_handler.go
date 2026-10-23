@@ -12,6 +12,7 @@ import (
 	"kelimeler-backend/internal/services"
 
 	"github.com/gofiber/fiber/v2"
+	"gorm.io/gorm"
 )
 
 // statsNow, istatistik uçlarının saatidir; testler gün sınırını sınamak için değiştirir.
@@ -76,41 +77,45 @@ func (h *Handlers) LoginDates(c *fiber.Ctx) error {
 func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 
-	// 1) box==6 öğrenilen kelimeler (lastReviewDate desc)
-	var learned []models.WordProgress
-	if err := h.DB.Where("user_id = ? AND box = 6", userID).
-		Order("last_review_date DESC NULLS LAST").Find(&learned).Error; err != nil {
+	// 1) Kutu sayıları: satırları belleğe almadan seviye × kutu kırılımı.
+	var counts []struct {
+		Level string
+		Box   int
+		N     int
+	}
+	if err := h.DB.Raw(`SELECT level, box, COUNT(*) AS n
+		FROM word_progresses
+		WHERE user_id = ? AND box >= 2
+		GROUP BY level, box`, userID).Scan(&counts).Error; err != nil {
 		return err
 	}
-	totalLearned := len(learned)
+	activeByLevel := map[string]int{} // box>=2
 	box6ByLevel := map[string]int{}
-	for _, w := range learned {
-		box6ByLevel[w.Level]++
-	}
-	lastFive := learned
-	if len(lastFive) > 5 {
-		lastFive = lastFive[:5]
+	var totalActive, totalLearned, box2, box3, box4, box5 int
+	for _, r := range counts {
+		activeByLevel[r.Level] += r.N
+		totalActive += r.N
+		switch r.Box {
+		case 2:
+			box2 += r.N
+		case 3:
+			box3 += r.N
+		case 4:
+			box4 += r.N
+		case 5:
+			box5 += r.N
+		case 6:
+			box6ByLevel[r.Level] += r.N
+			totalLearned += r.N
+		}
 	}
 
-	// 2) box>=2 aktif kelimeler
-	var active []models.WordProgress
-	if err := h.DB.Where("user_id = ? AND box >= 2", userID).Find(&active).Error; err != nil {
+	// 2) Son öğrenilen 5 kelime (box==6, lastReviewDate desc)
+	var lastFive []models.WordProgress
+	if err := h.DB.Where("user_id = ? AND box = 6", userID).
+		Order("last_review_date DESC NULLS LAST, id DESC").Limit(5).
+		Find(&lastFive).Error; err != nil {
 		return err
-	}
-	activeByLevel := map[string]int{}
-	var box2, box3, box4, box5 int
-	for _, w := range active {
-		activeByLevel[w.Level]++
-		switch w.Box {
-		case 2:
-			box2++
-		case 3:
-			box3++
-		case 4:
-			box4++
-		case 5:
-			box5++
-		}
 	}
 
 	// 3) Son 10 gün giriş verisi + streak (aynı küme, kullanım günüyle)
@@ -149,7 +154,7 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 	allBadges, newlyEarned := services.ComputeBadges(services.BadgeInput{
 		ActiveByLevel:    levelProgress,
 		LevelTotals:      levelTotals,
-		TotalActiveCount: len(active),
+		TotalActiveCount: totalActive,
 		LearnedCount:     totalLearned,
 		CurrentStreak:    streak,
 	}, earnedBefore)
@@ -264,28 +269,44 @@ func (h *Handlers) insertEarnedBadges(userID string, badgeIDs []string, at time.
 	return inserted, nil
 }
 
+// Öğrenilmiş kelimeler sayfasının boyutu: varsayılan ve üst sınır.
+const (
+	defaultLearnedWordsLimit = 25
+	maxLearnedWordsLimit     = 200
+)
+
 // LearnedWords: GET /stats/learned-words?level=&limit=&offset= — sayfalı öğrenilmiş kelimeler.
+// limit 1..200 aralığına çekilir (verilmezse 25); sıralama sabittir, sayfalar
+// eşit tarihli kelimelerde kaymaz.
 func (h *Handlers) LearnedWords(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	level := c.Query("level")
-	limit, _ := strconv.Atoi(c.Query("limit", "25"))
-	offset, _ := strconv.Atoi(c.Query("offset", "0"))
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	offset, _ := strconv.Atoi(c.Query("offset"))
 	if limit <= 0 {
-		limit = 25
+		limit = defaultLearnedWordsLimit
 	}
+	limit = min(limit, maxLearnedWordsLimit)
+	offset = max(offset, 0)
 
-	base := h.DB.Model(&models.WordProgress{}).Where("user_id = ? AND box = 6", userID)
-	if level != "" {
-		base = base.Where("level = ?", level)
+	// Her sorgu kendi zincirini kurar: gorm zincirini Count'tan sonra yeniden
+	// kullanmak koşulları/seçimi bir sonraki sorguya taşıyabilir.
+	learned := func() *gorm.DB {
+		q := h.DB.Model(&models.WordProgress{}).Where("user_id = ? AND box = 6", userID)
+		if level != "" {
+			q = q.Where("level = ?", level)
+		}
+		return q
 	}
 
 	var total int64
-	if err := base.Count(&total).Error; err != nil {
+	if err := learned().Count(&total).Error; err != nil {
 		return err
 	}
 
 	var words []models.WordProgress
-	if err := base.Order("last_review_date DESC NULLS LAST").Limit(limit).Offset(offset).Find(&words).Error; err != nil {
+	if err := learned().Order("last_review_date DESC NULLS LAST, id DESC").
+		Limit(limit).Offset(offset).Find(&words).Error; err != nil {
 		return err
 	}
 

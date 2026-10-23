@@ -516,3 +516,130 @@ func statsIcerir(xs []string, want string) bool {
 	}
 	return false
 }
+
+// statsKelime, verilen kutu/seviye/son tekrar tarihiyle bir ilerleme satırı açar.
+func statsKelime(t *testing.T, gdb *gorm.DB, userID, wordID, level string, box int, last *time.Time, english string) {
+	t.Helper()
+
+	wp := &models.WordProgress{UserID: userID, WordID: wordID, Level: level, Grp: 1, Box: box, LastReviewDate: last, English: english, Turkish: "tr-" + english}
+	if err := gdb.Create(wp).Error; err != nil {
+		t.Fatalf("kelime ilerlemesi oluşturulamadı: %v", err)
+	}
+}
+
+func TestStatsSummary_KutuSayilariVeSonOgrenilenler(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	app := statsApp(New(gdb, &config.Config{AppEnv: "test"}, nil, nil), u.ID)
+
+	sozluk := testSozlukKelimeleri(t, gdb, "C1", 1)
+	gun := func(n int) *time.Time {
+		v := time.Date(2026, 10, n, 9, 0, 0, 0, time.UTC)
+		return &v
+	}
+
+	statsKelime(t, gdb, u.ID, "w_a1_kutu1", "A1", 1, nil, "k1") // sayılmaz
+	statsKelime(t, gdb, u.ID, "w_a1_kutu2a", "A1", 2, nil, "k2a")
+	statsKelime(t, gdb, u.ID, "w_a1_kutu2b", "A1", 2, nil, "k2b")
+	statsKelime(t, gdb, u.ID, "w_a1_kutu3", "A1", 3, nil, "k3")
+	statsKelime(t, gdb, u.ID, "w_a2_kutu4", "A2", 4, nil, "k4")
+	statsKelime(t, gdb, u.ID, "w_a2_kutu5", "A2", 5, nil, "k5")
+	statsKelime(t, gdb, u.ID, "w_a1_ogr1", "A1", 6, gun(1), "o1")
+	statsKelime(t, gdb, u.ID, "w_a1_ogr2", "A1", 6, gun(5), "o2")
+	statsKelime(t, gdb, u.ID, "w_a1_ogr3", "A1", 6, nil, "o3") // tarihsiz en sona
+	statsKelime(t, gdb, u.ID, "w_b1_ogr4", "B1", 6, gun(3), "o4")
+	statsKelime(t, gdb, u.ID, "w_b1_ogr5", "B1", 6, gun(7), "o5")
+	// İngilizcesi boş satır sözlükten doldurulur.
+	statsKelime(t, gdb, u.ID, sozluk[0], "C1", 6, gun(6), "")
+
+	body := statsOzet(t, app)
+
+	if got := intField(t, body, "totalLearned"); got != 6 {
+		t.Errorf("totalLearned = %d, beklenen 6", got)
+	}
+	for alan, want := range map[string]int{"box2Count": 2, "box3Count": 1, "box4Count": 1, "box5Count": 1} {
+		if got := intField(t, body, alan); got != want {
+			t.Errorf("%s = %d, beklenen %d", alan, got, want)
+		}
+	}
+	if got, want := statsIntMap(t, body, "learnedByLevel"), map[string]int{"A1": 6, "A2": 2, "B1": 2, "C1": 1}; !reflect.DeepEqual(got, want) {
+		t.Errorf("learnedByLevel = %v, beklenen %v", got, want)
+	}
+	if got, want := statsIntMap(t, body, "box6ByLevel"), map[string]int{"A1": 3, "B1": 2, "C1": 1}; !reflect.DeepEqual(got, want) {
+		t.Errorf("box6ByLevel = %v, beklenen %v", got, want)
+	}
+
+	raw, _ := body["lastLearnedWords"].([]any)
+	var ids []string
+	for _, w := range raw {
+		m := w.(map[string]any)
+		ids = append(ids, m["wordId"].(string))
+		if m["wordId"] == sozluk[0] && m["english"] != "word"+sozluk[0] {
+			t.Errorf("boş İngilizce sözlükten doldurulmadı: %v", m)
+		}
+	}
+	if want := []string{"w_b1_ogr5", sozluk[0], "w_a1_ogr2", "w_b1_ogr4", "w_a1_ogr1"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("lastLearnedWords = %v, beklenen %v", ids, want)
+	}
+}
+
+// learnedWordsSayfasi, GET /stats/learned-words yanıtının kimliklerini ve total'ını döner.
+func learnedWordsSayfasi(t *testing.T, app *fiber.App, query string) ([]string, int) {
+	t.Helper()
+
+	status, body := statsGet(t, app, "/stats/learned-words"+query)
+	if status != fiber.StatusOK {
+		t.Fatalf("GET /stats/learned-words%s status = %d (body: %v)", query, status, body)
+	}
+	raw, ok := body["items"].([]any)
+	if !ok {
+		t.Fatalf("items yok ya da dizi değil (body: %v)", body)
+	}
+	ids := make([]string, 0, len(raw))
+	for _, w := range raw {
+		ids = append(ids, w.(map[string]any)["wordId"].(string))
+	}
+	return ids, intField(t, body, "total")
+}
+
+func TestLearnedWords_SayfalamaSinirliVeKaymaz(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	app := statsApp(New(gdb, &config.Config{AppEnv: "test"}, nil, nil), u.ID)
+
+	// 205 öğrenilmiş kelime, hepsi aynı (boş) son tekrar tarihiyle: sıralama
+	// yalnızca tarihe bakarsa sayfalar arasında kelime tekrar edip kaybolabilir.
+	if err := gdb.Exec(`INSERT INTO word_progresses (user_id, word_id, level, grp, box, english, turkish, created_at, updated_at)
+		SELECT ?, 'lw_' || g, 'A1', 1, 6, 'w' || g, 'k', now(), now() FROM generate_series(1, 205) g`, u.ID).Error; err != nil {
+		t.Fatalf("kelimeler yazılamadı: %v", err)
+	}
+	statsKelime(t, gdb, u.ID, "lw_b1", "B1", 6, nil, "b1")
+	statsKelime(t, gdb, u.ID, "lw_kutu5", "A1", 5, nil, "k5") // öğrenilmemiş
+
+	if ids, total := learnedWordsSayfasi(t, app, ""); len(ids) != 25 || total != 206 {
+		t.Errorf("varsayılan sayfa: %d kelime, total %d; beklenen 25 ve 206", len(ids), total)
+	}
+	if ids, total := learnedWordsSayfasi(t, app, "?limit=100000"); len(ids) != 200 || total != 206 {
+		t.Errorf("limit=100000: %d kelime, total %d; beklenen 200 (üst sınır) ve 206", len(ids), total)
+	}
+	if ids, _ := learnedWordsSayfasi(t, app, "?limit=abc&offset=-5"); len(ids) != 25 {
+		t.Errorf("geçersiz limit/offset: %d kelime, beklenen 25", len(ids))
+	}
+	if ids, total := learnedWordsSayfasi(t, app, "?level=B1&limit=1"); !reflect.DeepEqual(ids, []string{"lw_b1"}) || total != 1 {
+		t.Errorf("level=B1: %v total %d; beklenen [lw_b1] ve 1", ids, total)
+	}
+
+	gorulen := map[string]bool{}
+	for offset := 0; offset < 206; offset += 50 {
+		ids, _ := learnedWordsSayfasi(t, app, fmt.Sprintf("?level=A1&limit=50&offset=%d", offset))
+		for _, id := range ids {
+			if gorulen[id] {
+				t.Fatalf("%s iki sayfada döndü (offset %d)", id, offset)
+			}
+			gorulen[id] = true
+		}
+	}
+	if len(gorulen) != 205 {
+		t.Errorf("sayfalar %d farklı kelime döndü, beklenen 205", len(gorulen))
+	}
+}
