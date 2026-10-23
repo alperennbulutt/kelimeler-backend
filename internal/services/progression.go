@@ -48,3 +48,37 @@ func AdvanceGroup(currentLevel string, currentGroup, maxGroupInCurrentLevel int)
 func IsAllLevelsCompleted(level string, group int) bool {
 	return level == Levels[len(Levels)-1] && group <= 0
 }
+
+// CompareGroupPositions, iki işaretçiyi seviye sırasına, sonra gruba göre
+// karşılaştırır: a gerideyse -1, aynıysa 0, ilerideyse 1.
+//
+// "Tüm seviyeler bitti" her konumun ötesindedir. Tanınmayan seviye her
+// konumun gerisindedir (eski, doğrulamasız yazımlardan kalmış olabilir).
+func CompareGroupPositions(aLevel string, aGroup int, bLevel string, bGroup int) int {
+	al, ag := groupPosition(aLevel, aGroup)
+	bl, bg := groupPosition(bLevel, bGroup)
+	switch {
+	case al != bl:
+		return sign(al - bl)
+	default:
+		return sign(ag - bg)
+	}
+}
+
+func groupPosition(level string, group int) (levelRank, groupRank int) {
+	if IsAllLevelsCompleted(level, group) {
+		return len(Levels), 0
+	}
+	return IndexOfLevel(level), group
+}
+
+func sign(n int) int {
+	switch {
+	case n < 0:
+		return -1
+	case n > 0:
+		return 1
+	default:
+		return 0
+	}
+}

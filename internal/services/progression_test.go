@@ -75,3 +75,32 @@ func TestAdvanceGroup(t *testing.T) {
 		})
 	}
 }
+
+func TestCompareGroupPositions(t *testing.T) {
+	cases := []struct {
+		aLevel string
+		aGroup int
+		bLevel string
+		bGroup int
+		want   int
+	}{
+		{"A1", 2, "A1", 3, -1},
+		{"A1", 3, "A1", 3, 0},
+		{"A2", 1, "A1", 30, 1},
+		{"B1", 5, "C1", 1, -1},
+		// C2:0 "tüm seviyeler bitti": her konumun ötesinde.
+		{"C2", 0, "C2", 40, 1},
+		{"C2", 40, "C2", 0, -1},
+		{"C2", 0, "C2", 0, 0},
+		// Son seviye dışında grup 0, seviyenin başıdır.
+		{"A1", 0, "A1", 1, -1},
+		// Tanınmayan seviye her konumun gerisinde.
+		{"XYZ", 9, "A1", 1, -1},
+	}
+	for _, c := range cases {
+		if got := CompareGroupPositions(c.aLevel, c.aGroup, c.bLevel, c.bGroup); got != c.want {
+			t.Errorf("CompareGroupPositions(%s:%d, %s:%d) = %d, beklenen %d",
+				c.aLevel, c.aGroup, c.bLevel, c.bGroup, got, c.want)
+		}
+	}
+}

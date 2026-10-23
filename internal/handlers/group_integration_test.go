@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -80,6 +81,13 @@ func advanceRequest(body any) *http.Request {
 		return httptest.NewRequest(http.MethodPost, "/users/me/advance-group", nil)
 	}
 	return jsonRequest("/users/me/advance-group", body)
+}
+
+func currentGroupRequest(body any) *http.Request {
+	raw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPut, "/users/me/current-group", bytes.NewReader(raw))
+	req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	return req
 }
 
 func userField(t *testing.T, body map[string]any) map[string]any {
@@ -232,6 +240,112 @@ func TestAdvanceGroup_BozukGovde400(t *testing.T) {
 	req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
 	if status, body := send(t, app, req); status != fiber.StatusBadRequest {
 		t.Fatalf("status = %d, beklenen 400 (body: %v)", status, body)
+	}
+	assertPointer(t, gdb, u.ID, "A1", 1)
+}
+
+// --- PUT /users/me/current-group ---
+
+func TestSetCurrentGroup_GecersizHedef400(t *testing.T) {
+	cases := []struct {
+		name string
+		body fiber.Map
+	}{
+		{"bos govde", fiber.Map{}},
+		{"grup yok", fiber.Map{"level": "A1"}},
+		{"kucuk harf seviye", fiber.Map{"level": "a1", "group": 1}},
+		{"bilinmeyen seviye", fiber.Map{"level": "ZZ", "group": 1}},
+		{"sifir grup", fiber.Map{"level": "A1", "group": 0}},
+		{"negatif grup", fiber.Map{"level": "A2", "group": -5}},
+		{"seviyedeki grup sayisini asar", fiber.Map{"level": "A1", "group": 4}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gdb, u, app := newGroupTest(t, nil)
+			seedGroupLevels(t, gdb)
+			setPointer(t, gdb, u.ID, "A1", 1)
+
+			status, body := send(t, app, currentGroupRequest(c.body))
+			if status != fiber.StatusBadRequest || body["code"] != "invalid_group" {
+				t.Fatalf("status = %d code = %v, beklenen 400 invalid_group", status, body["code"])
+			}
+			assertPointer(t, gdb, u.ID, "A1", 1)
+		})
+	}
+}
+
+func TestSetCurrentGroup_YalnizcaIleriYazar(t *testing.T) {
+	cases := []struct {
+		name      string
+		fromLevel string
+		fromGroup int
+		body      fiber.Map
+		wantLevel string
+		wantGroup int
+	}{
+		{"ayni seviyede ileri", "A1", 1, fiber.Map{"level": "A1", "group": 3}, "A1", 3},
+		{"sonraki seviyeye", "A1", 3, fiber.Map{"level": "A2", "group": 1}, "A2", 1},
+		{"ayni grup", "A1", 2, fiber.Map{"level": "A1", "group": 2}, "A1", 2},
+		{"ayni seviyede geri", "A1", 3, fiber.Map{"level": "A1", "group": 1}, "A1", 3},
+		{"onceki seviyeye", "A2", 1, fiber.Map{"level": "A1", "group": 3}, "A2", 1},
+		{"C2 bitmisken", "C2", 0, fiber.Map{"level": "C2", "group": 1}, "C2", 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gdb, u, app := newGroupTest(t, nil)
+			seedGroupLevels(t, gdb)
+			setPointer(t, gdb, u.ID, c.fromLevel, c.fromGroup)
+
+			status, body := send(t, app, currentGroupRequest(c.body))
+			if status != fiber.StatusOK {
+				t.Fatalf("status = %d (body: %v)", status, body)
+			}
+			assertPointer(t, gdb, u.ID, c.wantLevel, c.wantGroup)
+			uf := userField(t, body)
+			if uf["currentLevel"] != c.wantLevel || int(uf["currentGroup"].(float64)) != c.wantGroup {
+				t.Errorf("yanıttaki kullanıcı = %v:%v, beklenen %s:%d", uf["currentLevel"], uf["currentGroup"], c.wantLevel, c.wantGroup)
+			}
+		})
+	}
+}
+
+func TestSetCurrentGroup_BaslikVeAciklamaYazilir(t *testing.T) {
+	gdb, u, app := newGroupTest(t, nil)
+	seedGroupLevels(t, gdb)
+
+	status, body := send(t, app, currentGroupRequest(fiber.Map{
+		"level": "A1", "group": 2, "title": "Grup 2", "description": "Günlük", "totalWords": 40,
+	}))
+	if status != fiber.StatusOK {
+		t.Fatalf("status = %d (body: %v)", status, body)
+	}
+	after := loadUser(t, gdb, u.ID)
+	if after.CurrentGroupTitle == nil || *after.CurrentGroupTitle != "Grup 2" ||
+		after.CurrentGroupDescription == nil || *after.CurrentGroupDescription != "Günlük" ||
+		after.CurrentGroupTotalWords != 40 {
+		t.Errorf("başlık/açıklama/kelime sayısı yazılmadı: %+v", after)
+	}
+
+	// Geri yazım başlığı da değiştirmez.
+	send(t, app, currentGroupRequest(fiber.Map{"level": "A1", "group": 1, "title": "Eski"}))
+	if after := loadUser(t, gdb, u.ID); *after.CurrentGroupTitle != "Grup 2" {
+		t.Errorf("geri yazım başlığı değiştirdi: %q", *after.CurrentGroupTitle)
+	}
+}
+
+func TestSetCurrentGroup_UzunAlanlar400(t *testing.T) {
+	gdb, u, app := newGroupTest(t, nil)
+	seedGroupLevels(t, gdb)
+	long := string(bytes.Repeat([]byte("a"), 1000))
+
+	for _, body := range []fiber.Map{
+		{"level": "A1", "group": 2, "title": long},
+		{"level": "A1", "group": 2, "description": long},
+		{"level": "A1", "group": 2, "totalWords": -1},
+	} {
+		if status, resp := send(t, app, currentGroupRequest(body)); status != fiber.StatusBadRequest {
+			t.Errorf("status = %d, beklenen 400 (body: %v)", status, resp)
+		}
 	}
 	assertPointer(t, gdb, u.ID, "A1", 1)
 }
