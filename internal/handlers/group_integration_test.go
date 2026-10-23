@@ -498,3 +498,74 @@ func TestMaxGroupForLevel(t *testing.T) {
 		}
 	}
 }
+
+// --- Uçtan uca grup akışı ---
+
+func TestGrupAkisi_OgrenTamamlaIlerle(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	h := New(gdb, &config.Config{AppEnv: "test"}, nil, nil)
+	app := groupApp(h, u.ID)
+	papp := progressApp(h, u.ID)
+	a1 := seedGroupLevels(t, gdb)["A1"]
+
+	// Grup 1'in kelimeleri öğrenilir (istemci gövdeye kendi değerlerini koyar).
+	for _, w := range a1[0] {
+		status, body := send(t, papp, learnRequest(fiber.Map{
+			"wordId": w.ID, "level": w.Level, "group": w.Grp, "english": w.English, "turkish": w.Turkish,
+		}))
+		if status != fiber.StatusOK {
+			t.Fatalf("learn(%s) status = %d (body: %v)", w.ID, status, body)
+		}
+	}
+
+	groups := levelGroups(t, app, "A1")
+	if !groups[0].IsCompleted || !groups[1].IsUnlocked || groups[2].IsUnlocked {
+		t.Fatalf("öğrenme sonrası harita = %+v, beklenen grup 1 tamam, grup 2 açık, grup 3 kilitli", groups)
+	}
+
+	// Grubun kayıtları sunucuda; GET /progress/group ve /progress/word onları döner.
+	status, raw := getJSON(t, papp, "/progress/group?level=A1&group=1")
+	var list []map[string]any
+	if status != fiber.StatusOK || json.Unmarshal(raw, &list) != nil || len(list) != 2 {
+		t.Errorf("progress/group = %d %s, beklenen 2 kayıt", status, raw)
+	}
+	if status, raw := getJSON(t, papp, "/progress/word/"+a1[0][0].ID); status != fiber.StatusOK {
+		t.Errorf("progress/word status = %d (body: %s)", status, raw)
+	}
+	if status, raw := getJSON(t, papp, "/progress/word/itest_olmayan"); status != fiber.StatusNotFound {
+		t.Errorf("olmayan kelime status = %d, beklenen 404 (body: %s)", status, raw)
+	}
+
+	// Grup tamamlandı: işaretçi gövdeyle ilerler, yeniden deneme bir daha ilerletmez.
+	for i := 0; i < 2; i++ {
+		if status, body := send(t, app, advanceRequest(fiber.Map{"level": "A1", "group": 1})); status != fiber.StatusOK {
+			t.Fatalf("advance status = %d (body: %v)", status, body)
+		}
+	}
+	assertPointer(t, gdb, u.ID, "A1", 2)
+
+	status, raw = getJSON(t, app, "/home/current-group")
+	var cg dto.CurrentGroupDTO
+	if status != fiber.StatusOK || json.Unmarshal(raw, &cg) != nil || cg.Level != "A1" || cg.Group != 2 {
+		t.Errorf("home/current-group = %d %s, beklenen A1 grup 2", status, raw)
+	}
+}
+
+func TestAdvanceGroup_EskiIstemciGovdeleriBirIleri(t *testing.T) {
+	// Yayındaki istemci gövde göndermez; Content-Type başlığı yine de gelebilir.
+	for _, raw := range []string{"", "null", "{}"} {
+		t.Run("govde "+raw, func(t *testing.T) {
+			gdb, u, app := newGroupTest(t, nil)
+			seedGroupLevels(t, gdb)
+			setPointer(t, gdb, u.ID, "A1", 1)
+
+			req := httptest.NewRequest(http.MethodPost, "/users/me/advance-group", bytes.NewReader([]byte(raw)))
+			req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+			if status, body := send(t, app, req); status != fiber.StatusOK {
+				t.Fatalf("status = %d (body: %v)", status, body)
+			}
+			assertPointer(t, gdb, u.ID, "A1", 2)
+		})
+	}
+}
