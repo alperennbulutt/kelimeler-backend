@@ -34,7 +34,13 @@ Depo özelse Coolify'de kaynak olarak **GitHub App** (Private Repository) kullan
 - **+ New Resource → Application → Private/Public Repository** → GitHub reposunu seç
 - **Build Pack:** `Dockerfile`
 - **Port (Ports Exposes):** `8080`
-- **Health Check Path:** `/api/v1/health`
+- **Health Check:** aşağıdaki nota bak.
+
+> **Sağlık kontrolü ve distroless imaj:** Coolify'nin arayüzden açılan health check'i probe'u container **içinde** `curl`/`wget` ile çalıştırır. Çalışma imajı distroless'tır (kabuk, `curl`, `wget` yok); bu yüzden o probe hiç çalışamaz ve container hep "unhealthy" görünür, deploy geri alınabilir. Bunun yerine imajın kendi `HEALTHCHECK`'i kullanılır: `Dockerfile`'daki `HEALTHCHECK CMD ["/server", "-healthcheck"]` binary'nin kendisiyle `http://127.0.0.1:$PORT/api/v1/health`'e istek atar ve yalnızca 200'de başarılı sayılır.
+>
+> - Coolify → Application → **Health Check** bölümünde arayüz health check'ini **kapalı** tut; Coolify imajda `HEALTHCHECK` tanımlıysa onu kullanır. (Coolify sürümüne göre bu davranışı ilk deploy'da doğrula.)
+> - Doğrulama: sunucuda `docker ps` çıktısında container durumu `(healthy)` olmalı; ya da `docker inspect --format '{{.State.Health.Status}}' <container>` → `healthy`. `unhealthy` ise `docker inspect --format '{{json .State.Health.Log}}' <container>` probe çıktısını gösterir.
+> - `/api/v1/health` artık veritabanını 2 sn'lik zaman aşımıyla sınar: DB'ye ulaşılamazsa `503 {"status":"unavailable","code":"db_unavailable"}` döner. Başarılı yanıt değişmedi: `{"dictionaryWords":9980,"status":"ok"}`.
 
 ---
 

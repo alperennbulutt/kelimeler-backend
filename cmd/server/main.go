@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime/debug"
@@ -35,12 +36,40 @@ import (
 const seedPath = "/seed/dictionary_words.sql"
 
 func main() {
+	// Çalışma imajı distroless'tır (kabuk, curl, wget yok); container sağlık
+	// kontrolü binary'nin kendisiyle yapılır: HEALTHCHECK ["/server", "-healthcheck"].
+	if len(os.Args) > 1 && os.Args[1] == "-healthcheck" {
+		port := os.Getenv("PORT")
+		if port == "" {
+			port = "8080"
+		}
+		os.Exit(healthcheck("http://127.0.0.1:" + port + "/api/v1/health"))
+	}
+
 	// log.Fatalf defer'ları atlar; hatalar run'dan döner ki Sentry kuyruğu
 	// boşaltılsın ve veritabanı bağlantıları kapatılsın.
 	if err := run(); err != nil {
 		log.Printf("kelimeler-backend durdu: %v", err)
 		os.Exit(1)
 	}
+}
+
+// healthcheck, çalışan sunucunun sağlık ucuna istek atar; 200 dönerse 0, aksi
+// halde 1 döner (Docker HEALTHCHECK çıkış kodu sözleşmesi). Ucun kendisi
+// veritabanını 2 sn'lik zaman aşımıyla sınar.
+func healthcheck(url string) int {
+	client := http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "healthcheck: %s yanıtı %d\n", url, resp.StatusCode)
+		return 1
+	}
+	return 0
 }
 
 // run, sunucuyu kurar ve SIGTERM/SIGINT gelene kadar çalıştırır.

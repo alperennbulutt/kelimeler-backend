@@ -15,4 +15,8 @@ COPY --from=builder /out/server /server
 COPY --from=builder /out/import /import
 COPY seed /seed
 EXPOSE 8080
+# Kabuk/curl olmadığından sağlık kontrolü binary'nin kendisiyle yapılır;
+# /api/v1/health veritabanına ulaşılamazsa 503 döner ve kontrol başarısız olur.
+HEALTHCHECK --interval=15s --timeout=6s --start-period=60s --retries=3 \
+  CMD ["/server", "-healthcheck"]
 ENTRYPOINT ["/server"]
