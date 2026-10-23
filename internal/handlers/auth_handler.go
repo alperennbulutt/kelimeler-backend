@@ -792,10 +792,44 @@ func (h *Handlers) DeleteAccount(c *fiber.Ctx) error {
 		return err
 	}
 
-	if err := h.DB.Delete(&models.User{}, "id = ?", userID).Error; err != nil {
+	if err := deleteUserData(h.DB, userID); err != nil {
 		return err
 	}
 	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// deleteUserData, kullanıcıyı ve bütün verisini tek transaction'da siler.
+//
+// Kilit sırası learn ve swipe ile aynıdır: önce kelime satırları, sonra
+// kullanıcı satırı. Doğrudan users'ı silmek önce kullanıcı satırını kilitler,
+// CASCADE sonra kelime satırlarını ister; aynı anda kelime satırını tutup
+// kullanıcı satırını bekleyen bir swipe ile kilitlenme (deadlock) olurdu.
+//
+// Başka bir ters sıra (ör. refresh token satırını tutup kullanıcıya bağlı
+// satır yazan bir istek) yine kilitlenme üretebilir; PostgreSQL bu durumda
+// işlemlerden birini 40P01 ile iptal eder. Silme o zaman bir kez yeniden
+// denenir: karşı işlem bu arada ilerler ve ikinci deneme beklediği kilidi alır.
+func deleteUserData(db *gorm.DB, userID string) error {
+	del := func() error {
+		return db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Where("user_id = ?", userID).Delete(&models.WordProgress{}).Error; err != nil {
+				return err
+			}
+			return tx.Delete(&models.User{}, "id = ?", userID).Error
+		})
+	}
+	err := del()
+	if isDeadlock(err) {
+		log.Printf("hesap silme: kilitlenme (40P01), yeniden deneniyor (user=%s)", userID)
+		err = del()
+	}
+	return err
+}
+
+// isDeadlock, err PostgreSQL'in deadlock_detected (40P01) hatasıysa true döner.
+func isDeadlock(err error) bool {
+	var pgErr interface{ SQLState() string }
+	return errors.As(err, &pgErr) && pgErr.SQLState() == "40P01"
 }
 
 // errAppleRevokerMissing, Apple kimliği olan bir hesapta revoke yapılandırması
