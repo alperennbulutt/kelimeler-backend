@@ -857,3 +857,67 @@ func TestKapi_DurustIstemciHicIhlalUretmez(t *testing.T) {
 		})
 	}
 }
+
+func TestKapi_DurustIstemci_SeviyeGecisiYeniGunVeDoksanKapisi(t *testing.T) {
+	// Dürüst istemcinin ilk uçtan uca testinde olmayan yollar: önceki seviye
+	// bitince yeni seviyenin ilk grubu (harita kilidi seviye taramasından
+	// açılır), ertesi gün dünkü gruba yeniden giriş (küme boşalmıştır; günün
+	// ücretsiz hakkı yazılır) ve 90 kapısı (no-fill toleransıyla), 90'dan
+	// sonraki serbest cevaplar.
+	for _, mode := range []config.GateEnforcement{config.GateLog, config.GateEnforce} {
+		t.Run(string(mode), func(t *testing.T) {
+			kayit := kapiRaporunuYakala(t)
+			gdb, u, app := newGateTest(t, mode)
+			a1 := testLevel(t, gdb, "A1", 2, 2)
+			a2 := testLevel(t, gdb, "A2", 3)
+			k := &durustIstemci{t: t, app: app}
+
+			k.openGroup("A1", 1)
+			k.learnGroup(gdb, u.ID, a1[0])
+			k.openGroup("A1", 2)
+			k.learnGroup(gdb, u.ID, a1[1])
+
+			// A1 bitti: A2'nin ilk grubu haritada açık, reklamla açılır.
+			k.openGroup("A2", 1)
+			k.post("/progress/learn", fiber.Map{"wordId": a2[0][0].ID})
+
+			// Ertesi gün: satır dünden kalmış (dünkü küme hâlâ yazılı).
+			yesterday := services.UsageDayStart(time.Now()).AddDate(0, 0, -1).Add(20 * time.Hour)
+			if err := gdb.Model(&models.User{}).Where("id = ?", u.ID).
+				Update("last_reset_date", yesterday.UnixMilli()).Error; err != nil {
+				t.Fatalf("last_reset_date yazılamadı: %v", err)
+			}
+			k.openGroup("A2", 1)
+			usage := k.usage()
+			if got := intField(t, usage, "groupsStartedTodayCount"); got != 1 {
+				t.Errorf("yeni günde groupsStartedTodayCount = %d, beklenen 1 (ücretsiz hak)", got)
+			}
+			if got := unlockedGroups(t, usage); len(got) != 1 || got[0] != "A2:1" {
+				t.Errorf("yeni günde unlockedGroupsToday = %v, beklenen [A2:1]", got)
+			}
+			k.learnGroup(gdb, u.ID, a2[0])
+
+			// 100 tekrar cevabı: 30 ve 60 reklamla, 90 no-fill toleransıyla.
+			ids := dueWords(t, gdb, u.ID, "itest_honest90", 2, 100)
+			k.reviewSession(ids[:50], 0)
+			k.reviewSession(ids[50:], 90)
+
+			usage = k.usage()
+			if got := intField(t, usage, "reviewAnswersToday"); got != 100 {
+				t.Errorf("reviewAnswersToday = %d, beklenen 100", got)
+			}
+			if got := intField(t, usage, "reviewAdPassCountToday"); got != 3 {
+				t.Errorf("reviewAdPassCountToday = %d, beklenen 3", got)
+			}
+			if k.rejections != 0 {
+				t.Errorf("dürüst istemci %d kez 403 aldı", k.rejections)
+			}
+			if l := kayit.ihlaller(); len(l) != 0 {
+				t.Errorf("dürüst istemci ihlal üretti:\n%s", strings.Join(l, "\n"))
+			}
+			if s := kayit.sentry(); len(s) != 0 {
+				t.Errorf("Sentry'ye gitti: %v", s)
+			}
+		})
+	}
+}
