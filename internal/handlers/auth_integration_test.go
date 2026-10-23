@@ -1287,3 +1287,36 @@ func TestLinkProvider(t *testing.T) {
 		}
 	})
 }
+
+// --- Sosyal kayıtta görünen ad ---
+
+func TestAuthenticateSocial_GorunenAdTemizlenirVeKisaltilir(t *testing.T) {
+	gdb := testDB(t)
+	h := New(gdb, &config.Config{AppEnv: "test"}, testTokens(), nil)
+
+	cases := []struct {
+		name, clientName, providerName, want string
+	}{
+		{"istemci adı uzunsa kesilir", strings.Repeat("ç", 500), "", strings.Repeat("ç", 60)},
+		{"kontrol ve yön karakterleri atılır", "Ada\n\u202ELovelace", "", "Ada Lovelace"},
+		{"istemci adı görünmezse sağlayıcı adı kullanılır", "\u200B ", "Sağlayıcı Adı", "Sağlayıcı Adı"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			email := benzersizEposta("ad")
+			t.Cleanup(func() { gdb.Delete(&models.User{}, "email = ?", email) })
+
+			si := &auth.SocialIdentity{Subject: "ad-" + email, Email: email, Name: c.providerName}
+			got, err := h.authenticateSocial("google", si, c.clientName)
+			if err != nil {
+				t.Fatalf("authenticateSocial: %v", err)
+			}
+			if got.DisplayName != c.want {
+				t.Errorf("displayName = %q, beklenen %q", got.DisplayName, c.want)
+			}
+			if stored := loadUser(t, gdb, got.ID).DisplayName; stored != c.want {
+				t.Errorf("saklanan displayName = %q, beklenen %q", stored, c.want)
+			}
+		})
+	}
+}

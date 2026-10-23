@@ -335,7 +335,10 @@ func (h *Handlers) authenticateSocialOnce(provider string, si *auth.SocialIdenti
 		return nil, err
 	}
 
-	email := strings.ToLower(strings.TrimSpace(si.Email))
+	email := dto.NormalizeEmail(si.Email)
+	if len(email) > dto.MaxEmailLength {
+		email = "" // sağlayıcı makul olmayan bir adres verdi: eşleme yapılmaz
+	}
 	if email == "" {
 		// Sağlayıcı email vermeyebilir (Apple sonraki girişlerde) ya da verdiği
 		// adres doğrulanmamış olabilir; ikisinde de e-postayla eşleme yapılmaz.
@@ -346,12 +349,14 @@ func (h *Handlers) authenticateSocialOnce(provider string, si *auth.SocialIdenti
 	txErr := h.DB.Transaction(func(tx *gorm.DB) error {
 		findErr := tx.Where("email = ?", email).First(&user).Error
 		if errors.Is(findErr, gorm.ErrRecordNotFound) {
-			name := displayName
+			// İstemcinin ya da sağlayıcının verdiği ad sınırsız ve denetimsizdir:
+			// temizlenir ve kısaltılır (reddedilmez, giriş bozulmasın).
+			name := dto.SanitizeDisplayName(displayName)
 			if name == "" {
-				name = si.Name
+				name = dto.SanitizeDisplayName(si.Name)
 			}
 			if name == "" {
-				name = emailLocalPart(email)
+				name = dto.SanitizeDisplayName(emailLocalPart(email))
 			}
 			user = models.User{Email: email, DisplayName: name, CurrentLevel: "A1", CurrentGroup: 1}
 			if err := tx.Create(&user).Error; err != nil {
@@ -653,12 +658,15 @@ func (h *Handlers) linkProvider(c *fiber.Ctx, userID, provider string, si *auth.
 		return err
 	}
 	sub := si.Subject
-	email := strings.ToLower(si.Email)
+	var email *string
+	if e := dto.NormalizeEmail(si.Email); e != "" && len(e) <= dto.MaxEmailLength {
+		email = &e
+	}
 	if err := h.DB.Create(&models.AuthIdentity{
 		UserID:          userID,
 		Provider:        provider,
 		ProviderSubject: &sub,
-		Email:           &email,
+		Email:           email,
 	}).Error; err != nil {
 		// Kimlik bu arada başka bir hesaba bağlandı ya da hesapta bu sağlayıcının
 		// başka bir kimliği var. Diğer hatalar geçicidir: 500 döner.
