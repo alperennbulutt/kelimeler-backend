@@ -49,8 +49,9 @@ func (h *Handlers) GetProgressForGroup(c *fiber.Ctx) error {
 // satırından alınır (gövdedeki level/group/english/turkish yok sayılır; mevcut
 // istemci onları göndermeye devam edebilir).
 //
-// İdempotenttir: kelimenin zaten ilerlemesi varsa (kutu 2 ve üstü) kayıt
-// değiştirilmez ve mevcut durum döner. Aksi halde iki cihaz ya da bayat bir
+// İdempotenttir: kelimenin zaten ilerlemesi varsa (kutu 2 ve üstü) ilerleme
+// değiştirilmez (yalnızca sözlükten farklı yazılmış seviye/grup/metin
+// düzeltilir) ve mevcut durum döner. Aksi halde iki cihaz ya da bayat bir
 // öğrenme destesi, ilerlemiş bir kelimeyi sessizce kutu 2'ye geri atardı.
 // Yalnızca kutu 1'deki eski (Firestore'dan gelen) kayıtlar kutu 2'ye alınır.
 func (h *Handlers) LearnWord(c *fiber.Ctx) error {
@@ -93,6 +94,20 @@ func (h *Handlers) LearnWord(c *fiber.Ctx) error {
 		return res.Error
 	}
 	if res.RowsAffected == 0 {
+		// İlerleme (kutu, tarihler, sayaçlar) korunur; yalnızca sözlükten gelen
+		// alanlar sözlük satırıyla eşitlenir. Seviyesi/grubu farklı yazılmış eski
+		// bir kayıt aksi halde ne öğrenme ekranının grup sorgusunda ne de harita
+		// tamamlanmasında görünür: kelime her seferinde yeniden sorulur ve grup
+		// hiçbir zaman tamamlanmış sayılmaz (eski kod bunu kutu 2'ye sıfırlayarak
+		// düzeltiyordu).
+		if err := h.DB.Model(&models.WordProgress{}).
+			Where("user_id = ? AND word_id = ? AND (level <> ? OR grp <> ? OR english <> ? OR turkish <> ?)",
+				userID, word.ID, word.Level, word.Grp, word.English, word.Turkish).
+			Updates(map[string]any{
+				"level": word.Level, "grp": word.Grp, "english": word.English, "turkish": word.Turkish,
+			}).Error; err != nil {
+			return err
+		}
 		var existing models.WordProgress
 		if err := h.DB.Where("user_id = ? AND word_id = ?", userID, word.ID).First(&existing).Error; err != nil {
 			return err

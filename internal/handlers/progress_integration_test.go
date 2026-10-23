@@ -671,3 +671,208 @@ func TestUclar_VeritabaniHatasindaSahte200Donmez(t *testing.T) {
 		})
 	}
 }
+
+// --- QA: eşzamanlılık ve gün sınırı ---
+
+// eszamanli, n isteği aynı anda başlatır (kilit beklemeden) ve durum kodlarını
+// döner.
+func eszamanli(app *fiber.App, n int, build func(i int) *http.Request) []int {
+	start := make(chan struct{})
+	done := make(chan int, n)
+	for i := 0; i < n; i++ {
+		req := build(i)
+		go func() {
+			<-start
+			res, err := app.Test(req, -1)
+			if err != nil {
+				done <- 0
+				return
+			}
+			res.Body.Close()
+			done <- res.StatusCode
+		}()
+	}
+	close(start)
+	statuses := make([]int, 0, n)
+	for i := 0; i < n; i++ {
+		statuses = append(statuses, <-done)
+	}
+	return statuses
+}
+
+func TestLearnWord_EszamanliAyniKelimeTekKayit(t *testing.T) {
+	// İki cihazdan ya da yinelenen istekle aynı kelime aynı anda öğrenilir:
+	// tek satır oluşur, hepsi 200 döner, kutu 2'dir.
+	gdb, u, app := newProgressTest(t)
+	w := testDictWord(t, gdb, "itest_learn_conc", "A1", 1, 1)
+
+	statuses := eszamanli(app, 8, func(int) *http.Request {
+		return learnRequest(fiber.Map{"wordId": w.ID})
+	})
+	for _, s := range statuses {
+		if s != fiber.StatusOK {
+			t.Fatalf("eşzamanlı learn status = %d, beklenen 200 (tümü: %v)", s, statuses)
+		}
+	}
+	var cnt int64
+	gdb.Model(&models.WordProgress{}).Where("user_id = ? AND word_id = ?", u.ID, w.ID).Count(&cnt)
+	if cnt != 1 {
+		t.Errorf("satır sayısı = %d, beklenen 1", cnt)
+	}
+	if got := loadProgress(t, gdb, u.ID, w.ID).Box; got != 2 {
+		t.Errorf("box = %d, beklenen 2", got)
+	}
+}
+
+func TestLearnWord_EszamanliIlerlemisKelimeyiSifirlamaz(t *testing.T) {
+	gdb, u, app := newProgressTest(t)
+	w := testDictWord(t, gdb, "itest_learn_conc_adv", "A1", 1, 1)
+	next := time.Now().AddDate(0, 0, 10)
+	setProgress(t, gdb, u.ID, w, 4, &next)
+
+	statuses := eszamanli(app, 6, func(int) *http.Request {
+		return learnRequest(fiber.Map{"wordId": w.ID})
+	})
+	for _, s := range statuses {
+		if s != fiber.StatusOK {
+			t.Fatalf("status = %d (tümü: %v)", s, statuses)
+		}
+	}
+	if got := loadProgress(t, gdb, u.ID, w.ID).Box; got != 4 {
+		t.Errorf("box = %d, beklenen 4 (ilerlemiş kelime sıfırlanmamalı)", got)
+	}
+}
+
+func TestSwipe_FarkliKelimelerEszamanliSayacVeTotalLearnedKaybolmaz(t *testing.T) {
+	// Aynı kullanıcının farklı kelimelerine eşzamanlı doğru cevaplar: her biri
+	// sayılır (30/60/90 kapıları) ve kutu 6'ya giren her kelime total_learned'e
+	// yansır; COUNT birbirinin commit'ini görmeden eskimez.
+	gdb, u, app := newProgressTest(t)
+	const n = 6
+	for i := 0; i < n; i++ {
+		setProgress(t, gdb, u.ID, models.DictionaryWord{ID: fmt.Sprintf("itest_conc5_%d", i), Level: "A1", Grp: 1}, 5, nil)
+	}
+
+	statuses := kilitAltindaEszamanli(t, gdb, app, u.ID, n, func(i int) *http.Request {
+		return progressSwipe(fmt.Sprintf("itest_conc5_%d", i), "right")
+	})
+	for _, s := range statuses {
+		if s != fiber.StatusOK {
+			t.Fatalf("status = %d (tümü: %v)", s, statuses)
+		}
+	}
+	user := loadUser(t, gdb, u.ID)
+	if user.ReviewAnswersToday != n {
+		t.Errorf("review_answers_today = %d, beklenen %d", user.ReviewAnswersToday, n)
+	}
+	if user.TotalLearned != n {
+		t.Errorf("total_learned = %d, beklenen %d", user.TotalLearned, n)
+	}
+	var learned int64
+	gdb.Model(&models.WordProgress{}).Where("user_id = ? AND box = 6", u.ID).Count(&learned)
+	if learned != n {
+		t.Errorf("kutu 6'daki kelime = %d, beklenen %d", learned, n)
+	}
+}
+
+func TestSwipe_EszamanliSagVeSolTekCevap(t *testing.T) {
+	// İki cihazdan aynı kelimeye biri doğru biri yanlış cevap: hangisi önce
+	// gelirse uygulanır, ikincisi vadesi geçtiği için no-op'tur.
+	gdb, u, app := newProgressTest(t)
+	w := models.DictionaryWord{ID: "itest_conc_lr", Level: "A1", Grp: 1}
+	setProgress(t, gdb, u.ID, w, 3, nil)
+
+	dirs := []string{"right", "left"}
+	statuses := satirKilidiAltindaEszamanli(t, gdb, app,
+		"SELECT 1 FROM word_progresses WHERE word_id = ? FOR UPDATE", w.ID, 2,
+		func(i int) *http.Request { return progressSwipe(w.ID, dirs[i]) })
+	for _, s := range statuses {
+		if s != fiber.StatusOK {
+			t.Fatalf("status = %d (tümü: %v)", s, statuses)
+		}
+	}
+	wp := loadProgress(t, gdb, u.ID, w.ID)
+	if wp.Box != 4 && wp.Box != 2 {
+		t.Errorf("box = %d, beklenen 4 (önce doğru) ya da 2 (önce yanlış)", wp.Box)
+	}
+	if got := loadUser(t, gdb, u.ID).ReviewAnswersToday; got != 1 {
+		t.Errorf("review_answers_today = %d, beklenen 1", got)
+	}
+}
+
+func TestSwipe_ListedekiHerKelimeKabulEdilirDigerleriNoOp(t *testing.T) {
+	// Kullanım günü (İstanbul) gece yarısı sınırında tekrar listesi ile swipe
+	// vadesi aynı kümeyi kullanır: listede olan kelime ilerler, olmayan değişmez.
+	start, end := usageDay()
+	if time.Until(end) < 10*time.Second {
+		t.Skip("kullanım gününün bitimine çok yakın; sınır kayabilir")
+	}
+	gdb, u, app := newProgressTest(t)
+	nexts := map[string]*time.Time{
+		"itest_bd_nil":       nil,
+		"itest_bd_prevday":   ptrTime(start.Add(-time.Second)),
+		"itest_bd_midnight":  ptrTime(start),
+		"itest_bd_lastsec":   ptrTime(end.Add(-time.Second)),
+		"itest_bd_tomorrow":  ptrTime(end),
+		"itest_bd_tomorrow1": ptrTime(end.Add(time.Second)),
+	}
+	for id, next := range nexts {
+		setProgress(t, gdb, u.ID, models.DictionaryWord{ID: id, Level: "A1", Grp: 1}, 3, next)
+	}
+
+	inList := map[string]bool{}
+	for _, id := range wordIDs(reviewList(t, app, "/progress/review/box/3")) {
+		inList[id] = true
+	}
+	if len(inList) != 4 {
+		t.Fatalf("listede %d kelime, beklenen 4: %v", len(inList), inList)
+	}
+	for id := range nexts {
+		if status, body := send(t, app, progressSwipe(id, "right")); status != fiber.StatusOK {
+			t.Fatalf("%s swipe status = %d (body: %v)", id, status, body)
+		}
+		got := loadProgress(t, gdb, u.ID, id).Box
+		want := 3
+		if inList[id] {
+			want = 4
+		}
+		if got != want {
+			t.Errorf("%s: box = %d, beklenen %d (listede: %v)", id, got, want, inList[id])
+		}
+	}
+	if got := loadUser(t, gdb, u.ID).ReviewAnswersToday; got != 4 {
+		t.Errorf("review_answers_today = %d, beklenen 4", got)
+	}
+}
+
+func TestLearnWord_SeviyesiFarkliEskiKayitIlerlemesiKorunarakDuzeltilir(t *testing.T) {
+	// Firestore'dan gelen, seviyesi/grubu sözlükten farklı yazılmış ilerlemiş
+	// bir kayıt: öğrenme ekranı onu grup sorgusunda göremez ve learn çağırır.
+	// Kutu korunmalı ama seviye/grup sözlüğe eşitlenmeli; yoksa harita grubu
+	// hiçbir zaman tamamlanmış saymaz ve sonraki grup kilitli kalır.
+	gdb, u, app := newProgressTest(t)
+	h := New(gdb, &config.Config{AppEnv: "test"}, nil, nil)
+	words := testLevel(t, gdb, "A1", 2)[0]
+	next := time.Now().Add(72 * time.Hour).UTC().Truncate(time.Microsecond)
+	setProgress(t, gdb, u.ID, words[0], 2, nil)
+	setProgress(t, gdb, u.ID, models.DictionaryWord{ID: words[1].ID, Level: "B1", Grp: 7}, 4, &next)
+
+	if status, body := send(t, app, learnRequest(fiber.Map{"wordId": words[1].ID})); status != fiber.StatusOK {
+		t.Fatalf("status = %d (body: %v)", status, body)
+	}
+	wp := loadProgress(t, gdb, u.ID, words[1].ID)
+	if wp.Box != 4 || wp.NextReviewDate == nil || !wp.NextReviewDate.Equal(next) {
+		t.Errorf("ilerleme değişti: box=%d next=%v, beklenen box 4 next %v", wp.Box, wp.NextReviewDate, next)
+	}
+	if wp.Level != "A1" || wp.Grp != 1 || wp.English != words[1].English {
+		t.Errorf("sözlük alanları = %s:%d %q, beklenen A1:1 %q", wp.Level, wp.Grp, wp.English, words[1].English)
+	}
+
+	groups, err := h.computeLevelGroups(u.ID, "A1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || !groups[0].IsCompleted || groups[0].RemainingInBox1 != 0 {
+		t.Errorf("A1 grupları = %+v, beklenen grup 1 tamamlanmış", groups)
+	}
+}
