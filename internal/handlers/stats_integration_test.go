@@ -720,3 +720,180 @@ func TestStatsSummary_YanitSekliGeriyeUyumlu(t *testing.T) {
 		}
 	}
 }
+
+// eszamanliIstek, aynı isteği n goroutine'den aynı anda atar ve durum
+// kodlarıyla gövdeleri döner.
+func eszamanliIstek(t *testing.T, app *fiber.App, method, path string, n int) ([]int, []map[string]any) {
+	t.Helper()
+
+	type sonuc struct {
+		status int
+		body   map[string]any
+	}
+	basla := make(chan struct{})
+	done := make(chan sonuc, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			<-basla
+			res, err := app.Test(httptest.NewRequest(method, path, nil), -1)
+			if err != nil {
+				done <- sonuc{}
+				return
+			}
+			defer res.Body.Close()
+			var body map[string]any
+			_ = json.NewDecoder(res.Body).Decode(&body)
+			done <- sonuc{res.StatusCode, body}
+		}()
+	}
+	close(basla)
+
+	statuses := make([]int, 0, n)
+	bodies := make([]map[string]any, 0, n)
+	for i := 0; i < n; i++ {
+		r := <-done
+		statuses = append(statuses, r.status)
+		bodies = append(bodies, r.body)
+	}
+	return statuses, bodies
+}
+
+func TestLogDailyLogin_EszamanliGirislerTRGeceYarisindaTekSatir(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	app := statsApp(New(gdb, &config.Config{AppEnv: "test"}, nil, nil), u.ID)
+
+	// TR 23 Ekim 23:59:59 (20:59:59Z): son saniye hâlâ 23 Ekim.
+	if got := girisYap(t, app, utcAn(t, "2026-10-23T20:59:59Z")); got != 1 {
+		t.Fatalf("23:59:59 girişi serisi = %d, beklenen 1", got)
+	}
+
+	// TR 24 Ekim 00:00:00 (21:00:00Z) tam gece yarısında aynı kullanıcıdan 10
+	// eşzamanlı giriş: hepsi 200, tek satır, hepsi aynı seriyi (2) görür.
+	sabitSaat(t, utcAn(t, "2026-10-23T21:00:00Z"))
+	statuses, bodies := eszamanliIstek(t, app, http.MethodPost, "/stats/daily-login", 10)
+	for i, s := range statuses {
+		if s != fiber.StatusOK {
+			t.Fatalf("%d. eşzamanlı giriş status = %d (body: %v)", i+1, s, bodies[i])
+		}
+		if got := intField(t, bodies[i], "currentStreak"); got != 2 {
+			t.Errorf("%d. eşzamanlı giriş serisi = %d, beklenen 2", i+1, got)
+		}
+	}
+	if got, want := kayitliGunler(t, gdb, u.ID), []string{"2026-10-23", "2026-10-24"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("kayıtlı günler = %v, beklenen %v", got, want)
+	}
+}
+
+func TestStatsSummary_KilitsizEszamanliIsteklerdeHerRozetEnFazlaBirKez(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	app := statsApp(New(gdb, &config.Config{AppEnv: "test"}, nil, nil), u.ID)
+
+	// first_day + box_mastery_1 (bir kelime kutu 6'da) ilk özette kazanılır.
+	statsTestWord(t, gdb, u.ID, "itest_bb_eszamanli_1", "A1", 6)
+
+	statuses, bodies := eszamanliIstek(t, app, http.MethodGet, "/stats/summary", 8)
+	sayac := map[string]int{}
+	for i, s := range statuses {
+		if s != fiber.StatusOK {
+			t.Fatalf("%d. eşzamanlı özet status = %d (body: %v)", i+1, s, bodies[i])
+		}
+		for _, id := range yeniRozetler(t, bodies[i]) {
+			sayac[id]++
+		}
+	}
+	for _, id := range []string{"first_day", "box_mastery_1"} {
+		if sayac[id] != 1 {
+			t.Errorf("%s %d yanıtta yeni döndü, beklenen tam 1", id, sayac[id])
+		}
+	}
+	for id, n := range sayac {
+		if n > 1 {
+			t.Errorf("%s %d yanıtta yeni döndü", id, n)
+		}
+	}
+
+	var satirlar []struct {
+		BadgeID string
+		N       int
+	}
+	gdb.Raw(`SELECT badge_id, count(*) AS n FROM earned_badges WHERE user_id = ?
+		GROUP BY badge_id`, u.ID).Scan(&satirlar)
+	for _, r := range satirlar {
+		if r.N != 1 {
+			t.Errorf("%s için %d satır var, beklenen 1", r.BadgeID, r.N)
+		}
+		if sayac[r.BadgeID] != 1 {
+			t.Errorf("%s yazıldı ama %d yanıtta yeni bildirildi", r.BadgeID, sayac[r.BadgeID])
+		}
+	}
+}
+
+func TestSeviyeRozeti_HaritaKilidiyleTutarli(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	h := New(gdb, &config.Config{AppEnv: "test"}, nil, nil)
+	app := statsApp(h, u.ID)
+	app.Get("/map/levels/:level/groups", func(c *fiber.Ctx) error {
+		c.Locals("userID", u.ID)
+		return c.Next()
+	}, h.LevelGroups)
+
+	ids := testSozlukKelimeleri(t, gdb, "B2", 3)
+	testSozlukKelimeleri(t, gdb, "C1", 1)
+
+	// Sözlükteki bütün B2 kelimeleri kutu 2'de, biri hariç (kutu 1'de).
+	if err := gdb.Exec(`INSERT INTO word_progresses (user_id, word_id, level, grp, box, created_at, updated_at)
+		SELECT ?, id, level, grp, 2, now(), now() FROM dictionary_words WHERE level = 'B2'`, u.ID).Error; err != nil {
+		t.Fatalf("ilerleme yazılamadı: %v", err)
+	}
+	if err := gdb.Exec("UPDATE word_progresses SET box = 1 WHERE user_id = ? AND word_id = ?", u.ID, ids[0]).Error; err != nil {
+		t.Fatalf("ilerleme güncellenemedi: %v", err)
+	}
+
+	c1IlkGrupAcik := func() bool {
+		t.Helper()
+		res, err := app.Test(httptest.NewRequest(http.MethodGet, "/map/levels/C1/groups", nil), -1)
+		if err != nil {
+			t.Fatalf("GET /map/levels/C1/groups: %v", err)
+		}
+		defer res.Body.Close()
+		var groups []map[string]any
+		if err := json.NewDecoder(res.Body).Decode(&groups); err != nil || len(groups) == 0 {
+			t.Fatalf("C1 grupları çözülemedi (status %d): %v", res.StatusCode, err)
+		}
+		return groups[0]["isUnlocked"].(bool)
+	}
+
+	// B2 bitmeden ne rozet verilmeli ne de C1 açılmalı (eski 2200 eşiğinin hatası).
+	if rozetKazanildi(t, statsOzet(t, app), "level_B2") {
+		t.Fatalf("level_B2 bir B2 kelimesi kutu 1'deyken kazanıldı")
+	}
+	if c1IlkGrupAcik() {
+		t.Errorf("C1 B2 bitmeden açıldı")
+	}
+
+	if err := gdb.Exec("UPDATE word_progresses SET box = 2 WHERE user_id = ? AND word_id = ?", u.ID, ids[0]).Error; err != nil {
+		t.Fatalf("ilerleme güncellenemedi: %v", err)
+	}
+	body := statsOzet(t, app)
+	if !rozetKazanildi(t, body, "level_B2") || !statsIcerir(yeniRozetler(t, body), "level_B2") {
+		t.Fatalf("level_B2 B2 bitince yeni kazanılmadı: %v", yeniRozetler(t, body))
+	}
+	if !c1IlkGrupAcik() {
+		t.Errorf("C1 B2 bitip rozet kazanıldıktan sonra açılmadı")
+	}
+
+	// Rozet kalıcıdır: bir kelime kutu 1'e dönse de (earnedBefore) hem rozet hem
+	// harita hızlı yolu açık kalır.
+	if err := gdb.Exec("UPDATE word_progresses SET box = 1 WHERE user_id = ? AND word_id = ?", u.ID, ids[1]).Error; err != nil {
+		t.Fatalf("ilerleme güncellenemedi: %v", err)
+	}
+	if body := statsOzet(t, app); !rozetKazanildi(t, body, "level_B2") || len(yeniRozetler(t, body)) != 0 {
+		t.Errorf("level_B2 kalıcı değil ya da yeniden bildirildi: %v", yeniRozetler(t, body))
+	}
+	if !c1IlkGrupAcik() {
+		t.Errorf("C1 kazanılmış level_B2 rozetine rağmen kilitlendi")
+	}
+}
