@@ -32,7 +32,11 @@ func (h *Handlers) loadLinkedProviders(userID string) ([]string, error) {
 }
 
 // linkedProviders, loadLinkedProviders'ın hatayı döndürmeyen eski biçimidir;
-// hata log'lanır ve boş liste döner. Yeni kod loadLinkedProviders kullanmalı.
+// hata log'lanır ve boş liste döner. Yeni kod loadLinkedProviders kullanmalı:
+// boş liste istemciye "bağlı yöntem yok" diye yanlış bilgi verir.
+//
+// Yalnızca user_handler.go (userJSON) için duruyor; o dosya hata döndüren
+// biçime geçince kaldırılmalı.
 func (h *Handlers) linkedProviders(userID string) []string {
 	providers, err := h.loadLinkedProviders(userID)
 	if err != nil {
@@ -114,6 +118,10 @@ func (h *Handlers) issueTokens(user *models.User) (*dto.AuthResponse, error) {
 	return h.authResponse(user, pair)
 }
 
+// respondUser, kullanıcıyı {"user": ...} olarak döner. Yalnızca bulunamayan
+// satır 404 user_not_found'dur; diğer veritabanı hataları (bağlı yöntemlerin
+// okunması dahil) 500 döner: bağlantı hatasını "hesap yok" ya da "bağlı yöntem
+// yok" diye bildirmek istemciyi yanlış yönlendirir.
 func (h *Handlers) respondUser(c *fiber.Ctx, userID string) error {
 	var user models.User
 	if err := h.DB.First(&user, "id = ?", userID).Error; err != nil {
@@ -209,13 +217,21 @@ func (h *Handlers) Login(c *fiber.Ctx) error {
 	}
 	req.Email = dto.NormalizeEmail(req.Email)
 
+	// Yalnızca bulunamayan kayıt yanlış kimlik bilgisidir; veritabanı hatası
+	// 500 döner (401 istemciye "parola yanlış" der).
 	var user models.User
 	if err := h.DB.Where("email = ?", req.Email).First(&user).Error; err != nil {
-		return apiErr(fiber.StatusUnauthorized, "invalid_credentials", "email veya parola hatalı")
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return apiErr(fiber.StatusUnauthorized, "invalid_credentials", "email veya parola hatalı")
+		}
+		return err
 	}
 	var identity models.AuthIdentity
 	if err := h.DB.Where("user_id = ? AND provider = ?", user.ID, "password").First(&identity).Error; err != nil {
-		return apiErr(fiber.StatusUnauthorized, "invalid_credentials", "email veya parola hatalı")
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return apiErr(fiber.StatusUnauthorized, "invalid_credentials", "email veya parola hatalı")
+		}
+		return err
 	}
 	if identity.PasswordHash == nil || !auth.VerifyPassword(*identity.PasswordHash, req.Password) {
 		return apiErr(fiber.StatusUnauthorized, "invalid_credentials", "email veya parola hatalı")
