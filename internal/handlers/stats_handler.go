@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"sort"
 	"strconv"
 	"time"
 
@@ -13,57 +14,61 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+// statsNow, istatistik uçlarının saatidir; testler gün sınırını sınamak için değiştirir.
+var statsNow = time.Now
+
 // LogDailyLogin: POST /stats/daily-login — bugünün girişini idempotent kaydeder, streak döner.
+//
+// "Bugün", kullanım konumundaki (UsageLocation) gündür ve "YYYY-MM-DD" metni
+// olarak yazılır (bkz. services.UsageDate: date kolonu + PreferSimpleProtocol).
 func (h *Handlers) LogDailyLogin(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
-	dl := models.DailyLogin{UserID: userID, LoginDate: startOfDay(time.Now())}
-	if err := h.DB.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "user_id"}, {Name: "login_date"}},
-		DoNothing: true,
-	}).Create(&dl).Error; err != nil {
+	now := statsNow()
+	if err := h.DB.Exec(`INSERT INTO daily_logins (user_id, login_date, created_at)
+		VALUES (?, CAST(? AS date), ?)
+		ON CONFLICT (user_id, login_date) DO NOTHING`,
+		userID, services.UsageDate(now), now.UTC()).Error; err != nil {
 		return err
 	}
-	streak, err := h.calculateStreak(userID)
+	days, err := h.loginDays(userID, now)
 	if err != nil {
 		return err
 	}
-	return c.JSON(fiber.Map{"currentStreak": streak})
+	return c.JSON(fiber.Map{"currentStreak": services.CalculateStreak(days, now)})
 }
 
-// calculateStreak, son 365 günün giriş kayıtlarından streak hesaplar.
-func (h *Handlers) calculateStreak(userID string) (int, error) {
-	now := time.Now()
-	from := startOfDay(now).AddDate(0, 0, -365)
-	var dates []time.Time
-	if err := h.DB.Model(&models.DailyLogin{}).
-		Where("user_id = ? AND login_date >= ?", userID, from).
-		Pluck("login_date", &dates).Error; err != nil {
-		return 0, err
+// loginDays, son 365 günün giriş günlerini kullanım günü kümesi olarak döndürür.
+// Bir gün fazlası okunur: eski (UTC günlü) bir kaydın created_at'i pencerenin
+// ilk gününe düşebilir (bkz. services.LoginDays).
+func (h *Handlers) loginDays(userID string, now time.Time) (map[string]bool, error) {
+	var rows []services.LoginRecord
+	if err := h.DB.Raw(`SELECT to_char(login_date, 'YYYY-MM-DD') AS login_date, created_at
+		FROM daily_logins
+		WHERE user_id = ? AND login_date >= CAST(? AS date)`,
+		userID, services.UsageDateDaysAgo(now, 366)).Scan(&rows).Error; err != nil {
+		return nil, err
 	}
-
-	set := make(map[string]bool, len(dates))
-	for _, d := range dates {
-		set[services.FormatDate(d)] = true
-	}
-	return services.CalculateStreak(set, now), nil
+	return services.LoginDays(rows), nil
 }
 
-// LoginDates: GET /stats/login-dates — son 365 günün giriş tarihleri (takvim için).
+// LoginDates: GET /stats/login-dates — son 365 günün giriş tarihleri (takvim için, yeniden eskiye).
 func (h *Handlers) LoginDates(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
-	from := startOfDay(time.Now()).AddDate(0, 0, -365)
-	var dates []time.Time
-	if err := h.DB.Model(&models.DailyLogin{}).
-		Where("user_id = ? AND login_date >= ?", userID, from).
-		Order("login_date DESC").
-		Pluck("login_date", &dates).Error; err != nil {
+	now := statsNow()
+	days, err := h.loginDays(userID, now)
+	if err != nil {
 		return err
 	}
 
-	out := make([]string, 0, len(dates))
-	for _, d := range dates {
-		out = append(out, services.FormatDate(d))
+	from, today := services.UsageDateDaysAgo(now, 365), services.UsageDateDaysAgo(now, 0)
+	out := make([]string, 0, len(days))
+	for d := range days {
+		// "YYYY-MM-DD" metinleri sözlük sırasıyla tarih sırasıdır.
+		if d >= from && d <= today {
+			out = append(out, d)
+		}
 	}
+	sort.Sort(sort.Reverse(sort.StringSlice(out)))
 	return c.JSON(fiber.Map{"dates": out})
 }
 
@@ -108,30 +113,20 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 		}
 	}
 
-	// 3) Son 10 gün giriş verisi
-	now := time.Now()
-	tenDaysAgo := startOfDay(now).AddDate(0, 0, -10)
-	var loginDates []time.Time
-	if err := h.DB.Model(&models.DailyLogin{}).
-		Where("user_id = ? AND login_date >= ?", userID, tenDaysAgo).
-		Pluck("login_date", &loginDates).Error; err != nil {
+	// 3) Son 10 gün giriş verisi + streak (aynı küme, kullanım günüyle)
+	now := statsNow()
+	loggedSet, err := h.loginDays(userID, now)
+	if err != nil {
 		return err
-	}
-	loggedSet := map[string]bool{}
-	for _, d := range loginDates {
-		loggedSet[services.FormatDate(d)] = true
 	}
 	weeklyLoginData := map[string]bool{}
 	for i := 0; i < 10; i++ {
-		dStr := services.FormatDate(now.AddDate(0, 0, -i))
+		dStr := services.UsageDateDaysAgo(now, i)
 		weeklyLoginData[dStr] = loggedSet[dStr]
 	}
 
 	// 4) Streak + rozetler
-	streak, err := h.calculateStreak(userID)
-	if err != nil {
-		return err
-	}
+	streak := services.CalculateStreak(loggedSet, now)
 
 	earnedBefore := map[string]bool{}
 	var earnedIDs []string
