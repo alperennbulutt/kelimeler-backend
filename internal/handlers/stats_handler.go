@@ -17,27 +17,35 @@ import (
 func (h *Handlers) LogDailyLogin(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	dl := models.DailyLogin{UserID: userID, LoginDate: startOfDay(time.Now())}
-	h.DB.Clauses(clause.OnConflict{
+	if err := h.DB.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "user_id"}, {Name: "login_date"}},
 		DoNothing: true,
-	}).Create(&dl)
-	return c.JSON(fiber.Map{"currentStreak": h.calculateStreak(userID)})
+	}).Create(&dl).Error; err != nil {
+		return err
+	}
+	streak, err := h.calculateStreak(userID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(fiber.Map{"currentStreak": streak})
 }
 
 // calculateStreak, son 365 günün giriş kayıtlarından streak hesaplar.
-func (h *Handlers) calculateStreak(userID string) int {
+func (h *Handlers) calculateStreak(userID string) (int, error) {
 	now := time.Now()
 	from := startOfDay(now).AddDate(0, 0, -365)
 	var dates []time.Time
-	h.DB.Model(&models.DailyLogin{}).
+	if err := h.DB.Model(&models.DailyLogin{}).
 		Where("user_id = ? AND login_date >= ?", userID, from).
-		Pluck("login_date", &dates)
+		Pluck("login_date", &dates).Error; err != nil {
+		return 0, err
+	}
 
 	set := make(map[string]bool, len(dates))
 	for _, d := range dates {
 		set[services.FormatDate(d)] = true
 	}
-	return services.CalculateStreak(set, now)
+	return services.CalculateStreak(set, now), nil
 }
 
 // LoginDates: GET /stats/login-dates — son 365 günün giriş tarihleri (takvim için).
@@ -45,10 +53,12 @@ func (h *Handlers) LoginDates(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	from := startOfDay(time.Now()).AddDate(0, 0, -365)
 	var dates []time.Time
-	h.DB.Model(&models.DailyLogin{}).
+	if err := h.DB.Model(&models.DailyLogin{}).
 		Where("user_id = ? AND login_date >= ?", userID, from).
 		Order("login_date DESC").
-		Pluck("login_date", &dates)
+		Pluck("login_date", &dates).Error; err != nil {
+		return err
+	}
 
 	out := make([]string, 0, len(dates))
 	for _, d := range dates {
@@ -63,8 +73,10 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 
 	// 1) box==6 öğrenilen kelimeler (lastReviewDate desc)
 	var learned []models.WordProgress
-	h.DB.Where("user_id = ? AND box = 6", userID).
-		Order("last_review_date DESC NULLS LAST").Find(&learned)
+	if err := h.DB.Where("user_id = ? AND box = 6", userID).
+		Order("last_review_date DESC NULLS LAST").Find(&learned).Error; err != nil {
+		return err
+	}
 	totalLearned := len(learned)
 	box6ByLevel := map[string]int{}
 	for _, w := range learned {
@@ -77,7 +89,9 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 
 	// 2) box>=2 aktif kelimeler
 	var active []models.WordProgress
-	h.DB.Where("user_id = ? AND box >= 2", userID).Find(&active)
+	if err := h.DB.Where("user_id = ? AND box >= 2", userID).Find(&active).Error; err != nil {
+		return err
+	}
 	activeByLevel := map[string]int{}
 	var box2, box3, box4, box5 int
 	for _, w := range active {
@@ -98,9 +112,11 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 	now := time.Now()
 	tenDaysAgo := startOfDay(now).AddDate(0, 0, -10)
 	var loginDates []time.Time
-	h.DB.Model(&models.DailyLogin{}).
+	if err := h.DB.Model(&models.DailyLogin{}).
 		Where("user_id = ? AND login_date >= ?", userID, tenDaysAgo).
-		Pluck("login_date", &loginDates)
+		Pluck("login_date", &loginDates).Error; err != nil {
+		return err
+	}
 	loggedSet := map[string]bool{}
 	for _, d := range loginDates {
 		loggedSet[services.FormatDate(d)] = true
@@ -112,11 +128,16 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 	}
 
 	// 4) Streak + rozetler
-	streak := h.calculateStreak(userID)
+	streak, err := h.calculateStreak(userID)
+	if err != nil {
+		return err
+	}
 
 	earnedBefore := map[string]bool{}
 	var earnedIDs []string
-	h.DB.Model(&models.EarnedBadge{}).Where("user_id = ?", userID).Pluck("badge_id", &earnedIDs)
+	if err := h.DB.Model(&models.EarnedBadge{}).Where("user_id = ?", userID).Pluck("badge_id", &earnedIDs).Error; err != nil {
+		return err
+	}
 	for _, id := range earnedIDs {
 		earnedBefore[id] = true
 	}
@@ -134,7 +155,9 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 		for _, id := range newlyEarned {
 			rows = append(rows, models.EarnedBadge{UserID: userID, BadgeID: id, EarnedAt: now})
 		}
-		h.DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&rows)
+		if err := h.DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&rows).Error; err != nil {
+			return err
+		}
 	}
 
 	badgeDTOs := toBadgeDTOs(allBadges)
@@ -149,6 +172,11 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 		}
 	}
 
+	lastLearned, err := h.toLearnedWordDTOs(lastFive)
+	if err != nil {
+		return err
+	}
+
 	return c.JSON(dto.StatsSummaryDTO{
 		TotalLearned:      totalLearned,
 		CurrentStreak:     streak,
@@ -160,7 +188,7 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 		Box5Count:         box5,
 		WeeklyLoginData:   weeklyLoginData,
 		Badges:            badgeDTOs,
-		LastLearnedWords:  h.toLearnedWordDTOs(lastFive),
+		LastLearnedWords:  lastLearned,
 		TotalWordsByLevel: services.LevelTargets,
 		NewlyEarnedBadges: newlyDTOs,
 	})
@@ -182,19 +210,27 @@ func (h *Handlers) LearnedWords(c *fiber.Ctx) error {
 	}
 
 	var total int64
-	base.Count(&total)
+	if err := base.Count(&total).Error; err != nil {
+		return err
+	}
 
 	var words []models.WordProgress
-	base.Order("last_review_date DESC NULLS LAST").Limit(limit).Offset(offset).Find(&words)
+	if err := base.Order("last_review_date DESC NULLS LAST").Limit(limit).Offset(offset).Find(&words).Error; err != nil {
+		return err
+	}
 
+	items, err := h.toLearnedWordDTOs(words)
+	if err != nil {
+		return err
+	}
 	return c.JSON(dto.LearnedWordsPageDTO{
-		Items: h.toLearnedWordDTOs(words),
+		Items: items,
 		Total: int(total),
 	})
 }
 
 // toLearnedWordDTOs, eksik english/turkish'i dictionary'den doldurarak DTO'ya çevirir.
-func (h *Handlers) toLearnedWordDTOs(words []models.WordProgress) []dto.LearnedWordDTO {
+func (h *Handlers) toLearnedWordDTOs(words []models.WordProgress) ([]dto.LearnedWordDTO, error) {
 	var missingIDs []string
 	for _, w := range words {
 		if w.English == "" {
@@ -204,7 +240,9 @@ func (h *Handlers) toLearnedWordDTOs(words []models.WordProgress) []dto.LearnedW
 	dictMap := map[string]models.DictionaryWord{}
 	if len(missingIDs) > 0 {
 		var dws []models.DictionaryWord
-		h.DB.Where("id IN ?", missingIDs).Find(&dws)
+		if err := h.DB.Where("id IN ?", missingIDs).Find(&dws).Error; err != nil {
+			return nil, err
+		}
 		for _, d := range dws {
 			dictMap[d.ID] = d
 		}
@@ -229,7 +267,7 @@ func (h *Handlers) toLearnedWordDTOs(words []models.WordProgress) []dto.LearnedW
 			LastReviewDate: w.LastReviewDate,
 		})
 	}
-	return out
+	return out, nil
 }
 
 func toBadgeDTOs(badges []services.ComputedBadge) []dto.BadgeDTO {
