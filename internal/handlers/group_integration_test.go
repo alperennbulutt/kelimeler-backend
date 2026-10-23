@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
+	"time"
 
 	"kelimeler-backend/internal/config"
+	"kelimeler-backend/internal/dto"
 	"kelimeler-backend/internal/middleware"
 	"kelimeler-backend/internal/models"
 
@@ -348,4 +351,150 @@ func TestSetCurrentGroup_UzunAlanlar400(t *testing.T) {
 		}
 	}
 	assertPointer(t, gdb, u.ID, "A1", 1)
+}
+
+// --- GET /map/levels/:level/groups ---
+
+func levelGroups(t *testing.T, app *fiber.App, level string) []dto.LevelGroupDTO {
+	t.Helper()
+
+	status, raw := getJSON(t, app, "/map/levels/"+level+"/groups")
+	if status != fiber.StatusOK {
+		t.Fatalf("GET groups(%s) status = %d (body: %s)", level, status, raw)
+	}
+	var groups []dto.LevelGroupDTO
+	if err := json.Unmarshal(raw, &groups); err != nil || groups == nil {
+		t.Fatalf("gruplar çözülemedi: %v (body: %s)", err, raw)
+	}
+	return groups
+}
+
+func grp(n, total, remaining int, completed, unlocked, started bool) dto.LevelGroupDTO {
+	return dto.LevelGroupDTO{
+		GroupNumber: n, TotalWords: total, RemainingInBox1: remaining,
+		IsCompleted: completed, IsUnlocked: unlocked, HasStarted: started,
+	}
+}
+
+// mapScenario, harita testlerinin ortak verisidir:
+//
+//	A1 grup 1: iki kelime de kutu 2+ (tamamlandı)
+//	A1 grup 2: bir kelime kutu 3, biri kutu 1 (başladı, 1 kelime kaldı)
+//	A1 grup 3: başlanmadı; tek kaydı başka seviyeye yazılmış (sayılmaz)
+func mapScenario(t *testing.T, gdb *gorm.DB, userID string) map[string][][]models.DictionaryWord {
+	t.Helper()
+
+	levels := seedGroupLevels(t, gdb)
+	a1 := levels["A1"]
+	setProgress(t, gdb, userID, a1[0][0], 2, nil)
+	setProgress(t, gdb, userID, a1[0][1], 6, nil)
+	setProgress(t, gdb, userID, a1[1][0], 3, nil)
+	setProgress(t, gdb, userID, a1[1][1], 1, nil)
+	mismatched := a1[2][0]
+	mismatched.Level = "B1"
+	setProgress(t, gdb, userID, mismatched, 2, nil)
+	return levels
+}
+
+func TestLevelGroups_SiraliKilitVeIlerleme(t *testing.T) {
+	gdb, u, app := newGroupTest(t, nil)
+	mapScenario(t, gdb, u.ID)
+
+	want := []dto.LevelGroupDTO{
+		grp(1, 2, 0, true, true, true),
+		grp(2, 2, 1, false, true, true),
+		// Önceki grup bitmedi ve bu gruba başlanmadı: kilitli.
+		grp(3, 2, 2, false, false, false),
+	}
+	if got := levelGroups(t, app, "A1"); !reflect.DeepEqual(got, want) {
+		t.Errorf("A1 grupları = %+v\nbeklenen %+v", got, want)
+	}
+
+	// A1 bitmediği (ve rozeti olmadığı) için A2'nin tamamı kilitli.
+	wantA2 := []dto.LevelGroupDTO{
+		grp(1, 2, 2, false, false, false),
+		grp(2, 2, 2, false, false, false),
+	}
+	if got := levelGroups(t, app, "A2"); !reflect.DeepEqual(got, wantA2) {
+		t.Errorf("A2 grupları = %+v\nbeklenen %+v", got, wantA2)
+	}
+
+	// C2'nin önceki seviyesinde (C1) hiç kelime yok: tamamlanmış sayılmaz.
+	if got := levelGroups(t, app, "C2"); got[0].IsUnlocked {
+		t.Errorf("C2 grup 1 açık, önceki seviye tamamlanmadı: %+v", got)
+	}
+
+	if got := levelGroups(t, app, "ZZ"); len(got) != 0 {
+		t.Errorf("bilinmeyen seviye = %+v, beklenen boş liste", got)
+	}
+}
+
+func TestLevelGroups_OncekiSeviyeRozetleAcilir(t *testing.T) {
+	gdb, u, app := newGroupTest(t, nil)
+	mapScenario(t, gdb, u.ID)
+	if err := gdb.Create(&models.EarnedBadge{UserID: u.ID, BadgeID: "level_A1", EarnedAt: time.Now()}).Error; err != nil {
+		t.Fatalf("rozet yazılamadı: %v", err)
+	}
+
+	want := []dto.LevelGroupDTO{
+		grp(1, 2, 2, false, true, false),
+		grp(2, 2, 2, false, false, false),
+	}
+	if got := levelGroups(t, app, "A2"); !reflect.DeepEqual(got, want) {
+		t.Errorf("A2 grupları = %+v\nbeklenen %+v", got, want)
+	}
+}
+
+func TestLevelGroups_OncekiSeviyeTamamlaninca(t *testing.T) {
+	gdb, u, app := newGroupTest(t, nil)
+	levels := mapScenario(t, gdb, u.ID)
+	a1 := levels["A1"]
+	// A1'in kalan kelimeleri de öğrenilince (rozet olmadan) A2 açılır.
+	gdb.Model(&models.WordProgress{}).Where("user_id = ? AND word_id = ?", u.ID, a1[1][1].ID).Update("box", 2)
+	gdb.Model(&models.WordProgress{}).Where("user_id = ? AND word_id = ?", u.ID, a1[2][0].ID).Update("level", "A1")
+	setProgress(t, gdb, u.ID, a1[2][1], 4, nil)
+
+	wantA1 := []dto.LevelGroupDTO{
+		grp(1, 2, 0, true, true, true),
+		grp(2, 2, 0, true, true, true),
+		grp(3, 2, 0, true, true, true),
+	}
+	if got := levelGroups(t, app, "A1"); !reflect.DeepEqual(got, wantA1) {
+		t.Errorf("A1 grupları = %+v\nbeklenen %+v", got, wantA1)
+	}
+	wantA2 := []dto.LevelGroupDTO{
+		grp(1, 2, 2, false, true, false),
+		grp(2, 2, 2, false, false, false),
+	}
+	if got := levelGroups(t, app, "A2"); !reflect.DeepEqual(got, wantA2) {
+		t.Errorf("A2 grupları = %+v\nbeklenen %+v", got, wantA2)
+	}
+}
+
+func TestLevelGroups_TestModuHepsiAcik(t *testing.T) {
+	gdb, u, app := newGroupTest(t, &config.Config{AppEnv: "test", TestModeUnlockAll: true})
+	mapScenario(t, gdb, u.ID)
+
+	for _, level := range []string{"A1", "A2"} {
+		for _, g := range levelGroups(t, app, level) {
+			if !g.IsUnlocked {
+				t.Errorf("%s grup %d kilitli, test modunda hepsi açık olmalı", level, g.GroupNumber)
+			}
+		}
+	}
+}
+
+func TestMaxGroupForLevel(t *testing.T) {
+	gdb, _, app := newGroupTest(t, nil)
+	seedGroupLevels(t, gdb)
+
+	for level, want := range map[string]int{"A1": 3, "A2": 2, "ZZ": 0} {
+		status, raw := getJSON(t, app, "/map/levels/"+level+"/max-group")
+		var body struct {
+			MaxGroup int `json:"maxGroup"`
+		}
+		if status != fiber.StatusOK || json.Unmarshal(raw, &body) != nil || body.MaxGroup != want {
+			t.Errorf("max-group(%s) = %d %s, beklenen 200 ve %d", level, status, raw, want)
+		}
+	}
 }
