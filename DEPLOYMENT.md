@@ -44,10 +44,10 @@ Depo özelse Coolify'de kaynak olarak **GitHub App** (Private Repository) kullan
 
 | Anahtar | Değer |
 |---|---|
-| `APP_ENV` | `production` |
+| `APP_ENV` | `production` — **tam olarak bu**, küçük harfle. Boş ya da başka bir değerde (`prod`, `Production`) sunucu açılmaz |
 | `PORT` | `8080` |
 | `DATABASE_URL` | Adım 2'deki internal URL (DB adı URL'in sonunda; ör. `.../postgres`) |
-| `JWT_SECRET` | `openssl rand -base64 48` çıktısı (güçlü, gizli) |
+| `JWT_SECRET` | `openssl rand -base64 48` çıktısı (güçlü, gizli). 32 bayttan kısa ya da `.env*.example`'daki yer tutucu girilirse sunucu açılmaz |
 | `ACCESS_TOKEN_TTL` | `15m` |
 | `REFRESH_TOKEN_TTL` | `720h` |
 | `GOOGLE_CLIENT_IDS` | `928054180858-...apps.googleusercontent.com` |
@@ -65,6 +65,20 @@ Depo özelse Coolify'de kaynak olarak **GitHub App** (Private Repository) kullan
 > **Apple revoke anahtarları:** `APPLE_TEAM_ID`, `APPLE_KEY_ID` ve `APPLE_PRIVATE_KEY` üçü birden girilmezse hesap silinirken Apple'daki uygulama yetkisi iptal **edilmez** (silme yine çalışır, açılış loguna uyarı düşer). Apple bu iptali şart koşar ve hesap silme sayfası bunu vaat eder. İptal için gereken Apple refresh token'ı yalnızca anahtarlar girildikten **sonra** yapılan Apple girişlerinde saklanır; anahtarları ilk yayından önce gir.
 
 > **Hız sınırları:** `API_RATE_LIMIT` ve `AUTH_RATE_LIMIT` için `0` ya da negatif değer sınırı kapatmaz; uyarı loglanır ve varsayılana (600 / 10) dönülür.
+
+### Açılış denetimi
+
+Sunucu açılırken yapılandırmayı denetler. Şu durumlarda **açılmaz** (deploy logunda `config: ...` satırı ve sebebi görünür; Coolify eski container'ı çalıştırmaya devam eder):
+
+- `APP_ENV` tanımsız ya da `production`/`development` dışında bir değer.
+- Production'da `JWT_SECRET` 32 bayttan kısa, kod varsayılanı ya da örnek dosyalardaki yer tutuculardan biri.
+- Production'da sözlük tablosu boş ve imajdaki seed yüklenemiyor (logda `sözlük yüklenemedi`).
+
+Şunlar açılışı engellemez ama production'da açılış loguna `config: uyarı:` satırı düşer ve Sentry'ye uyarı olarak gider:
+
+- `APPLE_TEAM_ID`/`APPLE_KEY_ID`/`APPLE_PRIVATE_KEY`'den biri eksik (hesap silmede Apple token iptali yapılmaz) ya da anahtar geçersiz.
+- `GOOGLE_CLIENT_IDS` boş (her Google girişi reddedilir).
+- `TEST_MODE_UNLOCK_ALL=true` (tüm gruplar kilitsiz açılır, reklam kapıları devre dışı).
 
 ### Production'a özgü davranışlar
 
@@ -101,7 +115,7 @@ Mobil istemci parola ile giriş sunmadığı için bu satırlar gerçek bir kull
 1. **Deploy logu:** `db: migrate tamamlandı` satırı var (yeni kolonlar açılışta eklenir; migrate başarısızsa süreç hiç ayağa kalkmaz). Hemen üstünde `kullanım günü saat dilimi: Europe/Istanbul` görünmeli.
 2. **`GET /api/v1/users/me/usage`** (geçerli bir access token ile) yanıtında şu alanlar var: `reviewAnswersToday`, `unlockedGroupsToday`, `noFillPassesRemaining`. Biri eksikse canlıda eski derleme çalışıyordur.
 3. **Yanıt başlıkları:** herhangi bir `/api/v1/...` yanıtında `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` geliyor (başlık adlarında büyük/küçük harf fark etmez) ve `X-RateLimit-Limit` değeri `API_RATE_LIMIT` ile aynı.
-4. **Açılış logunda uyarı yok:** `Apple hesap silmede token iptali YAPILMAYACAK` satırı görünüyorsa Apple revoke anahtarları eksiktir; `config: uyarı:` ile başlayan satır geçersiz bir hız sınırı değerini gösterir.
+4. **Açılış logunda uyarı yok:** `ortam: APP_ENV=production` satırı görünmeli. `config: uyarı:` ile başlayan satırlar eksik bir ayarı (Apple revoke anahtarları, `GOOGLE_CLIENT_IDS`, `TEST_MODE_UNLOCK_ALL`) ya da geçersiz bir hız sınırı değerini gösterir.
 5. **Parola uçları kapalı:** `POST /api/v1/auth/register` 404 dönüyor. 400 ya da 201 dönüyorsa `APP_ENV` `production` değildir.
 6. **CORS kapalı** (`CORS_ALLOWED_ORIGINS` boşsa): `Origin` başlıklı isteğin yanıtında `Access-Control-Allow-Origin` yok.
 

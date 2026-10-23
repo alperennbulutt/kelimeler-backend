@@ -1,6 +1,8 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"os"
 	"strconv"
@@ -9,6 +11,28 @@ import (
 
 	"github.com/joho/godotenv"
 )
+
+// Geçerli APP_ENV değerleri. Başka bir değer (boş, "prod", "Production" ...)
+// kabul edilmez: production'a özgü korumalar (parola uçlarının kapanması,
+// CORS, JWT_SECRET denetimi) yalnızca tam "production" ile devreye girer ve
+// yazım hatası sunucuyu sessizce geliştirme kipinde açardı.
+const (
+	EnvProduction  = "production"
+	EnvDevelopment = "development"
+)
+
+// MinJWTSecretBytes, production'da kabul edilen en kısa JWT_SECRET uzunluğudur
+// (HS256 anahtarı en az özet boyu kadar olmalı).
+const MinJWTSecretBytes = 32
+
+// placeholderJWTSecrets, depoda açıkça duran JWT_SECRET değerleridir (kod
+// varsayılanı ve .env*.example yer tutucuları). Herkes bildiği için bunlarla
+// imzalanan token'lara güvenilemez; production'da reddedilirler.
+var placeholderJWTSecrets = []string{
+	"dev-secret-change-me",
+	"change-me-to-a-long-random-string",
+	"BURAYA_UZUN_RASTGELE_DEGER_KOYUN",
+}
 
 // Config, uygulamanın tüm ortam yapılandırmasını tutar.
 type Config struct {
@@ -81,16 +105,27 @@ type Config struct {
 	ShutdownTimeout time.Duration
 }
 
-// Load, .env dosyasını (varsa) yükler ve Config'i döndürür.
+// Load, .env dosyasını (varsa) yükler, Config'i okur ve doğrular. Yapılandırma
+// geçersizse süreci açık bir mesajla durdurur: yanlış yapılandırılmış bir
+// sunucunun açılmaması, sessizce güvensiz açılmasından iyidir.
 func Load() *Config {
 	// .env yoksa sessizce devam et (production'da gerçek env kullanılır).
 	if err := godotenv.Load(); err != nil {
 		log.Printf("config: .env bulunamadı, ortam değişkenleri kullanılacak (%v)", err)
 	}
 
+	cfg, err := FromEnv()
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+	return cfg
+}
+
+// FromEnv, Config'i ortam değişkenlerinden okur ve Validate ile doğrular.
+func FromEnv() (*Config, error) {
 	cfg := &Config{
 		Port:                   getEnv("PORT", "8080"),
-		AppEnv:                 getEnv("APP_ENV", "development"),
+		AppEnv:                 os.Getenv("APP_ENV"),
 		DatabaseURL:            getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5434/kelimeler?sslmode=disable"),
 		JWTSecret:              getEnv("JWT_SECRET", "dev-secret-change-me"),
 		AccessTokenTTL:         getDuration("ACCESS_TOKEN_TTL", 15*time.Minute),
@@ -126,11 +161,59 @@ func Load() *Config {
 		ShutdownTimeout: getDuration("SHUTDOWN_TIMEOUT", 8*time.Second),
 	}
 
-	if cfg.JWTSecret == "dev-secret-change-me" && cfg.AppEnv == "production" {
-		log.Fatal("config: production'da JWT_SECRET ayarlanmalı")
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// IsProduction, production ortamında çalışılıp çalışılmadığını söyler.
+func (c *Config) IsProduction() bool { return c.AppEnv == EnvProduction }
+
+// Validate, sunucunun açılmasını engellemesi gereken yapılandırma hatalarını
+// döndürür. Açılışı engellemeyen ama bilinmesi gereken eksikler Warnings'tedir.
+func (c *Config) Validate() error {
+	switch c.AppEnv {
+	case EnvProduction, EnvDevelopment:
+	case "":
+		return errors.New(`APP_ENV tanımlı değil: "production" ya da "development" olmalı`)
+	default:
+		return fmt.Errorf(`APP_ENV=%q geçersiz: tam olarak "production" ya da "development" olmalı`, c.AppEnv)
 	}
 
-	return cfg
+	if c.IsProduction() {
+		for _, p := range placeholderJWTSecrets {
+			if c.JWTSecret == p {
+				return errors.New("production'da JWT_SECRET örnek/varsayılan değerde bırakılamaz; " +
+					"`openssl rand -base64 48` ile üretilmiş bir değer girin")
+			}
+		}
+		if len(c.JWTSecret) < MinJWTSecretBytes {
+			return fmt.Errorf("production'da JWT_SECRET en az %d bayt olmalı (%d bayt verildi); "+
+				"`openssl rand -base64 48` ile üretilmiş bir değer girin", MinJWTSecretBytes, len(c.JWTSecret))
+		}
+	}
+	return nil
+}
+
+// Warnings, sunucunun açılmasını engellemeyen ama production'da bir özelliği
+// bozan eksikleri döndürür. Açılışta loglanır ve Sentry'ye bildirilir.
+func (c *Config) Warnings() []string {
+	if !c.IsProduction() {
+		return nil
+	}
+	var w []string
+	if c.AppleTeamID == "" || c.AppleKeyID == "" || c.ApplePrivateKey == "" {
+		w = append(w, "APPLE_TEAM_ID/APPLE_KEY_ID/APPLE_PRIVATE_KEY eksik: "+
+			"Apple hesap silmede token iptali YAPILMAYACAK (Apple bunu şart koşar)")
+	}
+	if len(c.GoogleClientIDs) == 0 {
+		w = append(w, "GOOGLE_CLIENT_IDS boş: her Google girişi invalid_google_token ile reddedilecek")
+	}
+	if c.TestModeUnlockAll {
+		w = append(w, "TEST_MODE_UNLOCK_ALL=true: tüm gruplar kilitsiz açılıyor (reklam kapıları devre dışı)")
+	}
+	return w
 }
 
 func getEnv(key, def string) string {

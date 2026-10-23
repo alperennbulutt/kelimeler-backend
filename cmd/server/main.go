@@ -30,6 +30,9 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/recover"
 )
 
+// seedPath, imaja gömülü sözlük dökümünün yoludur (bkz. Dockerfile).
+const seedPath = "/seed/dictionary_words.sql"
+
 func main() {
 	// log.Fatalf defer'ları atlar; hatalar run'dan döner ki Sentry kuyruğu
 	// boşaltılsın ve veritabanı bağlantıları kapatılsın.
@@ -53,6 +56,12 @@ func run() (err error) {
 		}
 	}()
 
+	log.Printf("ortam: APP_ENV=%s", cfg.AppEnv)
+	for _, w := range cfg.Warnings() {
+		log.Printf("config: uyarı: %s", w)
+		observability.CaptureWarning("config: " + w)
+	}
+
 	// Günlük kullanım sayaçlarının gün sınırı. Ad çözülemezse varsayılan konum
 	// korunur; hangi konumun geçerli olduğu her durumda loglanır.
 	if err := services.SetUsageLocation(cfg.UsageTimezone); err != nil {
@@ -74,8 +83,15 @@ func run() (err error) {
 	if err := db.Migrate(database); err != nil {
 		return fmt.Errorf("db migrate başarısız: %w", err)
 	}
-	// İlk açılışta (boş DB) imaja gömülü kelime sözlüğünü yükle.
-	db.SeedDictionaryIfEmpty(database, "/seed/dictionary_words.sql")
+	// İlk açılışta (boş DB) imaja gömülü kelime sözlüğünü yükle. Production'da
+	// sözlüksüz açılmak yerine durulur: deploy başarısız görünür, Coolify eski
+	// container'ı çalıştırmaya devam eder.
+	if _, err := db.SeedDictionaryIfEmpty(database, seedPath); err != nil {
+		if cfg.IsProduction() {
+			return fmt.Errorf("sözlük yüklenemedi: %w", err)
+		}
+		log.Printf("uyarı: sözlük yüklenemedi, kelimeler gösterilemeyecek: %v", err)
+	}
 
 	tokens := auth.NewTokenService(cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
 
@@ -91,9 +107,14 @@ func run() (err error) {
 	appleRevoker, err := auth.NewAppleRevoker(
 		cfg.AppleClientID, cfg.AppleTeamID, cfg.AppleKeyID, cfg.ApplePrivateKey)
 	if err != nil {
-		log.Printf("uyarı: Apple revoker başlatılamadı, hesap silmede token iptali yapılmayacak: %v", err)
+		msg := fmt.Sprintf("Apple revoker başlatılamadı, hesap silmede token iptali yapılmayacak: %v", err)
+		log.Printf("uyarı: %s", msg)
+		if cfg.IsProduction() {
+			observability.CaptureWarning(msg)
+		}
 		appleRevoker = nil
-	} else if appleRevoker == nil && cfg.AppleClientID != "" {
+	} else if appleRevoker == nil && cfg.AppleClientID != "" && !cfg.IsProduction() {
+		// Production'da aynı uyarı cfg.Warnings() ile Sentry'ye de gider.
 		log.Printf("uyarı: APPLE_TEAM_ID/APPLE_KEY_ID/APPLE_PRIVATE_KEY eksik — " +
 			"Apple hesap silmede token iptali YAPILMAYACAK (Apple bunu şart koşar)")
 	}
