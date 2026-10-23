@@ -74,6 +74,11 @@ type Config struct {
 	WriteTimeout time.Duration
 	IdleTimeout  time.Duration
 	BodyLimit    int
+
+	// SIGTERM/SIGINT gelince süren isteklerin bitmesi için beklenecek en uzun
+	// süre. Docker'ın durdurma süresinden (varsayılan 10 sn) kısa olmalı; yoksa
+	// süreç bu süre dolmadan SIGKILL ile öldürülür ve Sentry kuyruğu boşaltılamaz.
+	ShutdownTimeout time.Duration
 }
 
 // Load, .env dosyasını (varsa) yükler ve Config'i döndürür.
@@ -117,6 +122,8 @@ func Load() *Config {
 		WriteTimeout: getDuration("WRITE_TIMEOUT", 30*time.Second),
 		IdleTimeout:  getDuration("IDLE_TIMEOUT", 60*time.Second),
 		BodyLimit:    getInt("BODY_LIMIT_BYTES", 1<<20), // 1 MiB
+
+		ShutdownTimeout: getDuration("SHUTDOWN_TIMEOUT", 8*time.Second),
 	}
 
 	if cfg.JWTSecret == "dev-secret-change-me" && cfg.AppEnv == "production" {

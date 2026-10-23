@@ -22,6 +22,8 @@ services:
       db:
         condition: service_healthy
     env_file: .env
+    # SIGTERM'den sonra SHUTDOWN_TIMEOUT (8s) + Sentry boşaltma için pay.
+    stop_grace_period: 15s
     environment:
       # docker ağı içinde Postgres host'u "db"dir.
       DATABASE_URL: postgres://postgres:postgres@db:5432/kelimeler?sslmode=disable

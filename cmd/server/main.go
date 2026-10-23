@@ -2,10 +2,15 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"kelimeler-backend/internal/auth"
 	"kelimeler-backend/internal/config"
@@ -26,11 +31,27 @@ import (
 )
 
 func main() {
+	// log.Fatalf defer'ları atlar; hatalar run'dan döner ki Sentry kuyruğu
+	// boşaltılsın ve veritabanı bağlantıları kapatılsın.
+	if err := run(); err != nil {
+		log.Printf("kelimeler-backend durdu: %v", err)
+		os.Exit(1)
+	}
+}
+
+// run, sunucuyu kurar ve SIGTERM/SIGINT gelene kadar çalıştırır.
+func run() (err error) {
 	cfg := config.Load()
 
 	// Hata raporlamayı en başta kur ki başlangıç hataları da yakalansın.
+	// Defer'lar ters sırayla çalışır: önce hata bildirilir, sonra kuyruk boşaltılır.
 	flushSentry := observability.InitSentry(cfg.SentryDSN, cfg.AppEnv, cfg.SentryRelease)
 	defer flushSentry()
+	defer func() {
+		if err != nil {
+			observability.CaptureError(err)
+		}
+	}()
 
 	// Günlük kullanım sayaçlarının gün sınırı. Ad çözülemezse varsayılan konum
 	// korunur; hangi konumun geçerli olduğu her durumda loglanır.
@@ -41,10 +62,17 @@ func main() {
 
 	database, err := db.Connect(cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("db bağlantısı başarısız: %v", err)
+		return fmt.Errorf("db bağlantısı başarısız: %w", err)
 	}
+	sqlDB, err := database.DB()
+	if err != nil {
+		return fmt.Errorf("db havuzu alınamadı: %w", err)
+	}
+	// Sunucu kapandıktan sonra çalışır: süren istekler bağlantılarını bitirmiş olur.
+	defer sqlDB.Close()
+
 	if err := db.Migrate(database); err != nil {
-		log.Fatalf("db migrate başarısız: %v", err)
+		return fmt.Errorf("db migrate başarısız: %w", err)
 	}
 	// İlk açılışta (boş DB) imaja gömülü kelime sözlüğünü yükle.
 	db.SeedDictionaryIfEmpty(database, "/seed/dictionary_words.sql")
@@ -94,10 +122,47 @@ func main() {
 	handlers.RegisterRoutes(api, h, tokens, authLimiter(cfg))
 
 	addr := ":" + cfg.Port
-	log.Printf("kelimeler-backend %s adresinde dinliyor", addr)
-	if err := app.Listen(addr); err != nil {
-		log.Fatalf("server hatası: %v", err)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("%s dinlenemedi: %w", addr, err)
 	}
+	log.Printf("kelimeler-backend %s adresinde dinliyor", addr)
+
+	// Coolify her redeploy'da eski container'a SIGTERM gönderir.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return serve(ctx, app, ln, cfg.ShutdownTimeout)
+}
+
+// serve, uygulamayı ln üzerinde ctx iptal edilene kadar çalıştırır; sonra yeni
+// bağlantı kabul etmeyi bırakır ve süren isteklerin bitmesini en fazla timeout
+// kadar bekler.
+//
+// Kapanma beklenmeden süreç bitseydi o anda işlenen istekler (ör. reklam
+// sonrası grup açma) yanıtsız kalır, istemci bunları ağ hatası olarak görüp
+// yeniden denerdi.
+func serve(ctx context.Context, app *fiber.App, ln net.Listener, timeout time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- app.Listener(ln) }()
+
+	select {
+	case err := <-done:
+		// Sinyal gelmeden dinleme bitti: gerçek bir sunucu hatasıdır.
+		return fmt.Errorf("server hatası: %w", err)
+	case <-ctx.Done():
+	}
+
+	log.Printf("kapanma sinyali alındı; süren istekler en fazla %s bekleniyor", timeout)
+	if err := app.ShutdownWithTimeout(timeout); err != nil {
+		return fmt.Errorf("düzgün kapanma %s içinde tamamlanamadı: %w", timeout, err)
+	}
+	// Listener kapanınca döner; sinyal dinleme başlamadan geldiyse dönmeyebilir.
+	select {
+	case <-done:
+	case <-time.After(timeout):
+	}
+	log.Println("sunucu düzgün kapandı")
+	return nil
 }
 
 // newApp, Fiber uygulamasını ve her isteğe uygulanan middleware zincirini kurar.

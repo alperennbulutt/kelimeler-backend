@@ -226,6 +226,7 @@ tarayıcıda eski metni görüyorsan `curl` ile ya da gizli pencerede bak.
 
 ## Notlar
 
+- **Düzgün kapanma:** Container SIGTERM aldığında sunucu yeni bağlantı kabul etmeyi bırakır, süren isteklerin bitmesini en fazla `SHUTDOWN_TIMEOUT` (varsayılan `8s`) bekler, ardından veritabanı havuzunu kapatıp Sentry kuyruğunu boşaltır (logda `sunucu düzgün kapandı`). Docker durdurma süresi varsayılan 10 sn'dir; bu süre dolarsa süreç SIGKILL ile öldürülür. `SHUTDOWN_TIMEOUT`'u artıracaksan container'ın durdurma süresini de (Coolify'de destekleniyorsa; docker-compose'da `stop_grace_period`) ondan en az birkaç saniye uzun tut.
 - **Güncelleme:** `git push` sonrası Coolify'de **Redeploy**'a bas. Otomatik deploy (webhook) kurulu değildir; kurulana kadar push tek başına canlıyı güncellemez. Her deploy'dan sonra "Yayın sonrası doğrulama" listesini uygula.
 - **Google/Apple Sign-In:** OAuth client'lar Google Cloud / Apple Developer tarafında. Backend yalnızca idToken **doğrular**; production domaini eklemek gerekmez ama Google Cloud Console'da OAuth ayarlarının geçerli olduğundan emin ol.
 - **Güvenlik:** `JWT_SECRET`'i kimseyle paylaşma; sunucu root şifreni deploy sonrası değiştir.
