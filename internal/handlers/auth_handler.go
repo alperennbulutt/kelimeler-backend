@@ -306,6 +306,17 @@ func isUniqueViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.SQLState() == "23505"
 }
 
+// providerEmail, sağlayıcının doğruladığı e-postayı (bkz. auth.verifiedEmail)
+// eşleme ve saklama için normalize eder. Makul olmayan uzunluktaki ya da yer
+// tutucu alan adındaki adres boş döner: böyle bir adresle hesap eşlenmez.
+func providerEmail(si *auth.SocialIdentity) string {
+	email := dto.NormalizeEmail(si.Email)
+	if len(email) > dto.MaxEmailLength || dto.IsSyntheticEmail(email) {
+		return ""
+	}
+	return email
+}
+
 // authenticateSocial: provider+subject ile bul; yoksa email ile eşle/oluştur ve kimliği bağla.
 //
 // E-postayla bulunan hesabın 'password' kimliği ya da aynı sağlayıcının başka
@@ -337,14 +348,11 @@ func (h *Handlers) authenticateSocialOnce(provider string, si *auth.SocialIdenti
 		return nil, err
 	}
 
-	email := dto.NormalizeEmail(si.Email)
-	if len(email) > dto.MaxEmailLength {
-		email = "" // sağlayıcı makul olmayan bir adres verdi: eşleme yapılmaz
-	}
+	email := providerEmail(si)
 	if email == "" {
 		// Sağlayıcı email vermeyebilir (Apple sonraki girişlerde) ya da verdiği
 		// adres doğrulanmamış olabilir; ikisinde de e-postayla eşleme yapılmaz.
-		email = provider + "_" + si.Subject + "@users.kelimeler.local"
+		email = dto.SyntheticEmail(provider + "_" + si.Subject)
 	}
 
 	var user models.User
@@ -662,7 +670,7 @@ func (h *Handlers) linkProvider(c *fiber.Ctx, userID, provider string, si *auth.
 	}
 	sub := si.Subject
 	var email *string
-	if e := dto.NormalizeEmail(si.Email); e != "" && len(e) <= dto.MaxEmailLength {
+	if e := providerEmail(si); e != "" {
 		email = &e
 	}
 	if err := h.DB.Create(&models.AuthIdentity{

@@ -16,6 +16,12 @@ type User struct {
 	CurrentGroupTotalWords  int     `gorm:"not null;default:50" json:"currentGroupTotalWords"`
 	TotalLearned            int     `gorm:"not null;default:0" json:"totalLearned"`
 
+	// IsGuest, POST /auth/guest ile açılan e-postasız misafir hesabıdır: hiçbir
+	// giriş kimliği (auth_identities) yoktur, e-postası sentetiktir
+	// (guest_<uuid>@users.kelimeler.local) ve hesaba yalnızca refresh token'la
+	// ulaşılır. Google/Apple ya da e-posta/parola bağlanınca false olur.
+	IsGuest bool `gorm:"not null;default:false" json:"isGuest"`
+
 	// Günlük kullanım sayaçları. Gün, services.UsageDayStart'a göre döner
 	// (varsayılan Europe/Istanbul gece yarısı); sıfırlama zamanlanmış bir iş
 	// değildir, gün dönümünden sonraki ilk kullanım isteğinde yapılır.

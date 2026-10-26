@@ -28,6 +28,25 @@ var (
 	ErrDisplayNameLong = errors.New("görünen ad en fazla 60 karakter olabilir")
 )
 
+// SyntheticEmailDomain, gerçek bir adresi olmayan hesaplara (misafir ve
+// sağlayıcısı doğrulanmış e-posta vermeyen sosyal hesaplar) verilen yer tutucu
+// adreslerin alan adıdır. users.email NOT NULL ve unique olduğu için bu
+// hesaplar da bir adres taşır; .local alan adı internette çözülmez, kimse bu
+// adreslerin sahibi olamaz.
+const SyntheticEmailDomain = "users.kelimeler.local"
+
+// SyntheticEmail, verilen yerel kısım için yer tutucu adresi üretir
+// (ör. "guest_<uuid>", "google_<sub>").
+func SyntheticEmail(localPart string) string {
+	return localPart + "@" + SyntheticEmailDomain
+}
+
+// IsSyntheticEmail, adresin yer tutucu alan adında olup olmadığını söyler.
+// Büyük/küçük harf farkı gözetilmez (users.email citext'tir).
+func IsSyntheticEmail(email string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(email)), "@"+SyntheticEmailDomain)
+}
+
 // NormalizeEmail, e-postayı karşılaştırma ve saklama için tekilleştirir.
 func NormalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
@@ -46,6 +65,12 @@ func ValidateEmail(email string) error {
 	at := strings.LastIndex(email, "@")
 	domain := email[at+1:]
 	if !strings.Contains(domain, ".") || strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") {
+		return ErrInvalidEmail
+	}
+	// Yer tutucu adresler kullanıcı girdisi olarak kabul edilmez: parolayla
+	// "guest_<uuid>@users.kelimeler.local" kaydı, o misafirin ya da e-postasız
+	// sosyal hesabın adresini önceden kapatır ve girişini 409'a düşürürdü.
+	if IsSyntheticEmail(email) {
 		return ErrInvalidEmail
 	}
 	return nil
