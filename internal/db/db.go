@@ -53,7 +53,16 @@ func ConnectWithOptions(dsn string, opts Options) (*gorm.DB, error) {
 		DSN:                  dsn,
 		PreferSimpleProtocol: true, // çoklu-statement seed Exec'i için gerekli
 	}), &gorm.Config{
-		Logger: gormlogger.Default.LogMode(gormlogger.Warn),
+		// Yavaş sorgu ve hata logları sorgunun parametrelerini (ör. giriş
+		// denemesindeki e-posta adresi) yazmaz; bulunamayan kayıt hata sayılmaz
+		// (bilinmeyen adresle giriş ve ilk sosyal giriş olağan akıştır).
+		Logger: gormlogger.New(log.New(os.Stdout, "\r\n", log.LstdFlags), gormlogger.Config{
+			SlowThreshold:             200 * time.Millisecond,
+			LogLevel:                  gormlogger.Warn,
+			IgnoreRecordNotFoundError: true,
+			ParameterizedQueries:      true,
+			Colorful:                  true,
+		}),
 		NowFunc: func() time.Time {
 			return time.Now().UTC()
 		},
