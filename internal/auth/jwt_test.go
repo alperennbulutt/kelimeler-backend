@@ -22,7 +22,7 @@ func signClaims(t *testing.T, method jwt.SigningMethod, key any, claims jwt.Clai
 
 func TestGenerateAccessToken_IssVeAudTasir(t *testing.T) {
 	ts := NewTokenService(testSecret, time.Minute, time.Hour)
-	token, err := ts.GenerateAccessToken("kullanici-1", "a@example.com")
+	token, err := ts.GenerateAccessToken("kullanici-1", "a@example.com", 0)
 	if err != nil {
 		t.Fatalf("token üretilemedi: %v", err)
 	}
@@ -98,5 +98,24 @@ func TestRefreshTTLFor(t *testing.T) {
 	}
 	if got := ts.RefreshTTLFor(false); got != 720*time.Hour {
 		t.Errorf("kayıtlı kullanıcı = %s, beklenen 720h", got)
+	}
+}
+
+// Oturum sürümü (tv) token'da taşınır; claim'siz eski token 0 sayılır.
+func TestAccessToken_OturumSurumu(t *testing.T) {
+	ts := NewTokenService(testSecret, time.Minute, time.Hour)
+	token, err := ts.GenerateAccessToken("kullanici-1", "a@example.com", 3)
+	if err != nil {
+		t.Fatalf("token üretilemedi: %v", err)
+	}
+	claims, err := ts.ParseAccessToken(token)
+	if err != nil || claims.TokenVersion != 3 {
+		t.Fatalf("tv = %v (err %v), beklenen 3", claims, err)
+	}
+	eski := signClaims(t, jwt.SigningMethodHS256, []byte(testSecret), jwt.RegisteredClaims{
+		Subject: "u", ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute))})
+	claims, err = ts.ParseAccessToken(eski)
+	if err != nil || claims.TokenVersion != 0 {
+		t.Fatalf("eski token tv = %v (err %v), beklenen 0", claims, err)
 	}
 }

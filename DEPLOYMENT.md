@@ -140,8 +140,30 @@ Apple girişi açıkken (`APPLE_CLIENT_ID` dolu) revoke yapılandırılamadıysa
 - **Google, Apple, e-posta/parola ve misafir** girişleri her ortamda açıktır (`/auth/google`, `/auth/apple`, `/auth/register`, `/auth/login`, `/auth/guest`); hepsi IP başına sıkı sınıra (`AUTH_RATE_LIMIT`) tabidir.
 - Google/Apple'ın **doğrulamadığı** e-posta hiçbir hesapla eşlenmez; kimlik yer tutucu adresli (`<sağlayıcı>_<sub>@users.kelimeler.local`) yeni bir hesaba bağlanır.
 - E-posta/parola kaydında adres sahipliği **doğrulanmaz** (e-posta gönderme altyapısı yok; parola sıfırlama da yok). Bu yüzden: doğrulanmış bir Google/Apple e-postası, **tek giriş yolu parola olan** hesapla eşleşirse hesap o kimliğe devredilir: parola kimliği silinir, kullanıcının bütün refresh token'ları iptal edilir (diğer cihazlar ilk yenilemede çıkış yapar), sosyal kimlik eklenir. Hesabı açan gerçekten adresin sahibiyse ilerlemesi korunur; başkasıysa erişimi biter. Log satırı: `auth: doğrulanmış <sağlayıcı> e-postası parola hesabını devraldı ... (user=<id>)`.
-- Parolanın yanında başka bir giriş yolu (ör. Apple) varsa ya da hesapta aynı sağlayıcının başka bir kimliği varsa devir yapılmaz, `409 email_in_use` döner.
+- **Devirden ve geri almadan önce verilmiş access token'lar:** refresh token'lar iptal edilse de access token (JWT) imzası geçerli olduğu için `ACCESS_TOKEN_TTL` (15 dk) boyunca kabul edilir. Devirde ve geri almada hesabın oturum sürümü (`users.token_version`, access token'da `tv` claim'i) artar; **hesabı denetleyen uçlar** (`POST/DELETE /auth/link/*`, `POST /auth/link/password`, `DELETE /auth/account`) eski sürümlü token'ı `401 unauthenticated` ile reddeder. Bu olmasaydı adresi parolayla önceden kapatan kişi, hesap sahibine devredildikten sonra elindeki access token'la kendi Apple/Google'ını o hesaba bağlayıp ona kalıcı olarak girebilir, sahibin giriş yolunu kaldırabilir ya da hesabı silebilirdi. Diğer uçlar (ilerleme, profil) eski token'ı süresi dolana kadar kabul eder: en fazla `ACCESS_TOKEN_TTL` boyunca okuma/yazma, kalıcı erişim değil. `tv`'siz eski token'lar `0` sayılır; hiç devredilmemiş hesaplarda çalışmaya devam eder. Devirle aynı anda süren bir bağlama da devri bekletir: bağlama önce biterse hesabın parolanın yanında başka bir giriş yolu vardır ve devir yerine adres geri alınır.
+- Parolanın yanında başka bir giriş yolu (ör. Apple) varsa hesap devralınmaz; adresin hesaptaki dayanağına bakılır (ayrıntı ve gerekçe: aşağıda "Adresin geri alınması"):
+  - Hesabın Google/Apple kimliklerinden biri **aynı adresi doğrulamışsa** (`auth_identities.email_verified`) adres o hesabın sahibinindir: gelen başka sağlayıcı kimliği hesaba bağlanır, parola ve oturumlar kalır. Aynı sağlayıcının farklı bir kimliğiyse (başka subject) `409 email_in_use`.
+  - Değilse hesabın adrese tek dayanağı doğrulanmamış paroladır ve **adres geri alınır:** hesabın parola kimliği silinir, bütün refresh token'ları iptal edilir, adresi yer tutucuya (`reclaimed_<id>@users.kelimeler.local`, istemciye `email: ""`) çevrilir; adresin doğrulanmış sahibine o adresle **yeni bir hesap** açılır ve oturum verilir. Eski hesap verisini ve kalan Google/Apple kimliğini korur, onunla girmeye devam eder.
+- Parolasız hesapta aynı sağlayıcının başka bir kimliği varsa `409 email_in_use`; yoksa kimlik o hesaba bağlanır.
 - Yer tutucu adresler (`@users.kelimeler.local`) istemciye `email: ""` olarak döner ve kayıtta/bağlamada `400 invalid_email` ile reddedilir.
+
+#### Adresin geri alınması
+
+Parola kaydında adres sahipliği doğrulanmaz. Eskiden, adresi (X) parolayla önceden kapatıp yanına **kendi** Google/Apple hesabını bağlayan biri, X'in gerçek sahibinin Google/Apple girişini kalıcı olarak `409 email_in_use`'a düşürüyordu. Ürün kararı (26 Ekim): adres doğrulanmış sahibine geri verilir.
+
+- **Neden sahibi o hesaba bağlanmıyor:** parolanın yanındaki kimliği kimin tuttuğu bilinmez; bağlamak, adresi kapatan kişiye sahibin hesabına giriş vermek olurdu. Bu yüzden sahibe ayrı, yeni bir hesap açılır.
+- **Neden "kanıtlı" hesapta geri alma yok:** hesabın bir Google/Apple kimliği X'i doğrulamış olarak kaydettiyse, X'in sahibi o hesaptadır (meşru durum: parolayla kaydolup sonra kendi Google'ını bağlamış kişi). Kanıt yalnızca kimlik açılırken sağlayıcının doğruladığı adrestir; parola kimliğinin adresi hiçbir zaman kanıt sayılmaz.
+- **Ne yapılır (tek transaction):** hesabın kimlikleri kilitlenir, parola kimliği silinir, etkin refresh token'lar kilitlenip iptal edilir (aynı anda süren rotasyonun halefi de; devirdeki yarış düzeltmesiyle aynı), adres yer tutucuya çevrilir, sonra yeni hesap ve kimlik yazılır. Aynı anda süren parola girişi ya geri almayı bekletir ve verdiği token da iptal edilir, ya da geri almayı bekler ve `401` alır. Hesabın oturum sürümü (`users.token_version`) artar; önceden verilmiş access token'lar için aşağıdaki maddeye bak.
+- **Doğrulanmamış adres hiçbir zaman geri almaz;** devir ve geri alma yalnızca sağlayıcının doğruladığı adresle olur.
+- **Misafir bağlamasında (`/auth/link/google|apple`) geri alma yoktur:** X başka hesaptayken de bağlama başarılıdır, sahibi kimliğini bağlar ve ondan sonra onunla kendi hesabına girer; yalnızca adres hesaba yazılmaz. Geri almak, bir bağlama isteğinin üçüncü bir hesabın parolasını silmesi olurdu; o hesabın tek giriş yolu parolaysa hesap girişsiz kalırdı (ve o hesap sahibin önceden parolayla açtığı kendi hesabı olabilir). `/auth/link/password` zaten doğrulanmamış bir adrestir, geri alamaz.
+- **`email_verified` ve var olan satırlar:** kolon eklenirken bütün eski satırlar `false` olur, Google/Apple kimlikleri de. `6b85321`'den önceki sunucu sağlayıcının doğrulamadığı adresi de kimliğe yazıyordu; eski satırdaki adresin doğrulanmış olduğu veriden kanıtlanamaz. Temkinli seçim `false`'tur: yanlışlıkla `true` saymak, X'i doğrulanmamış tutan bir hesaba X'in sahibinin girişini bağlatabilirdi (güvenlik açığı). `false` saymanın en kötü sonucu: eski bir **parola + kendi Google'ı** hesabına aynı adresle **üçüncü** bir sağlayıcıyla (ör. Apple) ilk kez giriş yapıldığında bağlama yerine geri alma olur; kişi Apple'la yeni bir hesaba girer, eski hesabına Google'la girmeye devam eder ama parolası ve adresi gider. Bunu önlemek için canlıdaki veritabanında `6b85321` ya da sonrası **baştan beri** çalışıyorsa (o sürümden beri sosyal kimliklere yalnızca doğrulanmış adres yazılır), o sürümün canlıya çıktığı andan sonra açılmış satırlar elle işaretlenebilir:
+  ```sql
+  UPDATE auth_identities SET email_verified = true
+  WHERE provider IN ('google','apple') AND email IS NOT NULL
+    AND email NOT ILIKE '%@users.kelimeler.local'
+    AND created_at >= '<6b85321 içeren sürümün canlıya çıktığı an, UTC>';
+  ```
+  Tarihten emin değilsen **çalıştırma**; varsayılan `false` güvenli olandır.
 
 ---
 
@@ -419,7 +441,7 @@ Bu bölüm, backend sprint 1'in üstüne gelen e-posta/parola girişi ve misafir
 | `POST /auth/guest` | Yeni. Yetkisiz, `AUTH_RATE_LIMIT`'e tabi. İsteğe bağlı `{"displayName"}`; `201` + `AuthResponse`. E-postasız misafir hesabı açar (`users.is_guest=true`, adres `guest_<id>@users.kelimeler.local`, giriş kimliği yok) |
 | `POST /auth/link/password` | Yeni. Token ister, `AUTH_RATE_LIMIT`'e tabi. Yalnızca misafirde (aksi `409 not_guest`); `{"email","password"}` ile hesabı kaydeder, `200 {"user": ...}` |
 | `POST /auth/link/google`, `/auth/link/apple` | Misafirde hesabı kaydeder (`isGuest=false`); sağlayıcının doğruladığı adres başka hesapta değilse kullanıcının e-postası olur |
-| Sosyal giriş (`/auth/google`, `/auth/apple`) | Doğrulanmış e-posta, tek giriş yolu parola olan hesabı devralır (bkz. 4. bölüm, "Giriş yolları ve e-postayla hesap eşleme") |
+| Sosyal giriş (`/auth/google`, `/auth/apple`) | Doğrulanmış e-posta, tek giriş yolu parola olan hesabı devralır; parolanın yanında başka giriş yolu olan ve adresi kanıtlamamış hesaptan adresi geri alır, sahibine yeni hesap açar (eskiden `409 email_in_use`; bkz. 4. bölüm, "Giriş yolları ve e-postayla hesap eşleme" ve "Adresin geri alınması") |
 | Bütün kullanıcı yanıtları | `user.isGuest` eklendi; yer tutucu adresler (misafir ve e-postasız Apple/Google hesapları) `email: ""` döner. **Eskiden** e-postasız Apple hesaplarında `apple_<sub>@users.kelimeler.local` dönüyordu; yayındaki istemcinin profilinde bu satır artık boş görünür |
 | `DELETE /auth/link/google`, `/auth/link/apple` | `password` kimliği her ortamda geçerli giriş yolu sayılır (son giriş yolu kuralı); eskiden production'da sayılmıyordu |
 
@@ -434,12 +456,15 @@ Bu bölüm, backend sprint 1'in üstüne gelen e-posta/parola girişi ve misafir
 | Tablo | Değişiklik | Not |
 |---|---|---|
 | `users` | `is_guest boolean NOT NULL DEFAULT false` | Var olan bütün hesaplar `false` olur. PostgreSQL 11+ sabit varsayılanlı kolonu tabloyu yeniden yazmadan ekler: işlem anlıktır, yalnızca kısa bir tablo kilidi alır (kilit, `users`'ta süren uzun bir sorguyu bekleyebilir) |
+| `users` | `token_version bigint NOT NULL DEFAULT 0` | Var olan bütün hesaplar `0` olur; `is_guest` gibi anlıktır. Devir ve geri almada artar; hesabı denetleyen uçlar eski sürümlü access token'ı reddeder (4. bölüm, "Devirden ve geri almadan önce verilmiş access token'lar") |
+| `auth_identities` | `email_verified boolean NOT NULL DEFAULT false` | Var olan bütün kimlikler (Google/Apple dahil) `false` olur; gerekçe ve isteğe bağlı elle işaretleme: 4. bölüm, "Adresin geri alınması". Ekleme `is_guest` gibi anlıktır |
 
-Index eklenmez. Eski sunucu kolonu yok sayar; geri almada kolon kalabilir.
+Index eklenmez. Eski sunucu kolonları yok sayar; geri almada kolonlar kalabilir.
 
 ### Davranış ve izleme
 
 - **Devir logu:** `auth: doğrulanmış <google|apple> e-postası parola hesabını devraldı; parola kimliği silindi, oturumlar iptal edildi (user=<id>)`. Destek talebinde "parolamla giremiyorum" diyen kullanıcı için bu satıra bak: parola, adresin doğrulanmış sahibi Google/Apple ile girdiği için kaldırılmıştır; kullanıcı o sağlayıcıyla girer.
+- **Geri alma logu:** `auth: doğrulanmış <google|apple> e-postası adresi parolayla tutan hesaptan geri aldı; eski hesabın parola kimliği silindi, adresi yer tutucuya çevrildi, oturumları iptal edildi (eski=<id>, yeni=<id>)`. Destek talebinde "parolam çalışmıyor, e-postam görünmüyor" diyen kullanıcı için bu satıra bak: adresin doğrulanmış sahibi Google/Apple ile girdi; kullanıcı eski hesabına (verisi yerinde) bağlı kalan Google/Apple ile girer. İki hesap birleştirilmez.
 - **Dönüşüm logu:** `auth: misafir hesabı <google|apple> ile kaydedildi (user=<id>)`.
 - **Parola sıfırlama yoktur.** Parolasını unutan kullanıcı ancak hesaba Google/Apple bağladıysa onlarla girer.
 - **Giriş yanıtları adres ele vermez:** bilinmeyen adres, parolasız hesap ve yanlış parola aynı `401 invalid_credentials` gövdesini ve yaklaşık aynı süreyi (bir bcrypt karşılaştırması) alır. Kayıt ise bilerek `409 email_in_use` döner (sözleşme); kayıtlı adresler kayıt ucundan öğrenilebilir, sıkı hız sınırı bunu yavaşlatır.
@@ -457,7 +482,9 @@ Index eklenmez. Eski sunucu kolonu yok sayar; geri almada kolon kalabilir.
 Bir önceki commit'i deploy etmek şemayı bozmaz (`is_guest` kalır, eski kod yok sayar), ama yeni mobil sürüm yayındaysa:
 - `/auth/guest`, `/auth/link/password` ve production'da `/auth/register`, `/auth/login` 404 döner: yeni istemcinin e-posta ve misafir butonları çalışmaz, e-posta/parola ile açılmış hesaplara girilemez (Google/Apple bağlanmışsa onlarla girilir).
 - Var olan misafirler oturumlarını korur (refresh token'ın bitiş tarihi satırda yazılıdır), ama eski sunucu rotasyonda 30 günlük ömür verir: 30 gün uygulamayı açmayan misafir hesabına ulaşamaz.
-- Eski sunucu doğrulanmış e-postayla gelen Google/Apple girişini, parolalı hesapla eşleşince `409 email_in_use` ile reddeder (devir yapmaz).
+- Eski sunucu doğrulanmış e-postayla gelen Google/Apple girişini, parolalı hesapla eşleşince `409 email_in_use` ile reddeder (devir de geri alma da yapmaz).
+- Eski sunucu `tv` claim'ine ve `users.token_version`'a bakmaz: geri dönülürse devirden önce verilmiş access token'lar süreleri dolana kadar hesabı denetleyen uçlarda da kabul edilir.
+- Adresi geri alınmış hesaplar `reclaimed_<id>@users.kelimeler.local` adresini korur. Yer tutucuyu gizleme kuralından (`email: ""`) eski bir sürüme dönülürse bu adres istemcide görünür.
 
 ### Terk edilmiş misafir temizliği
 

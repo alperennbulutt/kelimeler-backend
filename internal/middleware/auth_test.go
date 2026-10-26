@@ -16,7 +16,7 @@ import (
 
 func TestRequireAuth(t *testing.T) {
 	ts := auth.NewTokenService("test-secret", time.Minute, time.Hour)
-	gecerli, err := ts.GenerateAccessToken("kullanici-1", "a@example.com")
+	gecerli, err := ts.GenerateAccessToken("kullanici-1", "a@example.com", 0)
 	if err != nil {
 		t.Fatalf("token üretilemedi: %v", err)
 	}

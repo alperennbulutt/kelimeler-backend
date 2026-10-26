@@ -1130,7 +1130,7 @@ func TestRegisterRoutes_GrupAcmaUclariIdempotent(t *testing.T) {
 	app := fiber.New(fiber.Config{ErrorHandler: middleware.ErrorHandler})
 	RegisterRoutes(app.Group("/api/v1"), h, tokens, func(c *fiber.Ctx) error { return c.Next() })
 
-	token, err := tokens.GenerateAccessToken(u.ID, u.Email)
+	token, err := tokens.GenerateAccessToken(u.ID, u.Email, u.TokenVersion)
 	if err != nil {
 		t.Fatalf("token üretilemedi: %v", err)
 	}
@@ -1213,7 +1213,7 @@ func TestGetDailyUsage_KapiReddindenSonraIstemciAyniSayaclarlaKapiyiBulur(t *tes
 	RegisterRoutes(app.Group("/api/v1"), h, tokens, func(c *fiber.Ctx) error { return c.Next() })
 	kapiRaporunuYakala(t)
 
-	token, err := tokens.GenerateAccessToken(u.ID, u.Email)
+	token, err := tokens.GenerateAccessToken(u.ID, u.Email, u.TokenVersion)
 	if err != nil {
 		t.Fatalf("token üretilemedi: %v", err)
 	}

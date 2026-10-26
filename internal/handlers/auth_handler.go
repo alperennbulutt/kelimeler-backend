@@ -61,7 +61,7 @@ type tokenPair struct {
 // (GUEST_REFRESH_TOKEN_TTL / REFRESH_TOKEN_TTL); rotasyon kullanıcıyı her
 // seferinde yeniden okuduğu için kaydolan misafir olağan ömre geçer.
 func (h *Handlers) newTokenPair(user *models.User, family string) (tokenPair, *models.RefreshToken, error) {
-	access, err := h.Tokens.GenerateAccessToken(user.ID, user.Email)
+	access, err := h.Tokens.GenerateAccessToken(user.ID, user.Email, user.TokenVersion)
 	if err != nil {
 		return tokenPair{}, nil, err
 	}
@@ -124,6 +124,24 @@ func (h *Handlers) respondUser(c *fiber.Ctx, userID string) error {
 		return err
 	}
 	return c.JSON(fiber.Map{"user": dto.NewUserDTO(&user, providers)})
+}
+
+// requireCurrentSession, isteğin access token'ının hesabın şimdiki oturum
+// sürümüyle (models.User.TokenVersion) verildiğini doğrular; değilse 401
+// döner, istemci sessizce yenilemeyi dener.
+//
+// Hesap başka birine geçtiğinde (devir) ya da adresi geri alındığında refresh
+// token'lar iptal edilir ve sürüm artar; ama önceden verilmiş access token'lar
+// imzası geçerli olduğu için ACCESS_TOKEN_TTL boyunca kabul edilir. Hesabı
+// denetleyen uçlar (giriş yolu ekleme/kaldırma, hesap silme) bu kontrolü
+// yapar: yapmasalar adresi parolayla önceden kapatan kişi, hesap adresin
+// sahibine devredildikten sonra elindeki access token'la kendi Apple/Google'ını
+// o hesaba bağlayıp ona kalıcı olarak girebilir ya da hesabı silebilirdi.
+func requireCurrentSession(c *fiber.Ctx, user *models.User) error {
+	if middleware.TokenVersion(c) != user.TokenVersion {
+		return apiErr(fiber.StatusUnauthorized, "unauthenticated", "oturum geçersiz")
+	}
+	return nil
 }
 
 // --- endpoint'ler ---
@@ -219,9 +237,10 @@ var dummyPasswordHash = sync.OnceValue(func() string {
 // Login: email/parola doğrular.
 //
 // Refresh token, parola kimliği kilitliyken ve hâlâ duruyorken yazılır: aynı
-// anda doğrulanmış bir sağlayıcı e-postası bu hesabı devralırsa (bkz.
-// authenticateSocialOnce) ya devralma bu girişi bekler ve verdiği token'ı da
-// iptal eder, ya da giriş devralmayı bekler, kimliği silinmiş bulur ve 401 alır.
+// anda doğrulanmış bir sağlayıcı e-postası bu hesabı devralırsa ya da adresini
+// geri alırsa (bkz. authenticateSocialOnce) ya devir/geri alma bu girişi bekler
+// ve verdiği token'ı da iptal eder, ya da giriş onu bekler, kimliği silinmiş
+// bulur ve 401 alır.
 func (h *Handlers) Login(c *fiber.Ctx) error {
 	var req dto.LoginRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -416,22 +435,41 @@ func providerEmail(si *auth.SocialIdentity) string {
 
 // authenticateSocial: provider+subject ile bul; yoksa email ile eşle/oluştur ve kimliği bağla.
 //
-// E-postayla bulunan hesapta aynı sağlayıcının başka bir kimliği varsa bağlama
-// yapılmaz, 409 döner. Hesabın tek giriş yolu e-posta/parolaysa doğrulanmış
-// sağlayıcı e-postası hesabı devralır (bkz. takeOverPasswordAccount); parolaya
-// ek olarak başka bir giriş yolu varsa 409 döner (aşağıdaki gerekçeler).
+// E-postayla bulunan hesapta ne yapılacağı, adresin o hesaptaki dayanağına
+// göre verilir (bkz. decideEmailMatch):
+//   - Hesabın Google/Apple kimliklerinden biri aynı adresi doğrulamışsa adresin
+//     sahipliği zaten kanıtlıdır: yeni kimlik o hesaba bağlanır; hesapta aynı
+//     sağlayıcının başka bir kimliği varsa 409 email_in_use.
+//   - Değilse ve hesabın adrese dayanağı yalnızca parolaysa (parola kaydında
+//     adres doğrulanmaz): tek giriş yolu parolaysa hesap devralınır (bkz.
+//     takeOverPasswordAccount); parolanın yanında başka bir giriş yolu varsa
+//     adres hesaptan geri alınır ve adresin doğrulanmış sahibine yeni bir hesap
+//     açılır (bkz. reclaimEmail).
+//   - Parolasız hesapta aynı sağlayıcının başka bir kimliği varsa 409, yoksa
+//     kimlik bağlanır.
+//
+// Doğrulanmamış (yer tutucuya düşen) adres hiçbir hesapla eşlenmez; devir ve
+// geri alma yalnızca doğrulanmış adresle olur.
 //
 // İlk giriş aynı anda iki kez gelirse (çift dokunuş, yeniden deneme) ikinci
 // istek kullanıcıyı ya da kimliği yazarken unique kısıta çarpar. Kısıt ancak
 // öteki istek commit edince ihlal verir; bu yüzden bir kez yeniden okumak
-// öteki isteğin açtığı hesabı bulur ve aynı kullanıcı döner.
+// öteki isteğin açtığı hesabı bulur ve aynı kullanıcı döner. Hesap, kimlikleri
+// kilitlenene kadar değişmişse (aynı anda süren bir geri alma adresi taşıdı;
+// errAccountChanged) ya da PostgreSQL kilitlenme (40P01) ile işlemi iptal
+// ettiyse de bir kez yeniden denenir: transaction geri alındığı için deneme
+// temiz başlar.
 func (h *Handlers) authenticateSocial(provider string, si *auth.SocialIdentity, displayName string) (*models.User, error) {
 	user, err := h.authenticateSocialOnce(provider, si, displayName)
-	if isUniqueViolation(err) {
+	if isUniqueViolation(err) || errors.Is(err, errAccountChanged) || isDeadlock(err) {
 		return h.authenticateSocialOnce(provider, si, displayName)
 	}
 	return user, err
 }
+
+// errAccountChanged, e-postayla bulunan hesabın, kimlikleri kilitlenene kadar
+// adresini kaybettiğini (ya da silindiğini) bildirir; karar yeniden verilmelidir.
+var errAccountChanged = errors.New("e-postayla bulunan hesap bu arada değişti")
 
 func (h *Handlers) authenticateSocialOnce(provider string, si *auth.SocialIdentity, displayName string) (*models.User, error) {
 	var identity models.AuthIdentity
@@ -448,7 +486,8 @@ func (h *Handlers) authenticateSocialOnce(provider string, si *auth.SocialIdenti
 	}
 
 	// verified: adres sağlayıcının doğruladığı gerçek bir adres mi (yer
-	// tutucuya düşmedi mi)? Yalnızca böyle bir adres parola hesabını devralabilir.
+	// tutucuya düşmedi mi)? Yalnızca böyle bir adres parola hesabını devralabilir
+	// ya da adresi geri alabilir.
 	email := providerEmail(si)
 	verified := email != ""
 	if !verified {
@@ -459,60 +498,82 @@ func (h *Handlers) authenticateSocialOnce(provider string, si *auth.SocialIdenti
 
 	var user models.User
 	tookOver := false
+	reclaimedFrom := ""
 	txErr := h.DB.Transaction(func(tx *gorm.DB) error {
 		findErr := tx.Where("email = ?", email).First(&user).Error
 		if errors.Is(findErr, gorm.ErrRecordNotFound) {
-			// İstemcinin ya da sağlayıcının verdiği ad sınırsız ve denetimsizdir:
-			// temizlenir ve kısaltılır (reddedilmez, giriş bozulmasın).
-			name := dto.SanitizeDisplayName(displayName)
-			if name == "" {
-				name = dto.SanitizeDisplayName(si.Name)
-			}
-			if name == "" {
-				name = dto.SanitizeDisplayName(emailLocalPart(email))
-			}
-			user = models.User{Email: email, DisplayName: name, CurrentLevel: "A1", CurrentGroup: 1}
-			if err := tx.Create(&user).Error; err != nil {
+			var err error
+			user, err = createSocialUser(tx, email, displayName, si)
+			if err != nil {
 				return err
 			}
 		} else if findErr != nil {
 			return findErr
 		} else {
+			// Kimlikler kilitlenir, hesap kilitten sonra yeniden okunur: karar
+			// verilirken aynı anda süren bir parola girişi, bağlantı kaldırma ya
+			// da başka bir geri alma hesabı değiştiremez. Hesap bu arada adresini
+			// kaybettiyse (ör. çift dokunuşta öteki istek adresi geri aldı) karar
+			// yeniden verilir.
 			var identities []models.AuthIdentity
-			if err := tx.Where("user_id = ?", user.ID).Order("id").Find(&identities).Error; err != nil {
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("user_id = ?", user.ID).Order("id").
+				Find(&identities).Error; err != nil {
 				return err
 			}
-			var password *models.AuthIdentity
-			others := 0
-			for i := range identities {
-				switch identities[i].Provider {
-				case "password":
-					password = &identities[i]
-				case provider:
-					// Hesapta bu sağlayıcının başka bir kimliği (farklı subject)
-					// varsa ikincisi eklenemez (uq_user_provider). Kısıta çarpıp
-					// 500 dönmek yerine hesaba dokunmadan reddedilir. Eski kimliği
-					// yenisiyle değiştirmek, adresi devralan kişiye hesabı vermek olurdu.
-					return apiErr(fiber.StatusConflict, "email_in_use",
-						"bu email aynı sağlayıcının başka bir hesabına bağlı")
-				default:
-					others++
+			if err := tx.First(&user, "id = ?", user.ID).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return errAccountChanged
 				}
+				return err
 			}
-			if password != nil {
-				// 'password' kimliği e-posta sahipliği kanıtlanmadan açılır.
-				// Doğrulanmamış adresle ya da hesapta parolanın yanında başka bir
-				// giriş yolu varken bağlamak, o yolu kimin elinde tuttuğunu
-				// bilmeden adresin sahibini o kişiyle aynı hesaba koymak olurdu:
-				// reddedilir, hesaba ve verisine dokunulmaz.
-				if !verified || others > 0 {
-					return apiErr(fiber.StatusConflict, "email_in_use",
-						"bu email parola ile kayıtlı bir hesaba ait")
-				}
+			if !strings.EqualFold(user.Email, email) {
+				return errAccountChanged
+			}
+
+			match, password := decideEmailMatch(identities, provider, email, verified)
+			switch match {
+			case matchSameProvider:
+				// Hesapta bu sağlayıcının başka bir kimliği (farklı subject)
+				// varsa ikincisi eklenemez (uq_user_provider). Kısıta çarpıp
+				// 500 dönmek yerine hesaba dokunmadan reddedilir. Eski kimliği
+				// yenisiyle değiştirmek, adresi devralan kişiye hesabı vermek olurdu.
+				return apiErr(fiber.StatusConflict, "email_in_use",
+					"bu email aynı sağlayıcının başka bir hesabına bağlı")
+			case matchPasswordConflict:
+				return apiErr(fiber.StatusConflict, "email_in_use",
+					"bu email parola ile kayıtlı bir hesaba ait")
+			case matchTakeOver:
 				if err := takeOverPasswordAccount(tx, user.ID, password.ID); err != nil {
 					return err
 				}
+				// Sürüm artışı kullanıcı satırını kilitler: aynı anda süren bir
+				// bağlama (linkProvider, kullanıcı satırı kilitli) bitene kadar
+				// bekler. O bağlama kimliğini kilitlediğimiz kimliklerden sonra
+				// yazdıysa burada görünür; hesabın parolanın yanında başka bir giriş
+				// yolu vardır ve karar yeniden verilir (geri alma). Görmezden
+				// gelinseydi adresin sahibi, bağlayanın da girebildiği hesaba konurdu.
+				var kalan int64
+				if err := tx.Model(&models.AuthIdentity{}).Where("user_id = ?", user.ID).Count(&kalan).Error; err != nil {
+					return err
+				}
+				if kalan > 0 {
+					return errAccountChanged
+				}
+				if err := tx.First(&user, "id = ?", user.ID).Error; err != nil {
+					return err
+				}
 				tookOver = true
+			case matchReclaim:
+				if err := reclaimEmail(tx, user.ID, password.ID); err != nil {
+					return err
+				}
+				reclaimedFrom = user.ID
+				var err error
+				user, err = createSocialUser(tx, email, displayName, si)
+				if err != nil {
+					return err
+				}
 			}
 		}
 		sub := si.Subject
@@ -521,6 +582,7 @@ func (h *Handlers) authenticateSocialOnce(provider string, si *auth.SocialIdenti
 			Provider:        provider,
 			ProviderSubject: &sub,
 			Email:           &email,
+			EmailVerified:   verified,
 		}).Error
 	})
 	if txErr != nil {
@@ -530,7 +592,95 @@ func (h *Handlers) authenticateSocialOnce(provider string, si *auth.SocialIdenti
 		log.Printf("auth: doğrulanmış %s e-postası parola hesabını devraldı; parola kimliği silindi, oturumlar iptal edildi (user=%s)",
 			provider, user.ID)
 	}
+	if reclaimedFrom != "" {
+		log.Printf("auth: doğrulanmış %s e-postası adresi parolayla tutan hesaptan geri aldı; eski hesabın parola kimliği silindi, adresi yer tutucuya çevrildi, oturumları iptal edildi (eski=%s, yeni=%s)",
+			provider, reclaimedFrom, user.ID)
+	}
 	return &user, nil
+}
+
+// createSocialUser, sosyal girişle gelen kişiye email adresli yeni bir hesap
+// açar.
+//
+// İstemcinin ya da sağlayıcının verdiği ad sınırsız ve denetimsizdir:
+// temizlenir ve kısaltılır (reddedilmez, giriş bozulmasın).
+func createSocialUser(tx *gorm.DB, email, displayName string, si *auth.SocialIdentity) (models.User, error) {
+	name := dto.SanitizeDisplayName(displayName)
+	if name == "" {
+		name = dto.SanitizeDisplayName(si.Name)
+	}
+	if name == "" {
+		name = dto.SanitizeDisplayName(emailLocalPart(email))
+	}
+	user := models.User{Email: email, DisplayName: name, CurrentLevel: "A1", CurrentGroup: 1}
+	err := tx.Create(&user).Error
+	return user, err
+}
+
+// emailMatch, sosyal girişte e-postayla bulunan hesap için verilen karardır.
+type emailMatch int
+
+const (
+	matchLink             emailMatch = iota // kimlik hesaba bağlanır
+	matchSameProvider                       // 409: hesapta aynı sağlayıcının başka kimliği var
+	matchPasswordConflict                   // 409: doğrulanmamış adres parola hesabına dokunamaz
+	matchTakeOver                           // tek giriş yolu parola: hesap devralınır
+	matchReclaim                            // parola + başka giriş yolu: adres geri alınır
+)
+
+// decideEmailMatch, email adresli hesabın kimliklerine (identities) bakarak
+// provider'dan gelen girişin ne yapacağını söyler; devir ve geri almada
+// silinecek parola kimliğini de döner. verified, gelen adresin sağlayıcının
+// doğruladığı gerçek bir adres olduğunu söyler.
+//
+// Adresin hesapta "kanıtlı" olması için hesabın bir Google/Apple kimliğinin
+// kaydettiği adres bu adres olmalı ve o kimliğin sağlayıcısı adresi doğrulamış
+// olmalıdır (auth_identities.email_verified). Parola kimliğinin adresi hiçbir
+// zaman kanıt sayılmaz: kayıtta sahiplik doğrulanmaz. Kanıtlı hesap, adresin
+// sahibinin kendi hesabıdır; parolası olsa da bağlanır, adresi geri alınmaz.
+//
+// Kanıt yoksa ve hesapta parola varsa hesabın adrese tek dayanağı o
+// doğrulanmamış paroladır. Hesabın parolanın yanındaki kimliği (başka bir
+// sağlayıcı ya da aynı sağlayıcının başka bir subject'i) başka bir adresi
+// taşır ya da adresi doğrulamamıştır; onu kimin tuttuğu bilinmez: adresi
+// parolayla önceden kapatan biri kendi Google/Apple hesabını bağlamış olabilir.
+// Adresin sahibini o hesaba koymak (bağlamak) o kişiye sahibin girişini vermek,
+// reddetmek (eski kural, 409) ise adresi kapatanın sahibi kalıcı olarak dışarıda
+// bırakmasına izin vermek olurdu. Ürün kararı (26 Ekim): adres doğrulanmış
+// sahibine geri verilir.
+func decideEmailMatch(identities []models.AuthIdentity, provider, email string, verified bool) (emailMatch, *models.AuthIdentity) {
+	var password *models.AuthIdentity
+	sameProvider, others, proven := false, 0, false
+	for i := range identities {
+		identity := &identities[i]
+		if identity.Provider == "password" {
+			password = identity
+			continue
+		}
+		if identity.Provider == provider {
+			sameProvider = true
+		} else {
+			others++
+		}
+		// Saklanan ve gelen adres ikisi de dto.NormalizeEmail'den geçer; tam
+		// eşitlik aranır. strings.EqualFold Unicode katlaması yapar ("ſ" ~ "s",
+		// Kelvin "K" ~ "k"): başka bir adresi doğrulamış kimliği kanıt sayabilirdi.
+		if verified && identity.EmailVerified && identity.Email != nil && dto.NormalizeEmail(*identity.Email) == email {
+			proven = true
+		}
+	}
+	switch {
+	case sameProvider && (proven || password == nil || !verified):
+		return matchSameProvider, nil
+	case proven || password == nil:
+		return matchLink, nil
+	case !verified:
+		return matchPasswordConflict, nil
+	case !sameProvider && others == 0:
+		return matchTakeOver, password
+	default:
+		return matchReclaim, password
+	}
 }
 
 // takeOverPasswordAccount, tek giriş yolu e-posta/parola olan hesabı, adresi
@@ -548,10 +698,73 @@ func (h *Handlers) authenticateSocialOnce(provider string, si *auth.SocialIdenti
 // biter. Sahipliği kanıtlanmamış parolayı bırakıp sosyal kimliği yanına
 // eklemek ise o kişiye adresin sahibinin hesabına girme yolu bırakırdı.
 //
-// Parola kimliği satırı silinirken kilitlenir: aynı anda süren bir parola
-// girişi (Login) kimliği kilitleyip token yazar; silme onu bekler, sonraki
-// iptal o token'ı da görür. Kullanıcı satırı kilitlenmez: giriş, token yazarken
-// kullanıcı satırına anahtar kilidi (FK) ister ve kilitlenme (deadlock) olurdu.
+// Çağıran hesabın kimlik satırlarını kilitlemiştir: aynı anda süren bir parola
+// girişi (Login) kimliği kilitleyip token yazar; kilit onu bekler, sonraki
+// iptal o token'ı da görür. Kullanıcı satırı baştan tam kilitle (FOR UPDATE)
+// kilitlenmez: giriş, token yazarken kullanıcı satırına anahtar kilidi (FK)
+// ister ve kilitlenme (deadlock) olurdu.
+//
+// Oturum sürümü (users.token_version) en son artırılır: önceden verilmiş access
+// token'lar hesabı denetleyen uçlarda reddedilir (bkz. requireCurrentSession).
+// Artış anahtar sütununa dokunmaz (FOR NO KEY UPDATE); token yazan giriş ve
+// rotasyonların FK anahtar kilidiyle çakışmaz, yalnızca kullanıcı satırını
+// kilitleyen bağlamayı (linkProvider) bekler.
+func takeOverPasswordAccount(tx *gorm.DB, userID string, passwordIdentityID uint64) error {
+	if err := tx.Delete(&models.AuthIdentity{}, "id = ?", passwordIdentityID).Error; err != nil {
+		return err
+	}
+	if err := revokeAllRefreshTokens(tx, userID); err != nil {
+		return err
+	}
+	return tx.Model(&models.User{}).Where("id = ?", userID).
+		Update("token_version", gorm.Expr("token_version + 1")).Error
+}
+
+// reclaimEmail, doğrulanmış bir adresi, onu yalnızca doğrulanmamış bir
+// parolayla tutan hesaptan (parolanın yanında başka giriş yolu da olan; bkz.
+// decideEmailMatch) geri alır: hesabın parola kimliği silinir, bütün refresh
+// token'ları iptal edilir ve adresi yer tutucuya
+// (reclaimed_<id>@users.kelimeler.local) çevrilir. Adresin sahibine yeni hesabı
+// çağıran aynı transaction'da açar; tek transaction olduğu için ya hepsi olur
+// ya hiçbiri.
+//
+// Hesap verisini ve kalan Google/Apple kimliğini korur, o kimlikle girmeye
+// devam eder; yer tutucu adres istemciye hiç gösterilmez (email: ""). Parola
+// silinir: adresi artık taşımayan hesapta o adresle parola girişi anlamsızdır
+// ve sahipliği kanıtlanmamış parola, adres sahibine geçtikten sonra kimsenin
+// elinde kalmamalıdır. Oturumlar iptal edilir: hesabı parolayla açmış kişi
+// başka bir cihazda oturumunu sürdürüyorsa o oturum da biter; hesaba yalnızca
+// kalan giriş yolunu elinde tutan yeniden girer.
+//
+// Kilit sırası: çağıran hesabın kimliklerini kilitlemiştir (parola girişi bunu
+// bekler, bitince kimliği silinmiş bulur). Sonra token'lar kilitlenip iptal
+// edilir, kullanıcı satırı en son güncellenir. Adres değişikliği kullanıcı
+// satırına tam kilit alır (users.email unique'tir); bu, token yazan giriş ve
+// rotasyonların FK anahtar kilidiyle çakışır. Önce alınsaydı, kimliği ya da eski
+// token'ı kilitleyip token yazmayı bekleyen bir giriş ya da rotasyonla
+// karşılıklı bekleme olurdu; en sonda alındığında o istekler ya bitmiştir ya da
+// bu transaction'ın kilitlediği satırları beklemektedir.
+func reclaimEmail(tx *gorm.DB, userID string, passwordIdentityID uint64) error {
+	if err := tx.Delete(&models.AuthIdentity{}, "id = ?", passwordIdentityID).Error; err != nil {
+		return err
+	}
+	if err := revokeAllRefreshTokens(tx, userID); err != nil {
+		return err
+	}
+	// Oturum sürümü de artar: önceden verilmiş access token'lar hesabı
+	// denetleyen uçlarda reddedilir (bkz. requireCurrentSession).
+	return tx.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
+		"email":         dto.SyntheticEmail(reclaimedEmailPrefix + userID),
+		"token_version": gorm.Expr("token_version + 1"),
+	}).Error
+}
+
+// reclaimedEmailPrefix, adresi geri alınan hesabın yer tutucu adresinin
+// önekidir: reclaimed_<kullanıcı id>@users.kelimeler.local.
+const reclaimedEmailPrefix = "reclaimed_"
+
+// revokeAllRefreshTokens, kullanıcının bütün etkin refresh token'larını iptal
+// eder.
 //
 // Etkin token'lar iptalden önce ayrı bir sorguyla kilitlenir: aynı anda süren
 // bir rotasyon eski token'ı kilitleyip halefini yazmışsa (henüz commit yok)
@@ -560,10 +773,7 @@ func (h *Handlers) authenticateSocialOnce(provider string, si *auth.SocialIdenti
 // sonraki UPDATE yeni bir görüntüyle başlar ve halefi de iptal eder. Kilitten
 // sonra başlayan rotasyon ise eski token'ı kilitleyemeden bekler ve iptal
 // edilmiş bulur.
-func takeOverPasswordAccount(tx *gorm.DB, userID string, passwordIdentityID uint64) error {
-	if err := tx.Delete(&models.AuthIdentity{}, "id = ?", passwordIdentityID).Error; err != nil {
-		return err
-	}
+func revokeAllRefreshTokens(tx *gorm.DB, userID string) error {
 	if err := tx.Exec(`SELECT id FROM refresh_tokens WHERE user_id = ? AND revoked_at IS NULL FOR UPDATE`,
 		userID).Error; err != nil {
 		return err
@@ -818,6 +1028,16 @@ func (h *Handlers) LinkApple(c *fiber.Ctx) error {
 // e-postası o olur (değilse yer tutucu adres kalır). Kimlik başka bir
 // kullanıcıya bağlıysa 409 provider_already_linked döner; istemci misafiri o
 // hesaba geçirme akışını yürütür.
+//
+// Adres burada geri alınmaz (bkz. reclaimEmail). Sosyal girişte geri almayı
+// gerektiren tıkanma bağlamada oluşmaz: adres başka bir hesaptayken de bağlama
+// başarılıdır, adresin sahibi kimliğini bağlar ve ondan sonra o kimlikle
+// (subject ile) her zaman kendi hesabına girer; eksik kalan yalnızca adresin
+// hesaba yazılmasıdır. Geri almak ise bir bağlama isteğinin üçüncü bir hesabın
+// parolasını silmesi ve oturumlarını kapatması olurdu; o hesabın tek giriş yolu
+// parolaysa hesap girişsiz kalırdı (devirdeki gibi sahibine verilemez: oturum
+// sahibinin zaten kendi hesabı vardır). O hesap adresin sahibinin önceden
+// parolayla açtığı kendi hesabı da olabilir.
 func (h *Handlers) linkProvider(c *fiber.Ctx, userID, provider string, si *auth.SocialIdentity) error {
 	var existing models.AuthIdentity
 	err := h.DB.Where("provider = ? AND provider_subject = ?", provider, si.Subject).First(&existing).Error
@@ -844,11 +1064,17 @@ func (h *Handlers) linkProvider(c *fiber.Ctx, userID, provider string, si *auth.
 		if err := lockUser(tx, userID, &user); err != nil {
 			return err
 		}
+		// Kilit, aynı anda süren bir devri de bekletir: devir önce biterse
+		// sürüm artmıştır ve eski oturum burada reddedilir.
+		if err := requireCurrentSession(c, &user); err != nil {
+			return err
+		}
 		if err := tx.Create(&models.AuthIdentity{
 			UserID:          userID,
 			Provider:        provider,
 			ProviderSubject: &sub,
 			Email:           email,
+			EmailVerified:   email != nil,
 		}).Error; err != nil {
 			return err
 		}
@@ -943,6 +1169,9 @@ func (h *Handlers) LinkPassword(c *fiber.Ctx) error {
 		if err := lockUser(tx, userID, &user); err != nil {
 			return err
 		}
+		if err := requireCurrentSession(c, &user); err != nil {
+			return err
+		}
 		if !user.IsGuest {
 			if linkedPasswordMatches(tx, &user, req.Email, req.Password) {
 				return nil // yanıtı kaybolan bağlamanın tekrarı
@@ -1014,6 +1243,15 @@ func (h *Handlers) UnlinkProvider(provider string) fiber.Handler {
 			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 				Where("user_id = ?", userID).Order("id").
 				Find(&identities).Error; err != nil {
+				return err
+			}
+			// Kimlikler kilitliyken okunur: aynı anda süren bir devir ya da geri
+			// alma bitmişse sürüm artmıştır.
+			var user models.User
+			if err := findUser(tx, userID, &user); err != nil {
+				return err
+			}
+			if err := requireCurrentSession(c, &user); err != nil {
 				return err
 			}
 			usable := 0
@@ -1091,11 +1329,25 @@ func (h *Handlers) DeleteAccount(c *fiber.Ctx) error {
 	var req dto.DeleteAccountRequest
 	_ = c.BodyParser(&req)
 
+	// Eski oturum (devirden ya da geri almadan önce verilmiş access token)
+	// hesabı silemez; Apple erişimi de iptal edilmeden reddedilir. Hesap yoksa
+	// silme eskisi gibi sessizce tamamlanır.
+	version := middleware.TokenVersion(c)
+	var user models.User
+	err := h.DB.First(&user, "id = ?", userID).Error
+	if err == nil {
+		if err := requireCurrentSession(c, &user); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+
 	if err := h.revokeAppleAccess(userID, strings.TrimSpace(req.AppleAuthorizationCode)); err != nil {
 		return err
 	}
 
-	if err := deleteUserData(h.DB, userID); err != nil {
+	if err := deleteUserData(h.DB, userID, version); err != nil {
 		return err
 	}
 	return c.SendStatus(fiber.StatusNoContent)
@@ -1112,13 +1364,29 @@ func (h *Handlers) DeleteAccount(c *fiber.Ctx) error {
 // satır yazan bir istek) yine kilitlenme üretebilir; PostgreSQL bu durumda
 // işlemlerden birini 40P01 ile iptal eder. Silme o zaman bir kez yeniden
 // denenir: karşı işlem bu arada ilerler ve ikinci deneme beklediği kilidi alır.
-func deleteUserData(db *gorm.DB, userID string) error {
+//
+// Kullanıcı satırı yalnızca oturum sürümü tokenVersion'sa silinir: silme,
+// aynı anda süren bir devri beklediyse sürüm artmıştır ve eski oturumun silme
+// isteği 401 ile geri alınır (bkz. requireCurrentSession). Satır zaten yoksa
+// silme tamamlanmış sayılır.
+func deleteUserData(db *gorm.DB, userID string, tokenVersion int) error {
 	del := func() error {
 		return db.Transaction(func(tx *gorm.DB) error {
 			if err := tx.Where("user_id = ?", userID).Delete(&models.WordProgress{}).Error; err != nil {
 				return err
 			}
-			return tx.Delete(&models.User{}, "id = ?", userID).Error
+			res := tx.Delete(&models.User{}, "id = ? AND token_version = ?", userID, tokenVersion)
+			if res.Error != nil || res.RowsAffected > 0 {
+				return res.Error
+			}
+			var kalan int64
+			if err := tx.Model(&models.User{}).Where("id = ?", userID).Count(&kalan).Error; err != nil {
+				return err
+			}
+			if kalan > 0 {
+				return apiErr(fiber.StatusUnauthorized, "unauthenticated", "oturum geçersiz")
+			}
+			return nil
 		})
 	}
 	err := del()

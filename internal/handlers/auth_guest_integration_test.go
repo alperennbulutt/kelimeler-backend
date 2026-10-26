@@ -505,46 +505,8 @@ func TestAuthenticateSocial_DogrulanmisEpostaParolaHesabiniDevralir(t *testing.T
 	}
 }
 
-func TestAuthenticateSocial_ParolaYanindaBaskaGirisYoluVarsaDevralmaz(t *testing.T) {
-	cases := []struct {
-		name     string
-		extra    string // parolanın yanındaki kimlik
-		provider string // gelen sağlayıcı
-		wantMsg  string
-	}{
-		// Apple kimliğini kimin tuttuğu bilinmez: adresin sahibi o kişiyle aynı
-		// hesaba konmaz.
-		{"parola + apple, google gelir", "apple", "google", "parola ile kayıtlı"},
-		{"parola + google, apple gelir", "google", "apple", "parola ile kayıtlı"},
-		// Bugünkü kural: aynı sağlayıcının başka kimliği varsa 409.
-		{"parola + google, başka google gelir", "google", "google", "aynı sağlayıcının"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			gdb := testDB(t)
-			h := guestHandlers(gdb, "production")
-			app := authApp(h)
-			u, refresh := passwordAccount(t, gdb, app, "devirsiz")
-			testIdentity(t, gdb, &u, c.extra)
-
-			si := &auth.SocialIdentity{Subject: "yeni-" + c.provider + "-" + u.ID, Email: u.Email}
-			_, err := h.authenticateSocial(c.provider, si, "")
-			apiError := apiErrorOf(t, err)
-			if apiError.Status != fiber.StatusConflict || apiError.Code != "email_in_use" {
-				t.Errorf("hata = %d %q, beklenen 409 email_in_use", apiError.Status, apiError.Code)
-			}
-			if !strings.Contains(apiError.Message, c.wantMsg) {
-				t.Errorf("mesaj = %q, beklenen %q içersin", apiError.Message, c.wantMsg)
-			}
-			if n := identityCount(t, gdb, u.ID, "password"); n != 1 {
-				t.Errorf("parola kimliği sayısı = %d, beklenen 1", n)
-			}
-			if loadRefreshToken(t, gdb, refresh).RevokedAt != nil {
-				t.Error("reddedilen devir oturumu iptal etti")
-			}
-		})
-	}
-}
+// Parolanın yanında başka bir giriş yolu olan hesap devralınmaz; adresi geri
+// alınır (bkz. auth_reclaim_integration_test.go).
 
 // Devir ile aynı anda süren bir parola girişi: giriş, parola kimliğini
 // kilitleyip token yazarken devir bekler; sonra o token'ı da iptal eder.

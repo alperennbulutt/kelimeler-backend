@@ -20,6 +20,21 @@ type AuthIdentity struct {
 	// Sağlayıcının bildirdiği email.
 	Email *string `gorm:"type:citext" json:"email,omitempty"`
 
+	// EmailVerified, Email'in bu kimliğin sağlayıcısı tarafından doğrulandığını
+	// (Google/Apple email_verified) kimlik açılırken kaydeder. 'password'
+	// kimliğinde her zaman false'tur: parola kaydında adres sahipliği
+	// doğrulanmaz.
+	//
+	// Kolon eklenmeden önce yazılan satırlar false olur (sosyal kimlikler de):
+	// 6b85321'den önceki sunucu sağlayıcının doğrulamadığı adresi de kimliğe
+	// yazıyordu, yani eski satırdaki adresin doğrulanmış olduğu veriden
+	// kanıtlanamaz. Yanlışlıkla "doğrulanmış" saymak, adresin gerçek sahibinin
+	// girişini o adresi doğrulanmamış tutan hesaba bağlatabilirdi; "doğrulanmamış"
+	// saymanın en kötü sonucu ise adresin o hesaptan geri alınmasıdır (bkz.
+	// handlers.authenticateSocialOnce). Ayrıntı: DEPLOYMENT.md, "Adresin geri
+	// alınması".
+	EmailVerified bool `gorm:"not null;default:false" json:"-"`
+
 	// Apple'ın refresh token'ı, yalnızca provider='apple' için dolu.
 	// Hesap silinirken Apple'a revoke isteği göndermek için saklanır;
 	// istemciye asla dönülmez.
