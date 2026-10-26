@@ -521,6 +521,7 @@ func (h *Handlers) authenticateSocialOnce(provider string, si *auth.SocialIdenti
 			Provider:        provider,
 			ProviderSubject: &sub,
 			Email:           &email,
+			EmailVerified:   verified,
 		}).Error
 	})
 	if txErr != nil {
@@ -849,6 +850,7 @@ func (h *Handlers) linkProvider(c *fiber.Ctx, userID, provider string, si *auth.
 			Provider:        provider,
 			ProviderSubject: &sub,
 			Email:           email,
+			EmailVerified:   email != nil,
 		}).Error; err != nil {
 			return err
 		}
