@@ -61,7 +61,7 @@ type tokenPair struct {
 // (GUEST_REFRESH_TOKEN_TTL / REFRESH_TOKEN_TTL); rotasyon kullanıcıyı her
 // seferinde yeniden okuduğu için kaydolan misafir olağan ömre geçer.
 func (h *Handlers) newTokenPair(user *models.User, family string) (tokenPair, *models.RefreshToken, error) {
-	access, err := h.Tokens.GenerateAccessToken(user.ID, user.Email)
+	access, err := h.Tokens.GenerateAccessToken(user.ID, user.Email, user.TokenVersion)
 	if err != nil {
 		return tokenPair{}, nil, err
 	}
@@ -124,6 +124,24 @@ func (h *Handlers) respondUser(c *fiber.Ctx, userID string) error {
 		return err
 	}
 	return c.JSON(fiber.Map{"user": dto.NewUserDTO(&user, providers)})
+}
+
+// requireCurrentSession, isteğin access token'ının hesabın şimdiki oturum
+// sürümüyle (models.User.TokenVersion) verildiğini doğrular; değilse 401
+// döner, istemci sessizce yenilemeyi dener.
+//
+// Hesap başka birine geçtiğinde (devir) ya da adresi geri alındığında refresh
+// token'lar iptal edilir ve sürüm artar; ama önceden verilmiş access token'lar
+// imzası geçerli olduğu için ACCESS_TOKEN_TTL boyunca kabul edilir. Hesabı
+// denetleyen uçlar (giriş yolu ekleme/kaldırma, hesap silme) bu kontrolü
+// yapar: yapmasalar adresi parolayla önceden kapatan kişi, hesap adresin
+// sahibine devredildikten sonra elindeki access token'la kendi Apple/Google'ını
+// o hesaba bağlayıp ona kalıcı olarak girebilir ya da hesabı silebilirdi.
+func requireCurrentSession(c *fiber.Ctx, user *models.User) error {
+	if middleware.TokenVersion(c) != user.TokenVersion {
+		return apiErr(fiber.StatusUnauthorized, "unauthenticated", "oturum geçersiz")
+	}
+	return nil
 }
 
 // --- endpoint'ler ---
@@ -529,6 +547,22 @@ func (h *Handlers) authenticateSocialOnce(provider string, si *auth.SocialIdenti
 				if err := takeOverPasswordAccount(tx, user.ID, password.ID); err != nil {
 					return err
 				}
+				// Sürüm artışı kullanıcı satırını kilitler: aynı anda süren bir
+				// bağlama (linkProvider, kullanıcı satırı kilitli) bitene kadar
+				// bekler. O bağlama kimliğini kilitlediğimiz kimliklerden sonra
+				// yazdıysa burada görünür; hesabın parolanın yanında başka bir giriş
+				// yolu vardır ve karar yeniden verilir (geri alma). Görmezden
+				// gelinseydi adresin sahibi, bağlayanın da girebildiği hesaba konurdu.
+				var kalan int64
+				if err := tx.Model(&models.AuthIdentity{}).Where("user_id = ?", user.ID).Count(&kalan).Error; err != nil {
+					return err
+				}
+				if kalan > 0 {
+					return errAccountChanged
+				}
+				if err := tx.First(&user, "id = ?", user.ID).Error; err != nil {
+					return err
+				}
 				tookOver = true
 			case matchReclaim:
 				if err := reclaimEmail(tx, user.ID, password.ID); err != nil {
@@ -663,13 +697,24 @@ func decideEmailMatch(identities []models.AuthIdentity, provider, email string, 
 //
 // Çağıran hesabın kimlik satırlarını kilitlemiştir: aynı anda süren bir parola
 // girişi (Login) kimliği kilitleyip token yazar; kilit onu bekler, sonraki
-// iptal o token'ı da görür. Kullanıcı satırı kilitlenmez: giriş, token yazarken
-// kullanıcı satırına anahtar kilidi (FK) ister ve kilitlenme (deadlock) olurdu.
+// iptal o token'ı da görür. Kullanıcı satırı baştan tam kilitle (FOR UPDATE)
+// kilitlenmez: giriş, token yazarken kullanıcı satırına anahtar kilidi (FK)
+// ister ve kilitlenme (deadlock) olurdu.
+//
+// Oturum sürümü (users.token_version) en son artırılır: önceden verilmiş access
+// token'lar hesabı denetleyen uçlarda reddedilir (bkz. requireCurrentSession).
+// Artış anahtar sütununa dokunmaz (FOR NO KEY UPDATE); token yazan giriş ve
+// rotasyonların FK anahtar kilidiyle çakışmaz, yalnızca kullanıcı satırını
+// kilitleyen bağlamayı (linkProvider) bekler.
 func takeOverPasswordAccount(tx *gorm.DB, userID string, passwordIdentityID uint64) error {
 	if err := tx.Delete(&models.AuthIdentity{}, "id = ?", passwordIdentityID).Error; err != nil {
 		return err
 	}
-	return revokeAllRefreshTokens(tx, userID)
+	if err := revokeAllRefreshTokens(tx, userID); err != nil {
+		return err
+	}
+	return tx.Model(&models.User{}).Where("id = ?", userID).
+		Update("token_version", gorm.Expr("token_version + 1")).Error
 }
 
 // reclaimEmail, doğrulanmış bir adresi, onu yalnızca doğrulanmamış bir
@@ -703,8 +748,12 @@ func reclaimEmail(tx *gorm.DB, userID string, passwordIdentityID uint64) error {
 	if err := revokeAllRefreshTokens(tx, userID); err != nil {
 		return err
 	}
-	return tx.Model(&models.User{}).Where("id = ?", userID).
-		Update("email", dto.SyntheticEmail(reclaimedEmailPrefix+userID)).Error
+	// Oturum sürümü de artar: önceden verilmiş access token'lar hesabı
+	// denetleyen uçlarda reddedilir (bkz. requireCurrentSession).
+	return tx.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
+		"email":         dto.SyntheticEmail(reclaimedEmailPrefix + userID),
+		"token_version": gorm.Expr("token_version + 1"),
+	}).Error
 }
 
 // reclaimedEmailPrefix, adresi geri alınan hesabın yer tutucu adresinin
@@ -1012,6 +1061,11 @@ func (h *Handlers) linkProvider(c *fiber.Ctx, userID, provider string, si *auth.
 		if err := lockUser(tx, userID, &user); err != nil {
 			return err
 		}
+		// Kilit, aynı anda süren bir devri de bekletir: devir önce biterse
+		// sürüm artmıştır ve eski oturum burada reddedilir.
+		if err := requireCurrentSession(c, &user); err != nil {
+			return err
+		}
 		if err := tx.Create(&models.AuthIdentity{
 			UserID:          userID,
 			Provider:        provider,
@@ -1112,6 +1166,9 @@ func (h *Handlers) LinkPassword(c *fiber.Ctx) error {
 		if err := lockUser(tx, userID, &user); err != nil {
 			return err
 		}
+		if err := requireCurrentSession(c, &user); err != nil {
+			return err
+		}
 		if !user.IsGuest {
 			if linkedPasswordMatches(tx, &user, req.Email, req.Password) {
 				return nil // yanıtı kaybolan bağlamanın tekrarı
@@ -1183,6 +1240,15 @@ func (h *Handlers) UnlinkProvider(provider string) fiber.Handler {
 			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 				Where("user_id = ?", userID).Order("id").
 				Find(&identities).Error; err != nil {
+				return err
+			}
+			// Kimlikler kilitliyken okunur: aynı anda süren bir devir ya da geri
+			// alma bitmişse sürüm artmıştır.
+			var user models.User
+			if err := findUser(tx, userID, &user); err != nil {
+				return err
+			}
+			if err := requireCurrentSession(c, &user); err != nil {
 				return err
 			}
 			usable := 0
@@ -1260,11 +1326,25 @@ func (h *Handlers) DeleteAccount(c *fiber.Ctx) error {
 	var req dto.DeleteAccountRequest
 	_ = c.BodyParser(&req)
 
+	// Eski oturum (devirden ya da geri almadan önce verilmiş access token)
+	// hesabı silemez; Apple erişimi de iptal edilmeden reddedilir. Hesap yoksa
+	// silme eskisi gibi sessizce tamamlanır.
+	version := middleware.TokenVersion(c)
+	var user models.User
+	err := h.DB.First(&user, "id = ?", userID).Error
+	if err == nil {
+		if err := requireCurrentSession(c, &user); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+
 	if err := h.revokeAppleAccess(userID, strings.TrimSpace(req.AppleAuthorizationCode)); err != nil {
 		return err
 	}
 
-	if err := deleteUserData(h.DB, userID); err != nil {
+	if err := deleteUserData(h.DB, userID, version); err != nil {
 		return err
 	}
 	return c.SendStatus(fiber.StatusNoContent)
@@ -1281,13 +1361,29 @@ func (h *Handlers) DeleteAccount(c *fiber.Ctx) error {
 // satır yazan bir istek) yine kilitlenme üretebilir; PostgreSQL bu durumda
 // işlemlerden birini 40P01 ile iptal eder. Silme o zaman bir kez yeniden
 // denenir: karşı işlem bu arada ilerler ve ikinci deneme beklediği kilidi alır.
-func deleteUserData(db *gorm.DB, userID string) error {
+//
+// Kullanıcı satırı yalnızca oturum sürümü tokenVersion'sa silinir: silme,
+// aynı anda süren bir devri beklediyse sürüm artmıştır ve eski oturumun silme
+// isteği 401 ile geri alınır (bkz. requireCurrentSession). Satır zaten yoksa
+// silme tamamlanmış sayılır.
+func deleteUserData(db *gorm.DB, userID string, tokenVersion int) error {
 	del := func() error {
 		return db.Transaction(func(tx *gorm.DB) error {
 			if err := tx.Where("user_id = ?", userID).Delete(&models.WordProgress{}).Error; err != nil {
 				return err
 			}
-			return tx.Delete(&models.User{}, "id = ?", userID).Error
+			res := tx.Delete(&models.User{}, "id = ? AND token_version = ?", userID, tokenVersion)
+			if res.Error != nil || res.RowsAffected > 0 {
+				return res.Error
+			}
+			var kalan int64
+			if err := tx.Model(&models.User{}).Where("id = ?", userID).Count(&kalan).Error; err != nil {
+				return err
+			}
+			if kalan > 0 {
+				return apiErr(fiber.StatusUnauthorized, "unauthenticated", "oturum geçersiz")
+			}
+			return nil
 		})
 	}
 	err := del()

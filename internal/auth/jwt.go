@@ -42,10 +42,15 @@ const (
 type AccessClaims struct {
 	jwt.RegisteredClaims
 	Email string `json:"email"`
+
+	// TokenVersion, token verilirken hesabın oturum sürümüdür
+	// (models.User.TokenVersion). Claim'i taşımayan eski token'lar 0 sayılır.
+	TokenVersion int `json:"tv,omitempty"`
 }
 
 // GenerateAccessToken, kullanıcı için kısa ömürlü HS256 access token üretir.
-func (s *TokenService) GenerateAccessToken(userID, email string) (string, error) {
+// tokenVersion, hesabın o anki oturum sürümüdür.
+func (s *TokenService) GenerateAccessToken(userID, email string, tokenVersion int) (string, error) {
 	now := time.Now()
 	claims := AccessClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -55,7 +60,8 @@ func (s *TokenService) GenerateAccessToken(userID, email string) (string, error)
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(s.accessTTL)),
 		},
-		Email: email,
+		Email:        email,
+		TokenVersion: tokenVersion,
 	}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(s.secret)
 }

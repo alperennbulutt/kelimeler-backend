@@ -859,7 +859,7 @@ func authRequest(t *testing.T, h *Handlers, u *models.User, method, path string,
 	if payload != nil {
 		req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
 	}
-	access, err := h.Tokens.GenerateAccessToken(u.ID, u.Email)
+	access, err := h.Tokens.GenerateAccessToken(u.ID, u.Email, u.TokenVersion)
 	if err != nil {
 		t.Fatalf("access token üretilemedi: %v", err)
 	}
@@ -1415,7 +1415,7 @@ func TestDeleteAccount_BosVeyaBozukGovdeSilmeyiEngellemez(t *testing.T) {
 			req.Body = http.NoBody
 			if c.body != "" {
 				req = httptest.NewRequest(http.MethodDelete, "/api/v1/auth/account", strings.NewReader(c.body))
-				access, _ := h.Tokens.GenerateAccessToken(u.ID, u.Email)
+				access, _ := h.Tokens.GenerateAccessToken(u.ID, u.Email, u.TokenVersion)
 				req.Header.Set(fiber.HeaderAuthorization, "Bearer "+access)
 			}
 			req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)

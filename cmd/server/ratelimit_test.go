@@ -40,7 +40,7 @@ func limiterApp(t *testing.T, max int, trusted []string) (*fiber.App, *auth.Toke
 
 func token(t *testing.T, ts *auth.TokenService, userID string) string {
 	t.Helper()
-	tok, err := ts.GenerateAccessToken(userID, userID+"@example.test")
+	tok, err := ts.GenerateAccessToken(userID, userID+"@example.test", 0)
 	if err != nil {
 		t.Fatalf("token üretilemedi: %v", err)
 	}
