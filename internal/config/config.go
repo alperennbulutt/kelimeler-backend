@@ -14,7 +14,7 @@ import (
 )
 
 // Geçerli APP_ENV değerleri. Başka bir değer (boş, "prod", "Production" ...)
-// kabul edilmez: production'a özgü korumalar (parola uçlarının kapanması,
+// kabul edilmez: production'a özgü korumalar (sayaç sıfırlama ucunun kapanması,
 // CORS, JWT_SECRET denetimi) yalnızca tam "production" ile devreye girer ve
 // yazım hatası sunucuyu sessizce geliştirme kipinde açardı.
 const (

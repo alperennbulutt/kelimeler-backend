@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"kelimeler-backend/internal/auth"
@@ -31,15 +32,13 @@ func (h *Handlers) loadLinkedProviders(userID string) ([]string, error) {
 	return providers, err
 }
 
-// usableSignInMethod, sağlayıcının bu ortamda giriş için kullanılabilir olup
-// olmadığını söyler. Production'da parola uçları kapalıdır (bkz. routes.go);
-// eski 'password' kimliği orada giriş yöntemi sayılmaz.
+// usableSignInMethod, sağlayıcının giriş için kullanılabilir olup olmadığını
+// söyler: bağlantı kaldırmada hesapta en az bir tane kalmalıdır. E-posta/parola
+// girişi her ortamda açık olduğundan 'password' de bir giriş yoludur.
 func (h *Handlers) usableSignInMethod(provider string) bool {
 	switch provider {
-	case "google", "apple":
+	case "google", "apple", "password":
 		return true
-	case "password":
-		return h.Cfg == nil || !h.Cfg.IsProduction()
 	}
 	return false
 }
@@ -198,7 +197,30 @@ func (h *Handlers) Register(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(resp)
 }
 
+// errInvalidCredentials, girişte e-postanın bulunamadığını, hesabın parolası
+// olmadığını ve parolanın yanlış olduğunu ayırt etmeden bildirir: yanıttan
+// hangi adreslerin kayıtlı olduğu öğrenilmesin.
+func errInvalidCredentials() error {
+	return apiErr(fiber.StatusUnauthorized, "invalid_credentials", "email veya parola hatalı")
+}
+
+// dummyPasswordHash, hesabı ya da parolası olmayan girişlerde de bir bcrypt
+// karşılaştırması yapmak için kullanılır: yanıt süresi kayıtlı adresi ele
+// vermesin (bcrypt maliyeti 12, karşılaştırma ~250 ms sürer).
+var dummyPasswordHash = sync.OnceValue(func() string {
+	hash, err := auth.HashPassword("kelimeler-zamanlama-esitleme")
+	if err != nil {
+		return ""
+	}
+	return hash
+})
+
 // Login: email/parola doğrular.
+//
+// Refresh token, parola kimliği kilitliyken ve hâlâ duruyorken yazılır: aynı
+// anda doğrulanmış bir sağlayıcı e-postası bu hesabı devralırsa (bkz.
+// authenticateSocialOnce) ya devralma bu girişi bekler ve verdiği token'ı da
+// iptal eder, ya da giriş devralmayı bekler, kimliği silinmiş bulur ve 401 alır.
 func (h *Handlers) Login(c *fiber.Ctx) error {
 	var req dto.LoginRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -211,22 +233,41 @@ func (h *Handlers) Login(c *fiber.Ctx) error {
 	var user models.User
 	if err := h.DB.Where("email = ?", req.Email).First(&user).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return apiErr(fiber.StatusUnauthorized, "invalid_credentials", "email veya parola hatalı")
+			auth.VerifyPassword(dummyPasswordHash(), req.Password)
+			return errInvalidCredentials()
 		}
 		return err
 	}
 	var identity models.AuthIdentity
 	if err := h.DB.Where("user_id = ? AND provider = ?", user.ID, "password").First(&identity).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return apiErr(fiber.StatusUnauthorized, "invalid_credentials", "email veya parola hatalı")
+			auth.VerifyPassword(dummyPasswordHash(), req.Password)
+			return errInvalidCredentials()
 		}
 		return err
 	}
 	if identity.PasswordHash == nil || !auth.VerifyPassword(*identity.PasswordHash, req.Password) {
-		return apiErr(fiber.StatusUnauthorized, "invalid_credentials", "email veya parola hatalı")
+		return errInvalidCredentials()
 	}
 
-	resp, err := h.issueTokens(&user)
+	pair, row, err := h.newTokenPair(&user, "")
+	if err != nil {
+		return err
+	}
+	err = h.DB.Transaction(func(tx *gorm.DB) error {
+		var locked models.AuthIdentity
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&locked, "id = ?", identity.ID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errInvalidCredentials() // bu arada devralındı
+			}
+			return err
+		}
+		return tx.Create(row).Error
+	})
+	if err != nil {
+		return err
+	}
+	resp, err := h.authResponse(&user, pair)
 	if err != nil {
 		return err
 	}
@@ -323,8 +364,10 @@ func providerEmail(si *auth.SocialIdentity) string {
 
 // authenticateSocial: provider+subject ile bul; yoksa email ile eşle/oluştur ve kimliği bağla.
 //
-// E-postayla bulunan hesabın 'password' kimliği ya da aynı sağlayıcının başka
-// bir kimliği varsa bağlama yapılmaz, 409 döner (bkz. aşağıdaki gerekçeler).
+// E-postayla bulunan hesapta aynı sağlayıcının başka bir kimliği varsa bağlama
+// yapılmaz, 409 döner. Hesabın tek giriş yolu e-posta/parolaysa doğrulanmış
+// sağlayıcı e-postası hesabı devralır (bkz. takeOverPasswordAccount); parolaya
+// ek olarak başka bir giriş yolu varsa 409 döner (aşağıdaki gerekçeler).
 //
 // İlk giriş aynı anda iki kez gelirse (çift dokunuş, yeniden deneme) ikinci
 // istek kullanıcıyı ya da kimliği yazarken unique kısıta çarpar. Kısıt ancak
@@ -352,14 +395,18 @@ func (h *Handlers) authenticateSocialOnce(provider string, si *auth.SocialIdenti
 		return nil, err
 	}
 
+	// verified: adres sağlayıcının doğruladığı gerçek bir adres mi (yer
+	// tutucuya düşmedi mi)? Yalnızca böyle bir adres parola hesabını devralabilir.
 	email := providerEmail(si)
-	if email == "" {
+	verified := email != ""
+	if !verified {
 		// Sağlayıcı email vermeyebilir (Apple sonraki girişlerde) ya da verdiği
 		// adres doğrulanmamış olabilir; ikisinde de e-postayla eşleme yapılmaz.
 		email = dto.SyntheticEmail(provider + "_" + si.Subject)
 	}
 
 	var user models.User
+	tookOver := false
 	txErr := h.DB.Transaction(func(tx *gorm.DB) error {
 		findErr := tx.Where("email = ?", email).First(&user).Error
 		if errors.Is(findErr, gorm.ErrRecordNotFound) {
@@ -379,34 +426,41 @@ func (h *Handlers) authenticateSocialOnce(provider string, si *auth.SocialIdenti
 		} else if findErr != nil {
 			return findErr
 		} else {
-			// 'password' kimliği e-posta sahipliği kanıtlanmadan açılır. Böyle bir
-			// hesaba sosyal kimliği sessizce bağlamak, adresi önceden kaydeden
-			// kişiye adresin gerçek sahibinin hesabına parolayla girme yolu
-			// bırakır. Reddedilir; hesaba ve verisine dokunulmaz.
-			var passwordIdentities int64
-			if err := tx.Model(&models.AuthIdentity{}).
-				Where("user_id = ? AND provider = ?", user.ID, "password").
-				Count(&passwordIdentities).Error; err != nil {
+			var identities []models.AuthIdentity
+			if err := tx.Where("user_id = ?", user.ID).Order("id").Find(&identities).Error; err != nil {
 				return err
 			}
-			if passwordIdentities > 0 {
-				return apiErr(fiber.StatusConflict, "email_in_use",
-					"bu email parola ile kayıtlı bir hesaba ait")
+			var password *models.AuthIdentity
+			others := 0
+			for i := range identities {
+				switch identities[i].Provider {
+				case "password":
+					password = &identities[i]
+				case provider:
+					// Hesapta bu sağlayıcının başka bir kimliği (farklı subject)
+					// varsa ikincisi eklenemez (uq_user_provider). Kısıta çarpıp
+					// 500 dönmek yerine hesaba dokunmadan reddedilir. Eski kimliği
+					// yenisiyle değiştirmek, adresi devralan kişiye hesabı vermek olurdu.
+					return apiErr(fiber.StatusConflict, "email_in_use",
+						"bu email aynı sağlayıcının başka bir hesabına bağlı")
+				default:
+					others++
+				}
 			}
-
-			// Hesapta bu sağlayıcının başka bir kimliği (farklı subject) varsa
-			// ikincisi eklenemez (uq_user_provider). Kısıta çarpıp 500 dönmek
-			// yerine hesaba dokunmadan reddedilir. Eski kimliği yenisiyle
-			// değiştirmek, adresi devralan kişiye hesabı vermek olurdu.
-			var sameProvider int64
-			if err := tx.Model(&models.AuthIdentity{}).
-				Where("user_id = ? AND provider = ?", user.ID, provider).
-				Count(&sameProvider).Error; err != nil {
-				return err
-			}
-			if sameProvider > 0 {
-				return apiErr(fiber.StatusConflict, "email_in_use",
-					"bu email aynı sağlayıcının başka bir hesabına bağlı")
+			if password != nil {
+				// 'password' kimliği e-posta sahipliği kanıtlanmadan açılır.
+				// Doğrulanmamış adresle ya da hesapta parolanın yanında başka bir
+				// giriş yolu varken bağlamak, o yolu kimin elinde tuttuğunu
+				// bilmeden adresin sahibini o kişiyle aynı hesaba koymak olurdu:
+				// reddedilir, hesaba ve verisine dokunulmaz.
+				if !verified || others > 0 {
+					return apiErr(fiber.StatusConflict, "email_in_use",
+						"bu email parola ile kayıtlı bir hesaba ait")
+				}
+				if err := takeOverPasswordAccount(tx, user.ID, password.ID); err != nil {
+					return err
+				}
+				tookOver = true
 			}
 		}
 		sub := si.Subject
@@ -420,7 +474,39 @@ func (h *Handlers) authenticateSocialOnce(provider string, si *auth.SocialIdenti
 	if txErr != nil {
 		return nil, txErr
 	}
+	if tookOver {
+		log.Printf("auth: doğrulanmış %s e-postası parola hesabını devraldı; parola kimliği silindi, oturumlar iptal edildi (user=%s)",
+			provider, user.ID)
+	}
 	return &user, nil
+}
+
+// takeOverPasswordAccount, tek giriş yolu e-posta/parola olan hesabı, adresi
+// doğrulanmış bir sağlayıcı kimliğine devretmeye hazırlar: parola kimliği
+// silinir ve kullanıcının bütün refresh token'ları iptal edilir (diğer
+// cihazlardaki oturumlar ilk yenilemede düşer; verilmiş access token'lar en
+// fazla ACCESS_TOKEN_TTL kadar geçerli kalır). Sosyal kimliği çağıran aynı
+// transaction'da ekler.
+//
+// Gerekçe: parola kaydında e-posta sahipliği doğrulanmaz (doğrulama e-postası
+// altyapısı yok). Adres sahipliği kanıtlanmadan açılan bir parola, adresin
+// gerçek sahibini kendi adresiyle giriş yapmaktan alıkoymamalıdır. Hesabı
+// parolayla açan gerçekten adresin sahibiyse ilerlemesi korunur ve artık
+// Google/Apple ile girer; başkasıysa (adresi önceden kapatan biri) erişimi
+// biter. Sahipliği kanıtlanmamış parolayı bırakıp sosyal kimliği yanına
+// eklemek ise o kişiye adresin sahibinin hesabına girme yolu bırakırdı.
+//
+// Parola kimliği satırı silinirken kilitlenir: aynı anda süren bir parola
+// girişi (Login) kimliği kilitleyip token yazar; silme onu bekler, sonraki
+// iptal o token'ı da görür. Kullanıcı satırı kilitlenmez: giriş, token yazarken
+// kullanıcı satırına anahtar kilidi (FK) ister ve kilitlenme (deadlock) olurdu.
+func takeOverPasswordAccount(tx *gorm.DB, userID string, passwordIdentityID uint64) error {
+	if err := tx.Delete(&models.AuthIdentity{}, "id = ?", passwordIdentityID).Error; err != nil {
+		return err
+	}
+	return tx.Model(&models.RefreshToken{}).
+		Where("user_id = ? AND revoked_at IS NULL", userID).
+		Update("revoked_at", time.Now()).Error
 }
 
 // refreshReuseGrace, rotasyonla iptal edilmiş bir refresh token'ın yeniden

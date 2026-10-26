@@ -56,14 +56,13 @@ func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService, authLi
 	a.Post("/google", authLimit, h.GoogleAuth)
 	a.Post("/apple", authLimit, h.AppleAuth)
 
-	// Parola ile kayıt/giriş yalnızca geliştirme/test ortamında açıktır: mobil
-	// istemci yalnızca Google/Apple girişi sunar ve kayıtta e-posta sahipliği
-	// doğrulanmaz. Production'da açık kalsaydı herkes başkasının adresiyle hesap
-	// açıp o adresin sahibinden önce hesaba yerleşebilirdi.
-	if !h.Cfg.IsProduction() {
-		a.Post("/register", authLimit, h.Register)
-		a.Post("/login", authLimit, h.Login)
-	}
+	// E-posta/parola her ortamda açıktır. Kayıtta e-posta sahipliği
+	// doğrulanmaz; bu yüzden adresin doğrulanmış sahibi Google/Apple ile
+	// geldiğinde yalnızca parolalı hesap ona devredilir (bkz.
+	// takeOverPasswordAccount): adresi önceden kaydeden biri gerçek sahibin
+	// önüne geçemez.
+	a.Post("/register", authLimit, h.Register)
+	a.Post("/login", authLimit, h.Login)
 
 	// Yenileme sıkı sınıra değil yalnızca genel API sınırına tabidir: uygulama
 	// açılışlarının çoğu buradan geçer ve aynı IP'yi paylaşan (CGNAT) kullanıcılar
