@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -844,5 +845,78 @@ func TestMe_EpostasizSosyalHesaptaEpostaBos(t *testing.T) {
 	}
 	if user := userField(t, body); user["email"] != "" || user["isGuest"] != false {
 		t.Errorf("email/isGuest = %v/%v, beklenen \"\"/false", user["email"], user["isGuest"])
+	}
+}
+
+// --- B1/B6: kullanıcı uçları ve oyun kuralları misafirde aynıdır ---
+
+// Kullanıcı uçlarının yanıtı da isGuest taşır ve yer tutucu adresi göstermez.
+func TestUsersMe_MisafirdeIsGuestVeBosEposta(t *testing.T) {
+	gdb := testDB(t)
+	h := guestHandlers(gdb, "production")
+	app := authApp(h)
+	_, u := createGuest(t, gdb, app, nil)
+
+	for _, req := range []*http.Request{
+		authRequest(t, h, &u, http.MethodGet, "/api/v1/users/me", nil),
+		authRequest(t, h, &u, http.MethodPatch, "/api/v1/users/me", fiber.Map{"displayName": "Deniz"}),
+	} {
+		status, body := send(t, app, req)
+		if status != fiber.StatusOK {
+			t.Fatalf("%s %s: status = %d (body: %v)", req.Method, req.URL.Path, status, body)
+		}
+		user := userField(t, body)
+		if user["isGuest"] != true || user["email"] != "" {
+			t.Errorf("%s %s: isGuest/email = %v/%v, beklenen true/\"\"", req.Method, req.URL.Path, user["isGuest"], user["email"])
+		}
+	}
+	if got := loadUser(t, gdb, u.ID); got.DisplayName != "Deniz" || !got.IsGuest {
+		t.Errorf("ad/is_guest = %q/%v, beklenen \"Deniz\"/true", got.DisplayName, got.IsGuest)
+	}
+}
+
+// Misafir için oyun kuralları değişmez: grup açma ve kapı denetimi kayıtlı bir
+// kullanıcıyla aynı sırada aynı yanıtları verir.
+func TestGuest_OyunKurallariKayitliKullaniciylaAyni(t *testing.T) {
+	gdb := testDB(t)
+	h := New(gdb, &config.Config{AppEnv: "production", GateEnforcement: config.GateEnforce},
+		testTokens().WithGuestRefreshTTL(testGuestRefreshTTL), nil)
+	app := authApp(h)
+	w1 := testDictWord(t, gdb, "itest_misafir_kural_1", "A1", 1, 1)
+	w2 := testDictWord(t, gdb, "itest_misafir_kural_2", "A1", 2, 1)
+
+	type adim struct {
+		method, path string
+		payload      any
+	}
+	adimlar := []adim{
+		{http.MethodPost, "/api/v1/progress/learn", fiber.Map{"wordId": w1.ID}}, // grup açılmadan
+		{http.MethodPost, "/api/v1/users/me/usage/group-started", fiber.Map{"level": "A1", "group": 1}},
+		{http.MethodPost, "/api/v1/progress/learn", fiber.Map{"wordId": w1.ID}},
+		{http.MethodPost, "/api/v1/users/me/usage/group-started", fiber.Map{"level": "A1", "group": 2}},
+		{http.MethodPost, "/api/v1/progress/learn", fiber.Map{"wordId": w2.ID}},
+		{http.MethodGet, "/api/v1/users/me/usage", nil},
+	}
+	calistir := func(u *models.User) []string {
+		out := []string{}
+		for _, a := range adimlar {
+			status, body := send(t, app, authRequest(t, h, u, a.method, a.path, a.payload))
+			out = append(out, fmt.Sprintf("%s %s → %d %v", a.method, a.path, status, body["code"]))
+		}
+		return out
+	}
+
+	_, guest := createGuest(t, gdb, app, nil)
+	misafir := calistir(&guest)
+	kayitli := calistir(testUser(t, gdb))
+
+	if !slices.Equal(misafir, kayitli) {
+		t.Errorf("misafir ve kayıtlı kullanıcı farklı yanıt aldı:\nmisafir: %v\nkayıtlı: %v", misafir, kayitli)
+	}
+	// Karşılaştırma boş geçmesin: kapı gerçekten devrede, ilk grup açılabiliyor.
+	for i, want := range map[int]string{0: "403 gate_required", 1: "200 <nil>", 2: "200 <nil>"} {
+		if !strings.HasSuffix(misafir[i], want) {
+			t.Errorf("adım %d: %s, beklenen %q", i, misafir[i], want)
+		}
 	}
 }
