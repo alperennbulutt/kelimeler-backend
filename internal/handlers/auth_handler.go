@@ -56,6 +56,10 @@ type tokenPair struct {
 //
 // family boşsa yeni bir oturum (token ailesi) başlatılır; rotasyon eski
 // token'ın ailesini taşır.
+//
+// Refresh token'ın ömrü kullanıcının o anki misafirliğine göredir
+// (GUEST_REFRESH_TOKEN_TTL / REFRESH_TOKEN_TTL); rotasyon kullanıcıyı her
+// seferinde yeniden okuduğu için kaydolan misafir olağan ömre geçer.
 func (h *Handlers) newTokenPair(user *models.User, family string) (tokenPair, *models.RefreshToken, error) {
 	access, err := h.Tokens.GenerateAccessToken(user.ID, user.Email)
 	if err != nil {
@@ -74,7 +78,7 @@ func (h *Handlers) newTokenPair(user *models.User, family string) (tokenPair, *m
 		UserID:    user.ID,
 		TokenHash: auth.HashToken(refresh),
 		FamilyID:  &family,
-		ExpiresAt: time.Now().Add(h.Tokens.RefreshTTL()),
+		ExpiresAt: time.Now().Add(h.Tokens.RefreshTTLFor(user.IsGuest)),
 	}
 	return tokenPair{access: access, refresh: refresh}, row, nil
 }

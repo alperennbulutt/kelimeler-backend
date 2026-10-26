@@ -85,3 +85,18 @@ func TestParseAccessToken(t *testing.T) {
 		})
 	}
 }
+
+func TestRefreshTTLFor(t *testing.T) {
+	ts := NewTokenService(testSecret, time.Minute, 720*time.Hour)
+	if got := ts.RefreshTTLFor(true); got != 720*time.Hour {
+		t.Errorf("misafir ömrü ayarlanmamışken = %s, beklenen olağan ömür 720h", got)
+	}
+
+	ts.WithGuestRefreshTTL(8760 * time.Hour)
+	if got := ts.RefreshTTLFor(true); got != 8760*time.Hour {
+		t.Errorf("misafir = %s, beklenen 8760h", got)
+	}
+	if got := ts.RefreshTTLFor(false); got != 720*time.Hour {
+		t.Errorf("kayıtlı kullanıcı = %s, beklenen 720h", got)
+	}
+}

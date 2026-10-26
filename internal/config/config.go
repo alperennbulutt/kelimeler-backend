@@ -47,6 +47,9 @@ var DefaultTrustedProxies = []string{
 	"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "::1/128", "fc00::/7",
 }
 
+// DefaultGuestRefreshTokenTTL, GUEST_REFRESH_TOKEN_TTL verilmezse kullanılır (1 yıl).
+const DefaultGuestRefreshTokenTTL = 8760 * time.Hour
+
 // MinJWTSecretBytes, production'da kabul edilen en kısa JWT_SECRET uzunluğudur
 // (HS256 anahtarı en az özet boyu kadar olmalı).
 const MinJWTSecretBytes = 32
@@ -75,6 +78,12 @@ type Config struct {
 	JWTSecret       string
 	AccessTokenTTL  time.Duration
 	RefreshTokenTTL time.Duration
+
+	// GuestRefreshTokenTTL, misafir hesaplarına verilen refresh token'ların
+	// ömrüdür (rotasyonda da). Misafirin başka giriş yolu yoktur: token
+	// kaybolursa ya da süresi dolarsa hesaba bir daha ulaşılamaz. 30 günlük
+	// olağan ömür, bir ay uygulamayı açmayan misafiri ilerlemesinden koparırdı.
+	GuestRefreshTokenTTL time.Duration
 
 	// Google Sign-In: kabul edilen audience (client ID) listesi.
 	GoogleClientIDs []string
@@ -177,6 +186,7 @@ func FromEnv() (*Config, error) {
 		JWTSecret:              getEnv("JWT_SECRET", "dev-secret-change-me"),
 		AccessTokenTTL:         getDuration("ACCESS_TOKEN_TTL", 15*time.Minute),
 		RefreshTokenTTL:        getDuration("REFRESH_TOKEN_TTL", 720*time.Hour),
+		GuestRefreshTokenTTL:   getDuration("GUEST_REFRESH_TOKEN_TTL", DefaultGuestRefreshTokenTTL),
 		GoogleClientIDs:        getList("GOOGLE_CLIENT_IDS"),
 		AppleClientID:          getEnv("APPLE_CLIENT_ID", ""),
 		AppleIssuer:            getEnv("APPLE_ISSUER", "https://appleid.apple.com"),
@@ -236,6 +246,13 @@ func (c *Config) Validate() error {
 	case GateOff, GateLog, GateEnforce:
 	default:
 		return fmt.Errorf(`GATE_ENFORCEMENT=%q geçersiz: "off", "log" ya da "enforce" olmalı`, c.GateEnforcement)
+	}
+
+	// time.ParseDuration negatif ve sıfır süreyi kabul eder; böyle bir ömürle
+	// verilen token doğduğu anda geçersiz olurdu (misafir hesabı açılır açılmaz
+	// erişilemez kalırdı).
+	if c.GuestRefreshTokenTTL <= 0 {
+		return fmt.Errorf("GUEST_REFRESH_TOKEN_TTL=%s geçersiz: pozitif bir süre olmalı (ör. 8760h)", c.GuestRefreshTokenTTL)
 	}
 
 	for _, p := range c.TrustedProxies {

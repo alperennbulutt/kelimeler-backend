@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGetPositiveInt(t *testing.T) {
@@ -247,6 +248,40 @@ func TestFromEnv_TrustedProxies(t *testing.T) {
 			}
 			if !slices.Equal(cfg.TrustedProxies, c.want) {
 				t.Errorf("TrustedProxies = %q, beklenen %q", cfg.TrustedProxies, c.want)
+			}
+		})
+	}
+}
+
+func TestFromEnv_GuestRefreshTokenTTL(t *testing.T) {
+	cases := []struct {
+		value   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"", DefaultGuestRefreshTokenTTL, false}, // varsayılan: 1 yıl
+		{"4380h", 4380 * time.Hour, false},
+		{"bozuk", DefaultGuestRefreshTokenTTL, false}, // ayrıştırılamayan süre varsayılana döner
+		{"0s", 0, true},
+		{"-1h", 0, true},
+	}
+	for _, c := range cases {
+		t.Run("deger="+c.value, func(t *testing.T) {
+			t.Setenv("APP_ENV", "development")
+			t.Setenv("GUEST_REFRESH_TOKEN_TTL", c.value)
+
+			cfg, err := FromEnv()
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("FromEnv() hata vermedi, GuestRefreshTokenTTL = %s", cfg.GuestRefreshTokenTTL)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("FromEnv() = %v", err)
+			}
+			if cfg.GuestRefreshTokenTTL != c.want {
+				t.Errorf("GuestRefreshTokenTTL = %s, beklenen %s", cfg.GuestRefreshTokenTTL, c.want)
 			}
 		})
 	}

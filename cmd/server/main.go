@@ -143,7 +143,8 @@ func run() (err error) {
 		log.Printf("uyarı: sözlük yüklenemedi, kelimeler gösterilemeyecek: %v", err)
 	}
 
-	tokens := auth.NewTokenService(cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
+	tokens := auth.NewTokenService(cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL).
+		WithGuestRefreshTTL(cfg.GuestRefreshTokenTTL)
 
 	// Apple JWKS'i yüklemeye çalış; başarısız olursa Apple girişi devre dışı kalır.
 	appleVerifier, err := auth.NewAppleVerifier(context.Background(), cfg.AppleClientID, cfg.AppleIssuer)
