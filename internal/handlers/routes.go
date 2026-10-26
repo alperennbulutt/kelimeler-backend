@@ -43,8 +43,9 @@ func health(gdb *gorm.DB) fiber.Handler {
 
 // RegisterRoutes, tüm API route'larını mount eder.
 //
-// authLimit, parola/sosyal giriş ve misafir hesabı uçlarına uygulanan sıkı
-// hız sınırıdır; deneme saldırılarını yavaşlatmak için genel sınırdan ayrıdır.
+// authLimit, parola/sosyal giriş, misafir hesabı ve parola bağlama uçlarına
+// uygulanan sıkı hız sınırıdır; deneme saldırılarını yavaşlatmak için genel
+// sınırdan ayrıdır.
 func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService, authLimit fiber.Handler) {
 	api.Get("/health", health(h.DB))
 
@@ -79,6 +80,8 @@ func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService, authLi
 	a.Get("/me", guard, h.Me)
 	a.Post("/link/google", guard, h.LinkGoogle)
 	a.Post("/link/apple", guard, h.LinkApple)
+	// Parola bcrypt ile hash'lenir (pahalı): sıkı sınıra da tabidir.
+	a.Post("/link/password", authLimit, guard, h.LinkPassword)
 	a.Delete("/link/google", guard, h.UnlinkProvider("google"))
 	a.Delete("/link/apple", guard, h.UnlinkProvider("apple"))
 	a.Delete("/account", guard, h.DeleteAccount)

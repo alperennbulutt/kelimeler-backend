@@ -798,6 +798,14 @@ func (h *Handlers) LinkApple(c *fiber.Ctx) error {
 	return nil
 }
 
+// linkProvider, doğrulanmış sağlayıcı kimliğini oturum sahibine bağlar ve
+// {"user": ...} döner.
+//
+// Oturum sahibi misafirse bağlama hesabı kaydeder: is_guest=false olur ve
+// sağlayıcının doğruladığı adres başka bir hesapta değilse kullanıcının
+// e-postası o olur (değilse yer tutucu adres kalır). Kimlik başka bir
+// kullanıcıya bağlıysa 409 provider_already_linked döner; istemci misafiri o
+// hesaba geçirme akışını yürütür.
 func (h *Handlers) linkProvider(c *fiber.Ctx, userID, provider string, si *auth.SocialIdentity) error {
 	var existing models.AuthIdentity
 	err := h.DB.Where("provider = ? AND provider_subject = ?", provider, si.Subject).First(&existing).Error
@@ -811,16 +819,34 @@ func (h *Handlers) linkProvider(c *fiber.Ctx, userID, provider string, si *auth.
 		return err
 	}
 	sub := si.Subject
+	verifiedEmail := providerEmail(si)
 	var email *string
-	if e := providerEmail(si); e != "" {
-		email = &e
+	if verifiedEmail != "" {
+		email = &verifiedEmail
 	}
-	if err := h.DB.Create(&models.AuthIdentity{
-		UserID:          userID,
-		Provider:        provider,
-		ProviderSubject: &sub,
-		Email:           email,
-	}).Error; err != nil {
+	converted := false
+	// Kullanıcı satırı kilitlenir: misafirlik kararı, aynı anda gelen
+	// POST /auth/link/password ile çelişmesin (ikisi birden hesabı kaydedemez).
+	err = h.DB.Transaction(func(tx *gorm.DB) error {
+		var user models.User
+		if err := lockUser(tx, userID, &user); err != nil {
+			return err
+		}
+		if err := tx.Create(&models.AuthIdentity{
+			UserID:          userID,
+			Provider:        provider,
+			ProviderSubject: &sub,
+			Email:           email,
+		}).Error; err != nil {
+			return err
+		}
+		if !user.IsGuest {
+			return nil
+		}
+		converted = true
+		return convertGuest(tx, userID, verifiedEmail)
+	})
+	if err != nil {
 		// Kimlik bu arada başka bir hesaba bağlandı ya da hesapta bu sağlayıcının
 		// başka bir kimliği var. Diğer hatalar geçicidir: 500 döner.
 		if !isUniqueViolation(err) {
@@ -838,7 +864,122 @@ func (h *Handlers) linkProvider(c *fiber.Ctx, userID, provider string, si *auth.
 		}
 		return apiErr(fiber.StatusConflict, "provider_already_linked", "bağlama başarısız")
 	}
+	if converted {
+		log.Printf("auth: misafir hesabı %s ile kaydedildi (user=%s)", provider, userID)
+	}
 	return h.respondUser(c, userID)
+}
+
+// convertGuest, kilitli misafir hesabını kayıtlı hesaba çevirir: is_guest=false
+// olur ve email boş değilse, başka bir hesapta değilse kullanıcının adresi o
+// olur. Adres yazılamazsa (başka hesapta ya da eşzamanlı olarak alındı) yer
+// tutucu adres kalır; dönüşüm yine tamamlanır.
+func convertGuest(tx *gorm.DB, userID, email string) error {
+	if err := tx.Model(&models.User{}).Where("id = ?", userID).Update("is_guest", false).Error; err != nil {
+		return err
+	}
+	if email == "" {
+		return nil
+	}
+	var taken int64
+	if err := tx.Model(&models.User{}).Where("email = ?", email).Count(&taken).Error; err != nil {
+		return err
+	}
+	if taken > 0 {
+		return nil
+	}
+	// Savepoint: aynı adres bu arada başka bir hesaba yazıldıysa unique ihlali
+	// yalnızca bu adımı geri alır, bağlama ve dönüşüm sürer.
+	err := tx.Transaction(func(sp *gorm.DB) error {
+		return sp.Model(&models.User{}).Where("id = ?", userID).Update("email", email).Error
+	})
+	if isUniqueViolation(err) {
+		return nil
+	}
+	return err
+}
+
+// LinkPassword: POST /auth/link/password — misafir hesabına e-posta/parola
+// bağlar (hesabı kaydeder) ve {"user": ...} döner.
+//
+// Yalnızca misafir hesapta çalışır (aksi 409 not_guest): kayıtlı bir hesaba
+// sonradan parola eklemek, sahipliği kanıtlanmamış bir adresi o hesaba
+// yazmak olurdu. Doğrulama ve hata kodları kayıtla aynıdır; adres başka bir
+// hesaptaysa 409 email_in_use. Yanıtı kaybolan isteğin aynı e-posta ve
+// parolayla tekrarı 200 döner.
+func (h *Handlers) LinkPassword(c *fiber.Ctx) error {
+	var req dto.LinkPasswordRequest
+	if err := c.BodyParser(&req); err != nil {
+		return apiErr(fiber.StatusBadRequest, "invalid_request", "geçersiz istek")
+	}
+	req.Email = dto.NormalizeEmail(req.Email)
+	if err := dto.ValidateEmail(req.Email); err != nil {
+		return apiErr(fiber.StatusBadRequest, "invalid_email", err.Error())
+	}
+	if err := dto.ValidatePassword(req.Password); err != nil {
+		return apiErr(fiber.StatusBadRequest, "weak_password", err.Error())
+	}
+	// bcrypt yavaştır: kullanıcı satırı kilitlenmeden önce hesaplanır.
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		return err
+	}
+
+	userID := middleware.UserID(c)
+	err = h.DB.Transaction(func(tx *gorm.DB) error {
+		var user models.User
+		if err := lockUser(tx, userID, &user); err != nil {
+			return err
+		}
+		if !user.IsGuest {
+			if linkedPasswordMatches(tx, &user, req.Email, req.Password) {
+				return nil // yanıtı kaybolan bağlamanın tekrarı
+			}
+			return apiErr(fiber.StatusConflict, "not_guest", "hesap zaten kayıtlı")
+		}
+		var taken int64
+		if err := tx.Model(&models.User{}).Where("email = ? AND id <> ?", req.Email, userID).
+			Count(&taken).Error; err != nil {
+			return err
+		}
+		if taken > 0 {
+			return apiErr(fiber.StatusConflict, "email_in_use", "bu email zaten kullanımda")
+		}
+		if err := tx.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
+			"email":    req.Email,
+			"is_guest": false,
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&models.AuthIdentity{
+			UserID:       userID,
+			Provider:     "password",
+			PasswordHash: &hash,
+			Email:        &req.Email,
+		}).Error
+	})
+	if isUniqueViolation(err) {
+		// Aynı adres bu arada başka bir hesaba yazıldı.
+		return apiErr(fiber.StatusConflict, "email_in_use", "bu email zaten kullanımda")
+	}
+	if err != nil {
+		return err
+	}
+	return h.respondUser(c, userID)
+}
+
+// linkedPasswordMatches, kayıtlı hesabın adresi email ise ve parola kimliği
+// password'le eşleşiyorsa true döner. Okuma hatası "eşleşmiyor" sayılır;
+// çağıran 409 döner, istemci durumu /auth/me ile yeniler.
+func linkedPasswordMatches(tx *gorm.DB, user *models.User, email, password string) bool {
+	if user.Email != email {
+		return false
+	}
+	var identity models.AuthIdentity
+	if err := tx.Where("user_id = ? AND provider = ?", user.ID, "password").First(&identity).Error; err != nil {
+		return false
+	}
+	return identity.PasswordHash != nil && auth.VerifyPassword(*identity.PasswordHash, password)
 }
 
 // UnlinkProvider: belirtilen provider kimliğini kaldırır (son kimlik korunur).
