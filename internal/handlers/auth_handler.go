@@ -552,8 +552,20 @@ func (h *Handlers) authenticateSocialOnce(provider string, si *auth.SocialIdenti
 // girişi (Login) kimliği kilitleyip token yazar; silme onu bekler, sonraki
 // iptal o token'ı da görür. Kullanıcı satırı kilitlenmez: giriş, token yazarken
 // kullanıcı satırına anahtar kilidi (FK) ister ve kilitlenme (deadlock) olurdu.
+//
+// Etkin token'lar iptalden önce ayrı bir sorguyla kilitlenir: aynı anda süren
+// bir rotasyon eski token'ı kilitleyip halefini yazmışsa (henüz commit yok)
+// kilit onun bitmesini bekletir. Tek bir UPDATE, başladığı anın görüntüsüyle
+// çalıştığı için commit edilen halefi görmez ve etkin bırakırdı; kilitten
+// sonraki UPDATE yeni bir görüntüyle başlar ve halefi de iptal eder. Kilitten
+// sonra başlayan rotasyon ise eski token'ı kilitleyemeden bekler ve iptal
+// edilmiş bulur.
 func takeOverPasswordAccount(tx *gorm.DB, userID string, passwordIdentityID uint64) error {
 	if err := tx.Delete(&models.AuthIdentity{}, "id = ?", passwordIdentityID).Error; err != nil {
+		return err
+	}
+	if err := tx.Exec(`SELECT id FROM refresh_tokens WHERE user_id = ? AND revoked_at IS NULL FOR UPDATE`,
+		userID).Error; err != nil {
 		return err
 	}
 	return tx.Model(&models.RefreshToken{}).
