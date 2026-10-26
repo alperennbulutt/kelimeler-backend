@@ -30,6 +30,8 @@ func TestDecideEmailMatch(t *testing.T) {
 		{"parola + başka adresli google, google geri alır", []models.AuthIdentity{password, id("google", "baska@example.test", true)}, "google", true, matchReclaim},
 		{"parola + X'i doğrulanmamış taşıyan google, apple geri alır", []models.AuthIdentity{password, id("google", x, false)}, "apple", true, matchReclaim},
 		{"parola + X'i doğrulamış google, apple bağlanır", []models.AuthIdentity{password, id("google", "SAHIP@example.test", true)}, "apple", true, matchLink},
+		// Unicode katlamada eşit ama farklı adres (U+017F "ſ" ~ "s"): kanıt değil.
+		{"parola + X'in katlama eşini doğrulamış google, apple geri alır", []models.AuthIdentity{password, id("google", "\u017fahip@example.test", true)}, "apple", true, matchReclaim},
 		{"parola + X'i doğrulamış google, başka google 409", []models.AuthIdentity{password, id("google", x, true)}, "google", true, matchSameProvider},
 		{"parola + google, doğrulanmamış adres 409", []models.AuthIdentity{password, id("google", x, true)}, "apple", false, matchPasswordConflict},
 		{"parola + google, doğrulanmamış aynı sağlayıcı 409", []models.AuthIdentity{password, id("google", x, true)}, "google", false, matchSameProvider},

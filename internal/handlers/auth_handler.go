@@ -662,7 +662,10 @@ func decideEmailMatch(identities []models.AuthIdentity, provider, email string, 
 		} else {
 			others++
 		}
-		if verified && identity.EmailVerified && identity.Email != nil && strings.EqualFold(*identity.Email, email) {
+		// Saklanan ve gelen adres ikisi de dto.NormalizeEmail'den geçer; tam
+		// eşitlik aranır. strings.EqualFold Unicode katlaması yapar ("ſ" ~ "s",
+		// Kelvin "K" ~ "k"): başka bir adresi doğrulamış kimliği kanıt sayabilirdi.
+		if verified && identity.EmailVerified && identity.Email != nil && dto.NormalizeEmail(*identity.Email) == email {
 			proven = true
 		}
 	}
