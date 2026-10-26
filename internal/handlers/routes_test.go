@@ -14,12 +14,13 @@ var gelistirmeUclari = []string{
 	"POST /api/v1/users/me/usage/reset",
 }
 
-// Her ortamda kayıtlı olması gereken uçlar. E-posta/parola uçları
+// Her ortamda kayıtlı olması gereken uçlar. E-posta/parola ve misafir uçları
 // production'da da açıktır.
 var ortakUclar = []string{
 	"POST /api/v1/auth/google",
 	"POST /api/v1/auth/register",
 	"POST /api/v1/auth/login",
+	"POST /api/v1/auth/guest",
 	"POST /api/v1/dictionary/words/batch",
 	"GET /api/v1/health",
 }

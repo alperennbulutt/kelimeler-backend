@@ -16,6 +16,7 @@ import (
 	"kelimeler-backend/internal/observability"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -272,6 +273,57 @@ func (h *Handlers) Login(c *fiber.Ctx) error {
 		return err
 	}
 	return c.JSON(resp)
+}
+
+// guestEmailPrefix, misafir hesaplarının yer tutucu adresinin önekidir:
+// guest_<kullanıcı id>@users.kelimeler.local.
+const guestEmailPrefix = "guest_"
+
+// Guest: POST /auth/guest — e-postasız bir misafir hesabı açar ve oturum verir.
+//
+// Gövde isteğe bağlıdır ({"displayName"}); boş ad boş kalır, istemci
+// "Misafir" yazar. Hesabın hiçbir giriş kimliği yoktur: ona yalnızca dönen
+// refresh token'la ulaşılır (ömrü GUEST_REFRESH_TOKEN_TTL). Hesap ve ilk token
+// tek transaction'da yazılır; token yazılamazsa erişilemeyen bir misafir
+// hesabı kalmaz.
+func (h *Handlers) Guest(c *fiber.Ctx) error {
+	var req dto.GuestRequest
+	if len(c.Body()) > 0 {
+		if err := c.BodyParser(&req); err != nil {
+			return apiErr(fiber.StatusBadRequest, "invalid_request", "geçersiz istek")
+		}
+	}
+	name, err := dto.NormalizeDisplayName(req.DisplayName)
+	if err != nil {
+		return apiErr(fiber.StatusBadRequest, "invalid_display_name", err.Error())
+	}
+
+	id := uuid.NewString()
+	user := models.User{
+		ID:           id,
+		Email:        dto.SyntheticEmail(guestEmailPrefix + id),
+		DisplayName:  name,
+		CurrentLevel: "A1",
+		CurrentGroup: 1,
+		IsGuest:      true,
+	}
+	pair, row, err := h.newTokenPair(&user, "")
+	if err != nil {
+		return err
+	}
+	if err := h.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&user).Error; err != nil {
+			return err
+		}
+		return tx.Create(row).Error
+	}); err != nil {
+		return err
+	}
+	resp, err := h.authResponse(&user, pair)
+	if err != nil {
+		return err
+	}
+	return c.Status(fiber.StatusCreated).JSON(resp)
 }
 
 // GoogleAuth: Google idToken'ını doğrular, kullanıcıyı bulur/oluşturur.
