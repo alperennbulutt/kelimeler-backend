@@ -15,6 +15,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
       -o /out/server ./cmd/server
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
       -o /out/import ./cmd/import-dictionary
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+      -o /out/cleanup-guests ./cmd/cleanup-guests
 
 # --- import aracı (isteğe bağlı) ---
 # Production'da gerekmez (sözlük seed/ ile yüklenir); yalnızca açıkça istenince
@@ -31,6 +33,11 @@ ENTRYPOINT ["/import"]
 # çalıştırır; 8080 ayrıcalıklı olmayan bir port olduğu için yetki gerekmez.
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /out/server /server
+# Elle çalıştırılan terk edilmiş misafir temizliği; kabuk olmadığı için
+# container'ın ortamıyla doğrudan çalıştırılır (bkz. DEPLOYMENT.md):
+#   docker exec <container> /cleanup-guests            # yalnızca rapor
+#   docker exec <container> /cleanup-guests --apply    # sil
+COPY --from=builder /out/cleanup-guests /cleanup-guests
 COPY seed /seed
 USER nonroot:nonroot
 EXPOSE 8080

@@ -40,6 +40,9 @@ func TestValidateEmail(t *testing.T) {
 		"user@example.",      // nokta ile bitiyor
 		"Ad Soyad <a@b.com>", // görünen adlı biçim kabul edilmemeli
 		strings.Repeat("a", 250) + "@example.com", // 254 sınırını aşıyor
+		// Yer tutucu adresler kullanıcı girdisi olamaz.
+		"guest_0b6c1f0e-1111-4222-8333-944445555666@users.kelimeler.local",
+		"Google_123@Users.Kelimeler.Local",
 	}
 	for _, e := range gecersiz {
 		if err := ValidateEmail(e); err == nil {

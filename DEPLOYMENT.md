@@ -6,6 +6,8 @@ Mimari: **Coolify Application (Go container)** + **Coolify managed PostgreSQL** 
 > Port derdi yok: Coolify her uygulamayı Traefik reverse-proxy arkasında domain bazlı yönlendirir; container içinde 8080 dinlemen yeterli.
 
 > Bu sürümü (backend sprint 1) canlıya alıyorsan önce en sondaki [Backend sprint 1 sürüm notları ve deploy kontrol listesi](#backend-sprint-1-sürüm-notları-ve-deploy-kontrol-listesi) bölümünü oku.
+>
+> E-posta/parola girişi ve misafir hesabını içeren sürümü canlıya alıyorsan ayrıca [E-posta/parola girişi ve misafir hesabı](#e-postaparola-girişi-ve-misafir-hesabı-sürüm-notları-ve-deploy-kontrol-listesi) bölümünü oku.
 
 ---
 
@@ -65,6 +67,7 @@ Depo özelse Coolify'de kaynak olarak **GitHub App** (Private Repository) kullan
 | `JWT_SECRET` | `openssl rand -base64 48` çıktısı (güçlü, gizli). 32 bayttan kısa ya da `.env*.example`'daki yer tutucu girilirse sunucu açılmaz |
 | `ACCESS_TOKEN_TTL` | `15m` |
 | `REFRESH_TOKEN_TTL` | `720h` |
+| `GUEST_REFRESH_TOKEN_TTL` | `8760h` (1 yıl, varsayılan) — misafir hesaplarının refresh token ömrü, rotasyonda da. Misafirin başka giriş yolu yoktur; token kaybolur ya da süresi dolarsa hesaba bir daha ulaşılamaz. Misafir hesabını kaydedince sonraki rotasyonlar `REFRESH_TOKEN_TTL`'e döner. Sıfır ya da negatif değerde sunucu açılmaz |
 | `GOOGLE_CLIENT_IDS` | `928054180858-...apps.googleusercontent.com` |
 | `APPLE_CLIENT_ID` | iOS bundle id'n (Apple yoksa boş) |
 | `APPLE_TEAM_ID` | Apple Developer hesabındaki 10 karakterlik Team ID — **iOS yayını için zorunlu** (aşağıdaki nota bak) |
@@ -129,21 +132,18 @@ Apple girişi açıkken (`APPLE_CLIENT_ID` dolu) revoke yapılandırılamadıysa
 
 `APP_ENV=production` iken sunucu bilerek farklı davranır:
 
-- **Parola ile kayıt/giriş kapalıdır.** `POST /api/v1/auth/register` ve `/auth/login` hiç mount edilmez (404 döner). Mobil istemci yalnızca Google/Apple girişi sunar ve parola kaydında e-posta sahipliği doğrulanmaz; uç açık kalırsa herkes başkasının adresiyle hesap açabilir. Lokal geliştirme ve E2E koşuları `APP_ENV=development` ile çalışır, orada iki uç da açıktır.
 - **CORS:** `CORS_ALLOWED_ORIGINS` boşsa CORS middleware'i hiç eklenmez; yanıtlara `Access-Control-*` başlığı yazılmaz ve tarayıcılar başka bir siteden gelen isteğin yanıtını okutmaz. Mobil istemci CORS'tan etkilenmez. (Geliştirmede liste boşken tüm origin'lere izin verilir.)
 - **Sayaç sıfırlama ucu yoktur:** `POST /api/v1/users/me/usage/reset` yalnızca production dışında açıktır.
 
-Sosyal girişte e-postayla hesap eşleme her ortamda aynıdır: Google/Apple'ın **doğrulamadığı** e-posta kullanılmaz, ve e-postası eşleşen hesabın parola kimliği varsa bağlama yapılmaz (`409 email_in_use`).
+### Giriş yolları ve e-postayla hesap eşleme (her ortamda aynı)
 
-**Yayın öncesi tek seferlik denetim:** canlı sunucu parola uçları açıkken çalıştıysa veritabanında parola ile açılmış hesaplar kalmış olabilir. İlk mağaza yayınından önce kalmadığını doğrula (Coolify → PostgreSQL kaynağı → Terminal):
+- **Google, Apple, e-posta/parola ve misafir** girişleri her ortamda açıktır (`/auth/google`, `/auth/apple`, `/auth/register`, `/auth/login`, `/auth/guest`); hepsi IP başına sıkı sınıra (`AUTH_RATE_LIMIT`) tabidir.
+- Google/Apple'ın **doğrulamadığı** e-posta hiçbir hesapla eşlenmez; kimlik yer tutucu adresli (`<sağlayıcı>_<sub>@users.kelimeler.local`) yeni bir hesaba bağlanır.
+- E-posta/parola kaydında adres sahipliği **doğrulanmaz** (e-posta gönderme altyapısı yok; parola sıfırlama da yok). Bu yüzden: doğrulanmış bir Google/Apple e-postası, **tek giriş yolu parola olan** hesapla eşleşirse hesap o kimliğe devredilir: parola kimliği silinir, kullanıcının bütün refresh token'ları iptal edilir (diğer cihazlar ilk yenilemede çıkış yapar), sosyal kimlik eklenir. Hesabı açan gerçekten adresin sahibiyse ilerlemesi korunur; başkasıysa erişimi biter. Log satırı: `auth: doğrulanmış <sağlayıcı> e-postası parola hesabını devraldı ... (user=<id>)`.
+- Parolanın yanında başka bir giriş yolu (ör. Apple) varsa ya da hesapta aynı sağlayıcının başka bir kimliği varsa devir yapılmaz, `409 email_in_use` döner.
+- Yer tutucu adresler (`@users.kelimeler.local`) istemciye `email: ""` olarak döner ve kayıtta/bağlamada `400 invalid_email` ile reddedilir.
 
-```sql
-SELECT u.id, u.email, u.created_at
-FROM users u JOIN auth_identities ai ON ai.user_id = u.id
-WHERE ai.provider = 'password';
-```
-
-Mobil istemci parola ile giriş sunmadığı için bu satırlar gerçek bir kullanıcıya ait olamaz (geliştirme/test artığı ya da başkasının adresiyle yapılmış kayıt). İnceleyip sil (`DELETE FROM users WHERE id IN (...)`, ilişkili veriler CASCADE ile temizlenir). Satır kalırsa o adresin sahibi Google/Apple ile giremez (409 alır).
+---
 
 ---
 
@@ -161,7 +161,7 @@ Mobil istemci parola ile giriş sunmadığı için bu satırlar gerçek bir kull
 2. **`GET /api/v1/users/me/usage`** (geçerli bir access token ile) yanıtında şu alanlar var: `reviewAnswersToday`, `unlockedGroupsToday`, `noFillPassesRemaining`. Biri eksikse canlıda eski derleme çalışıyordur.
 3. **Yanıt başlıkları:** herhangi bir `/api/v1/...` yanıtında `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` geliyor (başlık adlarında büyük/küçük harf fark etmez) ve `X-RateLimit-Limit` değeri `API_RATE_LIMIT` ile aynı. Uydurma `X-Forwarded-For` ile hız sınırı atlatılamıyor (bkz. "İstemci IP'si, Traefik ve hız sınırı").
 4. **Açılış logunda uyarı yok:** `ortam: APP_ENV=production` satırı görünmeli. `config: uyarı:` ile başlayan satırlar eksik bir ayarı (Apple revoke anahtarları, `GOOGLE_CLIENT_IDS`, `TEST_MODE_UNLOCK_ALL`) ya da geçersiz bir hız sınırı değerini gösterir.
-5. **Parola uçları kapalı:** `POST /api/v1/auth/register` 404 dönüyor. 400 ya da 201 dönüyorsa `APP_ENV` `production` değildir.
+5. **Kayıt ucu açık, geliştirme uçları kapalı:** gövdesiz `POST /api/v1/auth/register` 400 dönüyor (404 ise canlıda e-posta/misafir sürümünden eski bir derleme çalışıyordur). Sayaç sıfırlama ucu `POST /api/v1/users/me/usage/reset` geçerli bir access token'la 404 dönmeli; 200 dönüyorsa `APP_ENV` `production` değildir. (`/auth/guest`'i doğrulama için çağırma: her çağrı gerçek bir misafir hesabı açar.)
 6. **CORS kapalı** (`CORS_ALLOWED_ORIGINS` boşsa): `Origin` başlıklı isteğin yanıtında `Access-Control-Allow-Origin` yok.
 
 ```bash
@@ -169,8 +169,10 @@ Mobil istemci parola ile giriş sunmadığı için bu satırlar gerçek bir kull
 curl -si https://<domain>/api/v1/health
 # Kullanım alanları:
 curl -s https://<domain>/api/v1/users/me/usage -H "Authorization: Bearer <access-token>"
-# Parola uçları (404 beklenir):
+# Kayıt ucu açık (gövdesiz istek 400 beklenir):
 curl -s -o /dev/null -w '%{http_code}\n' -X POST https://<domain>/api/v1/auth/register
+# Sayaç sıfırlama kapalı (404 beklenir):
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://<domain>/api/v1/users/me/usage/reset -H "Authorization: Bearer <access-token>"
 # CORS (çıktı boş olmalı):
 curl -si https://<domain>/api/v1/health -H 'Origin: https://ornek.example' | grep -i '^access-control-'
 ```
@@ -388,7 +390,7 @@ Kaynak: `git diff 6b85321..HEAD -- internal/models`. Yalnızca `refresh_tokens` 
 - **Yalnızca kapı sorunu:** `GATE_ENFORCEMENT=log` (ya da `off`) yapıp yeniden başlat. Kod geri alınmaz.
 - **Sorgu zaman aşımı kaynaklı 500'ler:** `DB_STATEMENT_TIMEOUT`'u artır ya da `0` yap, yeniden başlat.
 - **Kodu geri almak:** Coolify'de bir önceki commit'i deploy et. Şema geri alma gerekmez: yeni kolonlar boş bırakılabilir, eski kod onları yok sayar (AutoMigrate kolon silmez). Eski sunucu yeni access token'ları kabul eder (`iss`/`aud`'a bakmaz), refresh token'lar geçerli kalır, kullanıcılar çıkış yapmaz. Geri alınca refresh toleransı, aile iptali ve saatlik temizlik de geri gider; oturumlar eski kurallarla sürer.
-- **Geri alırken dikkat:** Eski kod `APP_ENV` boşken `development` sayar; değişkeni hiçbir zaman kaldırma (production'da parola uçları açılır). Geri alınan sürüm Leitner'in eski yanlış cevap kuralına (üç yanlışta bir alt kutu) döner; aradaki günlerde yazılmış kutu/tarihler olduğu gibi kalır, düzeltme gerekmez.
+- **Geri alırken dikkat:** Eski kod `APP_ENV` boşken `development` sayar; değişkeni hiçbir zaman kaldırma (production'a özgü korumalar, ör. sayaç sıfırlama ucunun kapanması, devreden çıkar). Geri alınan sürüm Leitner'in eski yanlış cevap kuralına (üç yanlışta bir alt kutu) döner; aradaki günlerde yazılmış kutu/tarihler olduğu gibi kalır, düzeltme gerekmez.
 - **Veri bozulması:** Yalnızca gerçek bir veri kaybı ya da bozulmasında 2. adımdaki dump'tan geri yükle ([BACKUP.md](BACKUP.md), "Gerçek bir felaketten dönüş"). Dump'tan sonraki ilerleme kaybolur.
 
 ### Canlıda elle yapılacak kontroller
@@ -402,3 +404,80 @@ Bunlar kodla ya da CI'da doğrulanamaz; ilk deploy'dan sonra bir kez yapılıp s
 5. **Açılış logu:** `ortam: APP_ENV=production GATE_ENFORCEMENT=log`, `db: migrate tamamlandı`, `kullanım günü saat dilimi: Europe/Istanbul` satırları var; `config: uyarı:` ve `!!! UYARI !!!` satırları yok.
 6. **GitHub:** Settings → Branches'ta `main` için `test` ve `docker` zorunlu kontrol (kod dışı repo ayarı).
 7. **Herkese açık sayfalar:** Flutter reposundaki `docs/` güncellendiyse `make sync-web` çalıştırılıp commit edildi; deploy sonrası `/privacy` ve `/account-deletion` sayfalarındaki "Son Güncelleme" tarihi Flutter'daki ile aynı ("Herkese açık sayfalar" bölümüne bak).
+
+---
+
+## E-posta/parola girişi ve misafir hesabı: sürüm notları ve deploy kontrol listesi
+
+Bu bölüm, backend sprint 1'in üstüne gelen e-posta/parola girişi ve misafir hesabı değişikliklerini canlıya almak içindir. Yayındaki mobil istemci için geriye dönük uyumludur: kullanıcı yanıtlarına yalnızca `isGuest` alanı eklendi, yayındaki istemci yeni uçları çağırmadan eskisi gibi çalışır.
+
+### Yeni ve değişen uçlar
+
+| Uç | Ne değişti |
+|---|---|
+| `POST /auth/register`, `POST /auth/login` | Production'da da açık (eskiden 404). Hata kodları aynı: `400 invalid_request / invalid_email / weak_password / invalid_display_name`, `409 email_in_use`, `401 invalid_credentials`. `@users.kelimeler.local` adresleri `invalid_email` |
+| `POST /auth/guest` | Yeni. Yetkisiz, `AUTH_RATE_LIMIT`'e tabi. İsteğe bağlı `{"displayName"}`; `201` + `AuthResponse`. E-postasız misafir hesabı açar (`users.is_guest=true`, adres `guest_<id>@users.kelimeler.local`, giriş kimliği yok) |
+| `POST /auth/link/password` | Yeni. Token ister, `AUTH_RATE_LIMIT`'e tabi. Yalnızca misafirde (aksi `409 not_guest`); `{"email","password"}` ile hesabı kaydeder, `200 {"user": ...}` |
+| `POST /auth/link/google`, `/auth/link/apple` | Misafirde hesabı kaydeder (`isGuest=false`); sağlayıcının doğruladığı adres başka hesapta değilse kullanıcının e-postası olur |
+| Sosyal giriş (`/auth/google`, `/auth/apple`) | Doğrulanmış e-posta, tek giriş yolu parola olan hesabı devralır (bkz. 4. bölüm, "Giriş yolları ve e-postayla hesap eşleme") |
+| Bütün kullanıcı yanıtları | `user.isGuest` eklendi; yer tutucu adresler (misafir ve e-postasız Apple/Google hesapları) `email: ""` döner. **Eskiden** e-postasız Apple hesaplarında `apple_<sub>@users.kelimeler.local` dönüyordu; yayındaki istemcinin profilinde bu satır artık boş görünür |
+| `DELETE /auth/link/google`, `/auth/link/apple` | `password` kimliği her ortamda geçerli giriş yolu sayılır (son giriş yolu kuralı); eskiden production'da sayılmıyordu |
+
+### Ortam değişkeni
+
+| Değişken | Ne değişti | Deploy öncesi yapılacak |
+|---|---|---|
+| `GUEST_REFRESH_TOKEN_TTL` | Yeni, varsayılan `8760h` (1 yıl). Sıfır ya da negatif değerde sunucu açılmaz | Boş bırakılabilir (varsayılan uygulanır). Kısaltırsan, o süre uygulamayı açmayan misafirin hesabına bir daha ulaşılamayacağını hesaba kat |
+
+### Açılışta AutoMigrate'in uygulayacağı veritabanı değişikliği
+
+| Tablo | Değişiklik | Not |
+|---|---|---|
+| `users` | `is_guest boolean NOT NULL DEFAULT false` | Var olan bütün hesaplar `false` olur. PostgreSQL 11+ sabit varsayılanlı kolonu tabloyu yeniden yazmadan ekler: işlem anlıktır, yalnızca kısa bir tablo kilidi alır (kilit, `users`'ta süren uzun bir sorguyu bekleyebilir) |
+
+Index eklenmez. Eski sunucu kolonu yok sayar; geri almada kolon kalabilir.
+
+### Davranış ve izleme
+
+- **Devir logu:** `auth: doğrulanmış <google|apple> e-postası parola hesabını devraldı; parola kimliği silindi, oturumlar iptal edildi (user=<id>)`. Destek talebinde "parolamla giremiyorum" diyen kullanıcı için bu satıra bak: parola, adresin doğrulanmış sahibi Google/Apple ile girdiği için kaldırılmıştır; kullanıcı o sağlayıcıyla girer.
+- **Dönüşüm logu:** `auth: misafir hesabı <google|apple> ile kaydedildi (user=<id>)`.
+- **Parola sıfırlama yoktur.** Parolasını unutan kullanıcı ancak hesaba Google/Apple bağladıysa onlarla girer.
+- **Giriş yanıtları adres ele vermez:** bilinmeyen adres, parolasız hesap ve yanlış parola aynı `401 invalid_credentials` gövdesini ve yaklaşık aynı süreyi (bir bcrypt karşılaştırması) alır. Kayıt ise bilerek `409 email_in_use` döner (sözleşme); kayıtlı adresler kayıt ucundan öğrenilebilir, sıkı hız sınırı bunu yavaşlatır.
+- **Misafir hesapları birikir:** her `/auth/guest` çağrısı bir satırdır. Aşağıdaki temizliği birkaç ayda bir çalıştır.
+- **Yayın öncesi parola hesabı denetimi** (4. bölümdeki eski not) artık gerekmez: parola hesapları meşrudur, başkasının adresiyle açılmış olanı adresin sahibi Google/Apple ile girince devralır.
+
+### Yayın sırası
+
+1. Backend'i deploy et (yukarıdaki "Güvenli yayın sırası"ndaki yedek ve izleme adımları geçerli). Açılış logunda `db: migrate tamamlandı`.
+2. "Yayın sonrası doğrulama" 5. madde: gövdesiz `POST /api/v1/auth/register` → `400`.
+3. E-posta ve misafir ekranlı mobil sürümü backend canlıdayken yayınla, **önce değil**: eski backend'de `/auth/guest` ve `/auth/link/password` 404 döner.
+
+### Geri alma
+
+Bir önceki commit'i deploy etmek şemayı bozmaz (`is_guest` kalır, eski kod yok sayar), ama yeni mobil sürüm yayındaysa:
+- `/auth/guest`, `/auth/link/password` ve production'da `/auth/register`, `/auth/login` 404 döner: yeni istemcinin e-posta ve misafir butonları çalışmaz, e-posta/parola ile açılmış hesaplara girilemez (Google/Apple bağlanmışsa onlarla girilir).
+- Var olan misafirler oturumlarını korur (refresh token'ın bitiş tarihi satırda yazılıdır), ama eski sunucu rotasyonda 30 günlük ömür verir: 30 gün uygulamayı açmayan misafir hesabına ulaşamaz.
+- Eski sunucu doğrulanmış e-postayla gelen Google/Apple girişini, parolalı hesapla eşleşince `409 email_in_use` ile reddeder (devir yapmaz).
+
+### Terk edilmiş misafir temizliği
+
+`cmd/cleanup-guests` zamanlanmış değildir, elle çalıştırılır. Aday: **hâlâ misafir**, **hiçbir giriş kimliği olmayan** ve son etkinliği `--inactive-days` (varsayılan `180`, en az `30`) günden eski hesap. Son etkinlik şu zaman damgalarının en yenisidir:
+
+- `refresh_tokens.created_at` (asıl ölçüt): uygulama her açılışta access token'ı yeniler ve her rotasyon yeni bir satır yazar. Misafirin token ömrü (`GUEST_REFRESH_TOKEN_TTL`, 1 yıl) eşikten uzun olduğu için son satır saatlik token temizliğinden sağ çıkar; satır kalmamışsa token da kalmamıştır, hesaba zaten ulaşılamaz.
+- `word_progresses.updated_at`, `daily_logins.created_at` (öğrenme/tekrar, günlük giriş), `users.updated_at` ve `users.created_at`.
+
+Koşul, silmeden hemen önce kullanıcı satırı kilitliyken yeniden sınanır: liste alındıktan sonra uygulamayı açan ya da hesabını kaydeden misafir silinmez. Kelime ilerlemesi, token'lar, girişler ve rozetler CASCADE ile silinir; yedeklerdeki kopyalar yedek saklama süresi sonunda gider (hesap silme sayfasındaki söz gibi).
+
+Production'da (sunucuda, SSH ile; imaj distroless olduğu için kabuk yok, binary doğrudan çalıştırılır ve container'ın ortamını kullanır):
+
+```bash
+docker ps --filter "name=<uygulama-adı>" --format '{{.Names}}'
+# Önce yalnızca rapor (varsayılan): aday sayısı ve ilk 20 aday
+docker exec <container> /cleanup-guests
+# Sonra sil
+docker exec <container> /cleanup-guests --apply
+# Farklı eşik
+docker exec <container> /cleanup-guests --inactive-days 365 --apply
+```
+
+Lokalde: `make cleanup-guests` (rapor) ve `make cleanup-guests ARGS="--apply"`. Çıktının sonunda `silindi: N, atlandı (bu arada etkinleşti): M, hata: K` yazar; hata varsa çıkış kodu 1'dir ve satırlar `HATA <id>: ...` ile listelenir. Çalıştırmadan önce taze bir yedek al (PostgreSQL → Backups → Backup Now): silme geri alınamaz.

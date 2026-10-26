@@ -16,6 +16,10 @@ type TokenService struct {
 	secret     []byte
 	accessTTL  time.Duration
 	refreshTTL time.Duration
+
+	// guestRefreshTTL, misafir hesaplarının refresh token ömrüdür; 0 ise
+	// refreshTTL kullanılır (bkz. WithGuestRefreshTTL).
+	guestRefreshTTL time.Duration
 }
 
 func NewTokenService(secret string, accessTTL, refreshTTL time.Duration) *TokenService {
@@ -86,6 +90,24 @@ func (s *TokenService) ParseAccessToken(tokenStr string) (*AccessClaims, error) 
 
 func (s *TokenService) AccessTTL() time.Duration  { return s.accessTTL }
 func (s *TokenService) RefreshTTL() time.Duration { return s.refreshTTL }
+
+// WithGuestRefreshTTL, misafir hesaplarına verilecek refresh token ömrünü
+// ayarlar. Sıfır ya da negatif değer misafire olağan ömrü verir.
+func (s *TokenService) WithGuestRefreshTTL(d time.Duration) *TokenService {
+	s.guestRefreshTTL = d
+	return s
+}
+
+// RefreshTTLFor, kullanıcının yeni refresh token'ının ömrünü döner: misafire
+// guestRefreshTTL (ayarlıysa), diğerlerine refreshTTL. Karar her token
+// üretiminde (giriş ve rotasyon) kullanıcının o anki durumuna göre verilir;
+// misafir hesabını kaydedince sonraki rotasyonlar olağan ömre döner.
+func (s *TokenService) RefreshTTLFor(guest bool) time.Duration {
+	if guest && s.guestRefreshTTL > 0 {
+		return s.guestRefreshTTL
+	}
+	return s.refreshTTL
+}
 
 // GenerateRefreshToken, kriptografik olarak rastgele opak bir token üretir.
 // Token'ın kendisi kullanıcıya verilir; DB'de yalnızca SHA-256 hash'i saklanır.

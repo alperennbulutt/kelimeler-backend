@@ -8,6 +8,18 @@ type RegisterRequest struct {
 	DisplayName string `json:"displayName"`
 }
 
+// GuestRequest, POST /auth/guest'in isteğe bağlı gövdesidir.
+type GuestRequest struct {
+	DisplayName string `json:"displayName"`
+}
+
+// LinkPasswordRequest, POST /auth/link/password gövdesidir (misafir hesabına
+// e-posta/parola bağlar).
+type LinkPasswordRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
 type LoginRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
@@ -51,9 +63,13 @@ type AuthResponse struct {
 
 // UserDTO, istemciye dönen kullanıcı temsili. linkedProviders, Firebase
 // providerData'nın yerini alır (isGoogleLinked/isAppleLinked buradan türetilir).
+//
+// email, yer tutucu adreslerde (misafir ve e-postasız sosyal hesaplar, bkz.
+// SyntheticEmailDomain) boş döner: istemci bunu "e-posta yok" diye gösterir.
 type UserDTO struct {
 	ID                      string   `json:"id"`
 	Email                   string   `json:"email"`
+	IsGuest                 bool     `json:"isGuest"`
 	DisplayName             string   `json:"displayName"`
 	CurrentLevel            string   `json:"currentLevel"`
 	CurrentGroup            int      `json:"currentGroup"`
@@ -68,9 +84,14 @@ func NewUserDTO(u *models.User, providers []string) *UserDTO {
 	if providers == nil {
 		providers = []string{}
 	}
+	email := u.Email
+	if IsSyntheticEmail(email) {
+		email = ""
+	}
 	return &UserDTO{
 		ID:                      u.ID,
-		Email:                   u.Email,
+		Email:                   email,
+		IsGuest:                 u.IsGuest,
 		DisplayName:             u.DisplayName,
 		CurrentLevel:            u.CurrentLevel,
 		CurrentGroup:            u.CurrentGroup,

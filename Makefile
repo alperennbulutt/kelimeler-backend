@@ -1,4 +1,4 @@
-.PHONY: run build import-dictionary db-up up down logs test test-integration vet check ci fmt-check tidy fmt sync-web backup backup-verify
+.PHONY: run build import-dictionary cleanup-guests db-up up down logs test test-integration vet check ci fmt-check tidy fmt sync-web backup backup-verify
 
 # Lokal geliştirme: sadece Postgres'i docker'da çalıştır, server'ı go run ile çalıştır.
 db-up:
@@ -10,9 +10,17 @@ run:
 build:
 	go build -o bin/server ./cmd/server
 	go build -o bin/import ./cmd/import-dictionary
+	go build -o bin/cleanup-guests ./cmd/cleanup-guests
 
 import-dictionary:
 	go run ./cmd/import-dictionary
+
+# Terk edilmiş misafir hesapları (bkz. DEPLOYMENT.md, "Terk edilmiş misafir
+# temizliği"). Varsayılan yalnızca rapordur; silmek için:
+#   make cleanup-guests ARGS="--apply"
+#   make cleanup-guests ARGS="--inactive-days 365 --apply"
+cleanup-guests:
+	go run ./cmd/cleanup-guests $(ARGS)
 
 # Tüm yığını (postgres + app) docker'da çalıştır.
 up:

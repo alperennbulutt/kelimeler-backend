@@ -11,9 +11,19 @@ import (
 
 // Yalnızca geliştirme/test ortamında kayıtlı olması gereken uçlar.
 var gelistirmeUclari = []string{
+	"POST /api/v1/users/me/usage/reset",
+}
+
+// Her ortamda kayıtlı olması gereken uçlar. E-posta/parola ve misafir uçları
+// production'da da açıktır.
+var ortakUclar = []string{
+	"POST /api/v1/auth/google",
 	"POST /api/v1/auth/register",
 	"POST /api/v1/auth/login",
-	"POST /api/v1/users/me/usage/reset",
+	"POST /api/v1/auth/guest",
+	"POST /api/v1/auth/link/password",
+	"POST /api/v1/dictionary/words/batch",
+	"GET /api/v1/health",
 }
 
 // kayitliRotalar, rota tablosunu verilen ortamla kurar ve "METOT yol"
@@ -46,7 +56,7 @@ func TestRegisterRoutes_GelistirmeUclariYalnizcaProductionDisinda(t *testing.T) 
 			}
 		}
 		// Ortamdan bağımsız uçlar her iki ortamda da vardır.
-		for _, uc := range []string{"POST /api/v1/auth/google", "POST /api/v1/dictionary/words/batch", "GET /api/v1/health"} {
+		for _, uc := range ortakUclar {
 			if !rotalar[uc] {
 				t.Errorf("APP_ENV=%s: %s kayıtlı değil", c.env, uc)
 			}

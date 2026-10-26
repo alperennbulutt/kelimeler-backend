@@ -22,6 +22,7 @@ import (
 	"kelimeler-backend/internal/auth"
 	"kelimeler-backend/internal/config"
 	"kelimeler-backend/internal/db"
+	"kelimeler-backend/internal/dto"
 	"kelimeler-backend/internal/middleware"
 	"kelimeler-backend/internal/models"
 
@@ -56,32 +57,14 @@ func benzersizEposta(onEk string) string {
 
 // --- Rota tablosu ---
 
-func TestRegisterRoutes_ParolaUclariProductiondaKapali(t *testing.T) {
-	app := routesApp(nil, "production", sinirsiz)
-
-	// Gövdesiz istek, uç açıksa veritabanına gitmeden 400 alır; kapalıysa 404.
-	for _, path := range []string{"/api/v1/auth/register", "/api/v1/auth/login"} {
-		status, body := post(t, app, path)
-		if status != fiber.StatusNotFound {
-			t.Errorf("POST %s: status = %d, beklenen 404 (body: %v)", path, status, body)
-		}
-	}
-
-	// İstemcinin kullandığı kimlik uçları açık kalmalı.
-	for _, path := range []string{"/api/v1/auth/google", "/api/v1/auth/refresh"} {
-		status, body := post(t, app, path)
-		if status != fiber.StatusBadRequest {
-			t.Errorf("POST %s: status = %d, beklenen 400 (body: %v)", path, status, body)
-		}
-	}
-}
-
-func TestRegisterRoutes_ParolaUclariProductionDisindaAcik(t *testing.T) {
-	for _, env := range []string{"development", "test"} {
+func TestRegisterRoutes_ParolaUclariHerOrtamdaAcik(t *testing.T) {
+	for _, env := range []string{"production", "development", "test"} {
 		t.Run(env, func(t *testing.T) {
 			app := routesApp(nil, env, sinirsiz)
 
-			for _, path := range []string{"/api/v1/auth/register", "/api/v1/auth/login"} {
+			// Gövdesiz istek, uç açıksa veritabanına gitmeden 400 alır; kapalıysa 404.
+			for _, path := range []string{"/api/v1/auth/register", "/api/v1/auth/login",
+				"/api/v1/auth/google", "/api/v1/auth/refresh"} {
 				status, body := post(t, app, path)
 				if status != fiber.StatusBadRequest {
 					t.Errorf("POST %s: status = %d, beklenen 400 (body: %v)", path, status, body)
@@ -120,9 +103,9 @@ func TestRegisterRoutes_YenilemeSikiHizSinirinaTabiDegil(t *testing.T) {
 	}
 }
 
-func TestRegisterRoutes_GelistirmedeKayitVeGirisCalisir(t *testing.T) {
+func TestRegisterRoutes_ProductiondaKayitVeGirisCalisir(t *testing.T) {
 	gdb := testDB(t)
-	app := routesApp(gdb, "development", sinirsiz)
+	app := routesApp(gdb, "production", sinirsiz)
 
 	email := benzersizEposta("kayit")
 	t.Cleanup(func() { gdb.Delete(&models.User{}, "email = ?", email) })
@@ -176,36 +159,37 @@ func identityCount(t *testing.T, gdb *gorm.DB, userID, provider string) int64 {
 	return n
 }
 
-func TestAuthenticateSocial_ParolaKimlikliHesabaBaglamaz(t *testing.T) {
+// Doğrulanmamış (ya da hiç verilmemiş) sağlayıcı e-postası parola hesabına
+// hiçbir şekilde dokunmaz: yer tutucu adresli ayrı bir hesap açılır.
+func TestAuthenticateSocial_DogrulanmamisEpostaParolaHesabinaDokunmaz(t *testing.T) {
 	gdb := testDB(t)
 	u := testUser(t, gdb)
 	testIdentity(t, gdb, u, "password")
+	refresh := testRefreshToken(t, gdb, u.ID, time.Now().Add(time.Hour), nil)
 	h := New(gdb, &config.Config{AppEnv: "test"}, testTokens(), nil)
 
-	// Adres büyük harfle gelse de aynı hesaptır.
-	si := &auth.SocialIdentity{Subject: "g-" + u.ID, Email: strings.ToUpper(u.Email)}
 	for _, provider := range []string{"google", "apple"} {
 		t.Run(provider, func(t *testing.T) {
-			got, err := h.authenticateSocial(provider, si, "")
+			subject := "dogrulanmamis-" + provider + "-" + u.ID
+			t.Cleanup(func() { gdb.Delete(&models.User{}, "email = ?", dto.SyntheticEmail(provider+"_"+subject)) })
 
-			var apiError *middleware.APIError
-			if !errors.As(err, &apiError) {
-				t.Fatalf("hata = %v (kullanıcı: %v), beklenen APIError", err, got)
+			// Doğrulayıcı doğrulanmamış adresi boş döndürür (bkz. auth.verifiedEmail).
+			got, err := h.authenticateSocial(provider, &auth.SocialIdentity{Subject: subject}, "")
+			if err != nil {
+				t.Fatalf("authenticateSocial: %v", err)
 			}
-			if apiError.Status != fiber.StatusConflict || apiError.Code != "email_in_use" {
-				t.Errorf("hata = %d %q, beklenen 409 \"email_in_use\"", apiError.Status, apiError.Code)
-			}
-			if n := identityCount(t, gdb, u.ID, provider); n != 0 {
-				t.Errorf("%s kimliği parola hesabına bağlandı (%d satır)", provider, n)
+			if got.ID == u.ID {
+				t.Fatal("doğrulanmamış kimlik parola hesabına bağlandı")
 			}
 		})
 	}
 
-	// Reddetmek veri silmez: hesap ve parola kimliği yerinde kalır.
 	if n := identityCount(t, gdb, u.ID, "password"); n != 1 {
 		t.Errorf("parola kimliği sayısı = %d, beklenen 1", n)
 	}
-	loadUser(t, gdb, u.ID)
+	if loadRefreshToken(t, gdb, refresh).RevokedAt != nil {
+		t.Error("parola hesabının oturumu iptal edildi")
+	}
 }
 
 // Aynı doğrulanmış adres aynı sağlayıcıdan farklı bir subject ile gelebilir
@@ -1088,10 +1072,12 @@ func TestUnlinkProvider_SonGirisYontemiKorunur(t *testing.T) {
 			fiber.StatusBadRequest, "last_identity", []string{"google"}},
 		{"iki sosyal kimlikten biri kaldırılır", "test", []string{"apple", "google"}, "google",
 			fiber.StatusOK, "", []string{"apple"}},
-		// Production'da parola uçları kapalı: parola kimliği giriş yöntemi değildir.
-		{"production'da parola kimliği sayılmaz", "production", []string{"google", "password"}, "google",
-			fiber.StatusBadRequest, "last_identity", []string{"google", "password"}},
+		// E-posta/parola girişi her ortamda açık: parola kimliği bir giriş yoludur.
+		{"production'da parola kimliği sayılır", "production", []string{"google", "password"}, "google",
+			fiber.StatusOK, "", []string{"password"}},
 		{"geliştirmede parola kimliği sayılır", "development", []string{"google", "password"}, "google",
+			fiber.StatusOK, "", []string{"password"}},
+		{"production'da tek kimlik parola ise sosyal kimlik kaldırılır", "production", []string{"apple", "password"}, "apple",
 			fiber.StatusOK, "", []string{"password"}},
 		{"bağlı olmayan sağlayıcı değişiklik yapmadan 200", "test", []string{"google"}, "apple",
 			fiber.StatusOK, "", []string{"google"}},

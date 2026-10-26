@@ -43,8 +43,9 @@ func health(gdb *gorm.DB) fiber.Handler {
 
 // RegisterRoutes, tüm API route'larını mount eder.
 //
-// authLimit, parola/sosyal giriş uçlarına uygulanan sıkı hız sınırıdır;
-// deneme saldırılarını yavaşlatmak için genel sınırdan ayrıdır.
+// authLimit, parola/sosyal giriş, misafir hesabı ve parola bağlama uçlarına
+// uygulanan sıkı hız sınırıdır; deneme saldırılarını yavaşlatmak için genel
+// sınırdan ayrıdır.
 func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService, authLimit fiber.Handler) {
 	api.Get("/health", health(h.DB))
 
@@ -56,14 +57,17 @@ func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService, authLi
 	a.Post("/google", authLimit, h.GoogleAuth)
 	a.Post("/apple", authLimit, h.AppleAuth)
 
-	// Parola ile kayıt/giriş yalnızca geliştirme/test ortamında açıktır: mobil
-	// istemci yalnızca Google/Apple girişi sunar ve kayıtta e-posta sahipliği
-	// doğrulanmaz. Production'da açık kalsaydı herkes başkasının adresiyle hesap
-	// açıp o adresin sahibinden önce hesaba yerleşebilirdi.
-	if !h.Cfg.IsProduction() {
-		a.Post("/register", authLimit, h.Register)
-		a.Post("/login", authLimit, h.Login)
-	}
+	// E-posta/parola her ortamda açıktır. Kayıtta e-posta sahipliği
+	// doğrulanmaz; bu yüzden adresin doğrulanmış sahibi Google/Apple ile
+	// geldiğinde yalnızca parolalı hesap ona devredilir (bkz.
+	// takeOverPasswordAccount): adresi önceden kaydeden biri gerçek sahibin
+	// önüne geçemez.
+	a.Post("/register", authLimit, h.Register)
+	a.Post("/login", authLimit, h.Login)
+
+	// Misafir hesabı açmak da hesap üretir: sınırsız olsaydı tek bir istemci
+	// tabloyu doldurabilirdi.
+	a.Post("/guest", authLimit, h.Guest)
 
 	// Yenileme sıkı sınıra değil yalnızca genel API sınırına tabidir: uygulama
 	// açılışlarının çoğu buradan geçer ve aynı IP'yi paylaşan (CGNAT) kullanıcılar
@@ -76,6 +80,8 @@ func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService, authLi
 	a.Get("/me", guard, h.Me)
 	a.Post("/link/google", guard, h.LinkGoogle)
 	a.Post("/link/apple", guard, h.LinkApple)
+	// Parola bcrypt ile hash'lenir (pahalı): sıkı sınıra da tabidir.
+	a.Post("/link/password", authLimit, guard, h.LinkPassword)
 	a.Delete("/link/google", guard, h.UnlinkProvider("google"))
 	a.Delete("/link/apple", guard, h.UnlinkProvider("apple"))
 	a.Delete("/account", guard, h.DeleteAccount)
