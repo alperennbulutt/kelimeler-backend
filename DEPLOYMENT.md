@@ -78,7 +78,7 @@ Depo özelse Coolify'de kaynak olarak **GitHub App** (Private Repository) kullan
 | `API_RATE_LIMIT` | `600` — genel API hız sınırı, istek/dk. Geçerli access token'lı istekler kullanıcı başına, diğerleri IP başına sayılır. Kimliksiz uçlarda aynı IP'yi paylaşan (CGNAT) kullanıcılar sınırı paylaştığı için düşük tutma |
 | `TRUSTED_PROXIES` | **Boş bırak** (varsayılan: özel ağlar + loopback). İstemci IP başlığına yalnızca bu adreslerden gelen bağlantıda güvenilir. Daraltmak istersen Coolify ağının CIDR'ını gir (aşağıya bak) |
 | `PROXY_HEADER` | `X-Forwarded-For` (varsayılan). Cloudflare'e geçilirse aşağıdaki nota bak |
-| `AUTH_RATE_LIMIT` | `10` — Google/Apple giriş uçlarının sıkı hız sınırı, IP başına istek/dk. `/auth/refresh` buna değil `API_RATE_LIMIT`'e tabidir |
+| `AUTH_RATE_LIMIT` | `10` — giriş/kayıt uçlarının (Google/Apple, e-posta/parola, e-posta sorgusu, misafir, parola bağlama) sıkı hız sınırı, IP başına istek/dk; hepsi tek kovayı paylaşır. E-posta önce akışında bir giriş iki istektir (sorgu + giriş/kayıt). `/auth/refresh` buna değil `API_RATE_LIMIT`'e tabidir |
 | `SENTRY_DSN` | Sentry projesinin DSN'i. Boşsa hata raporlama kapalıdır |
 | `SENTRY_RELEASE` | Boş bırakılabilir: imaj derlenirken gömülen sürüm (commit) kullanılır. Elle verilirse o geçerlidir |
 | `CORS_ALLOWED_ORIGINS` | **Boş bırak** (API'yi çağıran bir web sitesi yoksa). Gerekirse virgülle ayrılmış origin listesi, ör. `https://panel.example.com` |
@@ -137,7 +137,7 @@ Apple girişi açıkken (`APPLE_CLIENT_ID` dolu) revoke yapılandırılamadıysa
 
 ### Giriş yolları ve e-postayla hesap eşleme (her ortamda aynı)
 
-- **Google, Apple, e-posta/parola ve misafir** girişleri her ortamda açıktır (`/auth/google`, `/auth/apple`, `/auth/register`, `/auth/login`, `/auth/guest`); hepsi IP başına sıkı sınıra (`AUTH_RATE_LIMIT`) tabidir.
+- **Google, Apple, e-posta/parola ve misafir** girişleri her ortamda açıktır (`/auth/google`, `/auth/apple`, `/auth/register`, `/auth/login`, `/auth/guest`); e-posta önce giriş ekranının adres sorgusu (`/auth/email/lookup`) da. Hepsi IP başına sıkı sınıra (`AUTH_RATE_LIMIT`) tabidir.
 - Google/Apple'ın **doğrulamadığı** e-posta hiçbir hesapla eşlenmez; kimlik yer tutucu adresli (`<sağlayıcı>_<sub>@users.kelimeler.local`) yeni bir hesaba bağlanır.
 - E-posta/parola kaydında adres sahipliği **doğrulanmaz** (e-posta gönderme altyapısı yok; parola sıfırlama da yok). Bu yüzden: doğrulanmış bir Google/Apple e-postası, **tek giriş yolu parola olan** hesapla eşleşirse hesap o kimliğe devredilir: parola kimliği silinir, kullanıcının bütün refresh token'ları iptal edilir (diğer cihazlar ilk yenilemede çıkış yapar), sosyal kimlik eklenir. Hesabı açan gerçekten adresin sahibiyse ilerlemesi korunur; başkasıysa erişimi biter. Log satırı: `auth: doğrulanmış <sağlayıcı> e-postası parola hesabını devraldı ... (user=<id>)`.
 - **Devirden ve geri almadan önce verilmiş access token'lar:** refresh token'lar iptal edilse de access token (JWT) imzası geçerli olduğu için `ACCESS_TOKEN_TTL` (15 dk) boyunca kabul edilir. Devirde ve geri almada hesabın oturum sürümü (`users.token_version`, access token'da `tv` claim'i) artar; **hesabı denetleyen uçlar** (`POST/DELETE /auth/link/*`, `POST /auth/link/password`, `DELETE /auth/account`) eski sürümlü token'ı `401 unauthenticated` ile reddeder. Bu olmasaydı adresi parolayla önceden kapatan kişi, hesap sahibine devredildikten sonra elindeki access token'la kendi Apple/Google'ını o hesaba bağlayıp ona kalıcı olarak girebilir, sahibin giriş yolunu kaldırabilir ya da hesabı silebilirdi. Diğer uçlar (ilerleme, profil) eski token'ı süresi dolana kadar kabul eder: en fazla `ACCESS_TOKEN_TTL` boyunca okuma/yazma, kalıcı erişim değil. `tv`'siz eski token'lar `0` sayılır; hiç devredilmemiş hesaplarda çalışmaya devam eder. Devirle aynı anda süren bir bağlama da devri bekletir: bağlama önce biterse hesabın parolanın yanında başka bir giriş yolu vardır ve devir yerine adres geri alınır.
@@ -183,7 +183,7 @@ Parola kaydında adres sahipliği doğrulanmaz. Eskiden, adresi (X) parolayla ö
 2. **`GET /api/v1/users/me/usage`** (geçerli bir access token ile) yanıtında şu alanlar var: `reviewAnswersToday`, `unlockedGroupsToday`, `noFillPassesRemaining`. Biri eksikse canlıda eski derleme çalışıyordur.
 3. **Yanıt başlıkları:** herhangi bir `/api/v1/...` yanıtında `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` geliyor (başlık adlarında büyük/küçük harf fark etmez) ve `X-RateLimit-Limit` değeri `API_RATE_LIMIT` ile aynı. Uydurma `X-Forwarded-For` ile hız sınırı atlatılamıyor (bkz. "İstemci IP'si, Traefik ve hız sınırı").
 4. **Açılış logunda uyarı yok:** `ortam: APP_ENV=production` satırı görünmeli. `config: uyarı:` ile başlayan satırlar eksik bir ayarı (Apple revoke anahtarları, `GOOGLE_CLIENT_IDS`, `TEST_MODE_UNLOCK_ALL`) ya da geçersiz bir hız sınırı değerini gösterir.
-5. **Kayıt ucu açık, geliştirme uçları kapalı:** gövdesiz `POST /api/v1/auth/register` 400 dönüyor (404 ise canlıda e-posta/misafir sürümünden eski bir derleme çalışıyordur). Sayaç sıfırlama ucu `POST /api/v1/users/me/usage/reset` geçerli bir access token'la 404 dönmeli; 200 dönüyorsa `APP_ENV` `production` değildir. (`/auth/guest`'i doğrulama için çağırma: her çağrı gerçek bir misafir hesabı açar.)
+5. **Kayıt ve e-posta sorgusu uçları açık, geliştirme uçları kapalı:** gövdesiz `POST /api/v1/auth/register` ve `POST /api/v1/auth/email/lookup` 400 dönüyor (404 ise canlıda e-posta/misafir sürümünden eski bir derleme çalışıyordur). Sayaç sıfırlama ucu `POST /api/v1/users/me/usage/reset` geçerli bir access token'la 404 dönmeli; 200 dönüyorsa `APP_ENV` `production` değildir. (`/auth/guest`'i doğrulama için çağırma: her çağrı gerçek bir misafir hesabı açar.)
 6. **CORS kapalı** (`CORS_ALLOWED_ORIGINS` boşsa): `Origin` başlıklı isteğin yanıtında `Access-Control-Allow-Origin` yok.
 
 ```bash
@@ -193,6 +193,8 @@ curl -si https://<domain>/api/v1/health
 curl -s https://<domain>/api/v1/users/me/usage -H "Authorization: Bearer <access-token>"
 # Kayıt ucu açık (gövdesiz istek 400 beklenir):
 curl -s -o /dev/null -w '%{http_code}\n' -X POST https://<domain>/api/v1/auth/register
+# E-posta sorgusu açık (gövdesiz istek 400 beklenir; AUTH_RATE_LIMIT'ten bir hak harcar):
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://<domain>/api/v1/auth/email/lookup
 # Sayaç sıfırlama kapalı (404 beklenir):
 curl -s -o /dev/null -w '%{http_code}\n' -X POST https://<domain>/api/v1/users/me/usage/reset -H "Authorization: Bearer <access-token>"
 # CORS (çıktı boş olmalı):
@@ -438,6 +440,7 @@ Bu bölüm, backend sprint 1'in üstüne gelen e-posta/parola girişi ve misafir
 | Uç | Ne değişti |
 |---|---|
 | `POST /auth/register`, `POST /auth/login` | Production'da da açık (eskiden 404). Hata kodları aynı: `400 invalid_request / invalid_email / weak_password / invalid_display_name`, `409 email_in_use`, `401 invalid_credentials`. `@users.kelimeler.local` adresleri `invalid_email` |
+| `POST /auth/email/lookup` | Yeni. Yetkisiz, `AUTH_RATE_LIMIT`'e tabi (giriş/kayıtla aynı kova). Gövde `{"email"}`; kayıt ve girişle aynı normalleştirmeyle (küçük harf, kenar boşlukları atılmış) aranır. `200 {"next":"login"}`: adres parola kimliği olan bir hesaba ait (yanında Google/Apple olsa da). `200 {"next":"register"}`: adres kayıtlı değil. `200 {"next":"social","providers":[...]}`: adres var ama parola kimliği yok; `providers` bağlı sağlayıcılar (`"apple"`, `"google"`, ada göre sıralı; kimliksiz hesapta `[]`), bu adresle kayıt `409 email_in_use` alır. Hatalar: `400 invalid_request` (bozuk JSON), `400 invalid_email` (geçersiz ya da `@users.kelimeler.local` yer tutucu adres: misafir ve e-postasız sosyal hesaplar hiçbir zaman eşleşmez), `429 rate_limited`, veritabanı hatasında `500` (asla "register" diye yutulmaz). Adresin kayıtlı olup olmadığını **bilerek** açığa vurur: aşağıda "Davranış ve izleme" |
 | `POST /auth/guest` | Yeni. Yetkisiz, `AUTH_RATE_LIMIT`'e tabi. İsteğe bağlı `{"displayName"}`; `201` + `AuthResponse`. E-postasız misafir hesabı açar (`users.is_guest=true`, adres `guest_<id>@users.kelimeler.local`, giriş kimliği yok) |
 | `POST /auth/link/password` | Yeni. Token ister, `AUTH_RATE_LIMIT`'e tabi. Yalnızca misafirde (aksi `409 not_guest`); `{"email","password"}` ile hesabı kaydeder, `200 {"user": ...}` |
 | `POST /auth/link/google`, `/auth/link/apple` | Misafirde hesabı kaydeder (`isGuest=false`); sağlayıcının doğruladığı adres başka hesapta değilse kullanıcının e-postası olur |
@@ -468,19 +471,20 @@ Index eklenmez. Eski sunucu kolonları yok sayar; geri almada kolonlar kalabilir
 - **Dönüşüm logu:** `auth: misafir hesabı <google|apple> ile kaydedildi (user=<id>)`.
 - **Parola sıfırlama yoktur.** Parolasını unutan kullanıcı ancak hesaba Google/Apple bağladıysa onlarla girer.
 - **Giriş yanıtları adres ele vermez:** bilinmeyen adres, parolasız hesap ve yanlış parola aynı `401 invalid_credentials` gövdesini ve yaklaşık aynı süreyi (bir bcrypt karşılaştırması) alır. Kayıt ise bilerek `409 email_in_use` döner (sözleşme); kayıtlı adresler kayıt ucundan öğrenilebilir, sıkı hız sınırı bunu yavaşlatır.
+- **E-posta sorgusu adresi bilerek ele verir (ürün kararı, 27 Ekim):** `POST /auth/email/lookup`, e-posta önce giriş ekranının kullanıcıyı parola ya da kayıt sayfasına göndermesi için adresin kayıtlı olup olmadığını ve parolası mı yoksa yalnızca Google/Apple'ı mı olduğunu söyler. Bu akışın doğasıdır (Google ve Microsoft girişleri de böyle çalışır); kayıtlı olup olmadığı zaten kayıt ucunun `409`'undan öğrenilebiliyordu, yeni olan yalnızca hesabın giriş yöntemi (parola / Google / Apple) ve sorgunun hesap açmadan yapılabilmesidir. Toplu adres taramasını IP başına sıkı sınır (`AUTH_RATE_LIMIT`, varsayılan 10/dk, giriş ve kayıtla **aynı kova**) yavaşlatır: sorgu taramaya ayrı bir bütçe açmaz. Giriş ucunun birleşik `401 invalid_credentials` davranışı değişmedi. Yer tutucu adresler (`@users.kelimeler.local`) `400 invalid_email` alır; misafir ve e-postasız sosyal hesaplar sorguyla bulunamaz. Taramadan şüphelenirsen (tek IP'den sürekli `429 rate_limited`), `AUTH_RATE_LIMIT`'i düşürmek giriş/kayıt denemelerini de aynı ölçüde kısar.
 - **Misafir hesapları birikir:** her `/auth/guest` çağrısı bir satırdır. Aşağıdaki temizliği birkaç ayda bir çalıştır.
 - **Yayın öncesi parola hesabı denetimi** (4. bölümdeki eski not) artık gerekmez: parola hesapları meşrudur, başkasının adresiyle açılmış olanı adresin sahibi Google/Apple ile girince devralır.
 
 ### Yayın sırası
 
 1. Backend'i deploy et (yukarıdaki "Güvenli yayın sırası"ndaki yedek ve izleme adımları geçerli). Açılış logunda `db: migrate tamamlandı`.
-2. "Yayın sonrası doğrulama" 5. madde: gövdesiz `POST /api/v1/auth/register` → `400`.
-3. E-posta ve misafir ekranlı mobil sürümü backend canlıdayken yayınla, **önce değil**: eski backend'de `/auth/guest` ve `/auth/link/password` 404 döner.
+2. "Yayın sonrası doğrulama" 5. madde: gövdesiz `POST /api/v1/auth/register` → `400`. E-posta önce giriş ekranlı istemci için gövdesiz `POST /api/v1/auth/email/lookup` de `400` dönmeli (`404` ise canlıda sorgu ucundan eski bir derleme çalışıyordur; bu istek de `AUTH_RATE_LIMIT` kovasından bir hak harcar).
+3. E-posta ve misafir ekranlı mobil sürümü backend canlıdayken yayınla, **önce değil**: eski backend'de `/auth/guest`, `/auth/link/password` ve `/auth/email/lookup` 404 döner (sorgu 404 dönerse e-posta önce giriş ekranı "Devam et"te ilerleyemez).
 
 ### Geri alma
 
 Bir önceki commit'i deploy etmek şemayı bozmaz (`is_guest` kalır, eski kod yok sayar), ama yeni mobil sürüm yayındaysa:
-- `/auth/guest`, `/auth/link/password` ve production'da `/auth/register`, `/auth/login` 404 döner: yeni istemcinin e-posta ve misafir butonları çalışmaz, e-posta/parola ile açılmış hesaplara girilemez (Google/Apple bağlanmışsa onlarla girilir).
+- `/auth/guest`, `/auth/link/password`, `/auth/email/lookup` ve production'da `/auth/register`, `/auth/login` 404 döner: yeni istemcinin e-posta ve misafir butonları çalışmaz, e-posta/parola ile açılmış hesaplara girilemez (Google/Apple bağlanmışsa onlarla girilir).
 - Var olan misafirler oturumlarını korur (refresh token'ın bitiş tarihi satırda yazılıdır), ama eski sunucu rotasyonda 30 günlük ömür verir: 30 gün uygulamayı açmayan misafir hesabına ulaşamaz.
 - Eski sunucu doğrulanmış e-postayla gelen Google/Apple girişini, parolalı hesapla eşleşince `409 email_in_use` ile reddeder (devir de geri alma da yapmaz).
 - Eski sunucu `tv` claim'ine ve `users.token_version`'a bakmaz: geri dönülürse devirden önce verilmiş access token'lar süreleri dolana kadar hesabı denetleyen uçlarda da kabul edilir.
