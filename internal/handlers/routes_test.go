@@ -20,6 +20,7 @@ var ortakUclar = []string{
 	"POST /api/v1/auth/google",
 	"POST /api/v1/auth/register",
 	"POST /api/v1/auth/login",
+	"POST /api/v1/auth/email/lookup",
 	"POST /api/v1/auth/guest",
 	"POST /api/v1/auth/link/password",
 	"POST /api/v1/dictionary/words/batch",

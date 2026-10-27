@@ -294,6 +294,91 @@ func (h *Handlers) Login(c *fiber.Ctx) error {
 	return c.JSON(resp)
 }
 
+// decideEmailLookup, adresin hesabındaki giriş yöntemlerinden (bkz.
+// loadLinkedProviders) e-posta önce akışının sonraki adımını seçer; found
+// false ise adres kayıtlı değildir. Veritabanına dokunmaz.
+//
+// Parola kimliği varsa yanında Google/Apple olsa da "login" döner: kullanıcı
+// adresini yazdı, en kısa yol parolasıdır; sosyal girişler ekranda zaten
+// durur. Parolasız hesapta providers yalnızca google/apple içerir. Hiç kimliği
+// olmayan gerçek adresli hesap bugünkü akışlarda oluşmaz (bağlantı kaldırmada
+// son giriş yolu kalır, devir ve geri alma kimliği aynı transaction'da
+// değiştirir); oluşursa providers boş döner ve kayıt yine 409 alacağı için
+// "social" seçilir: istemci iki sağlayıcıyı da gösterir, doğrulanmış adresle
+// gelen Google/Apple girişi bu hesaba bağlanır.
+func decideEmailLookup(found bool, linked []string) (string, []string) {
+	if !found {
+		return dto.LookupNextRegister, nil
+	}
+	social := []string{}
+	for _, p := range linked {
+		switch p {
+		case "password":
+			return dto.LookupNextLogin, nil
+		case "google", "apple":
+			social = append(social, p)
+		}
+	}
+	return dto.LookupNextSocial, social
+}
+
+// EmailLookup: POST /auth/email/lookup — e-posta önce giriş ekranında adresin
+// parola sayfasına mı, kayıt sayfasına mı, yoksa Google/Apple'a mı gideceğini
+// söyler.
+//
+//	200 {"next":"login"}                           parola kimliği olan hesap
+//	200 {"next":"register"}                        adres kayıtlı değil
+//	200 {"next":"social","providers":["apple",…]}  yalnızca Google/Apple
+//	400 invalid_request / invalid_email, 429 rate_limited (authLimit)
+//
+// Bilinçli olarak adresin kayıtlı olup olmadığını açığa vurur: e-posta önce
+// akışının doğası budur (Google ve Microsoft girişleri de böyle çalışır) ve
+// kayıt ucu zaten 409 email_in_use ile aynı bilgiyi verir. Toplu taramayı
+// IP başına sıkı hız sınırı (AUTH_RATE_LIMIT, giriş/kayıtla aynı kova)
+// yavaşlatır. Giriş ucunun birleşik 401 invalid_credentials davranışı
+// değişmez: parola denemesi adresi ayrıca ele vermez. Ayrıntı: DEPLOYMENT.md.
+//
+// Yer tutucu adresler (misafir, e-postasız sosyal hesap, geri alınmış adres;
+// @users.kelimeler.local) ValidateEmail'de 400 invalid_email alır, hiçbir
+// zaman bir hesapla eşleşmez. Arama kayıt ve girişle aynı normalize edilmiş
+// adresle yapılır.
+func (h *Handlers) EmailLookup(c *fiber.Ctx) error {
+	var req dto.EmailLookupRequest
+	if err := c.BodyParser(&req); err != nil {
+		return apiErr(fiber.StatusBadRequest, "invalid_request", "geçersiz istek")
+	}
+	email := dto.NormalizeEmail(req.Email)
+	if err := dto.ValidateEmail(email); err != nil {
+		return apiErr(fiber.StatusBadRequest, "invalid_email", err.Error())
+	}
+
+	// Kayıt ucuyla aynı sorgu: "register" yanıtı kaydın 409 almayacağı
+	// anlamına gelmeli. Yalnızca bulunamayan kayıt "kayıtlı değil"dir;
+	// veritabanı hatası 500 döner (yanlış "register" kullanıcıyı 409'a
+	// gönderirdi).
+	var user models.User
+	found := true
+	if err := h.DB.Select("id").Where("email = ?", email).First(&user).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		found = false
+	}
+	var linked []string
+	if found {
+		var err error
+		if linked, err = h.loadLinkedProviders(user.ID); err != nil {
+			return err
+		}
+	}
+
+	next, providers := decideEmailLookup(found, linked)
+	if next == dto.LookupNextSocial {
+		return c.JSON(fiber.Map{"next": next, "providers": providers})
+	}
+	return c.JSON(fiber.Map{"next": next})
+}
+
 // guestEmailPrefix, misafir hesaplarının yer tutucu adresinin önekidir:
 // guest_<kullanıcı id>@users.kelimeler.local.
 const guestEmailPrefix = "guest_"
