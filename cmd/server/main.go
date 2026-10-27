@@ -377,8 +377,9 @@ func rateLimitKey(tokens *auth.TokenService) func(*fiber.Ctx) string {
 }
 
 // authLimiter, kimlik üreten uçlar (Google/Apple ve e-posta/parola ile
-// giriş/kayıt, misafir hesabı, parola bağlama) için sıkı hız sınırı üretir.
-// Deneme saldırılarını yavaşlatır.
+// giriş/kayıt, e-posta sorgusu, misafir hesabı, parola bağlama) için sıkı hız
+// sınırı üretir. Deneme saldırılarını ve adres taramasını yavaşlatır; tek
+// örnek bütün bu uçlara verildiği için hepsi aynı IP kovasını paylaşır.
 func authLimiter(cfg *config.Config) fiber.Handler {
 	return limiter.New(limiter.Config{
 		Max:        cfg.AuthRateLimit,
