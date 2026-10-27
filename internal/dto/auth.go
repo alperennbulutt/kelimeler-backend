@@ -25,6 +25,23 @@ type LoginRequest struct {
 	Password string `json:"password"`
 }
 
+// EmailLookupRequest, POST /auth/email/lookup gövdesidir: e-posta önce giriş
+// ekranı adresin hangi sayfaya (giriş, kayıt, sosyal giriş) gideceğini sorar.
+type EmailLookupRequest struct {
+	Email string `json:"email"`
+}
+
+// POST /auth/email/lookup yanıtındaki "next" değerleri.
+const (
+	// LookupNextLogin: adres parola kimliği olan bir hesaba ait, parola sorulur.
+	LookupNextLogin = "login"
+	// LookupNextRegister: adres kayıtlı değil, kayıt sayfası açılır.
+	LookupNextRegister = "register"
+	// LookupNextSocial: adres yalnızca Google/Apple ile açılmış bir hesaba ait;
+	// kayıt 409 email_in_use alacağından istemci o sağlayıcıyı önerir.
+	LookupNextSocial = "social"
+)
+
 type GoogleAuthRequest struct {
 	IDToken     string `json:"idToken"`
 	DisplayName string `json:"displayName"`
