@@ -69,7 +69,7 @@ Depo özelse Coolify'de kaynak olarak **GitHub App** (Private Repository) kullan
 | `REFRESH_TOKEN_TTL` | `720h` |
 | `GUEST_REFRESH_TOKEN_TTL` | `8760h` (1 yıl, varsayılan) — misafir hesaplarının refresh token ömrü, rotasyonda da. Misafirin başka giriş yolu yoktur; token kaybolur ya da süresi dolarsa hesaba bir daha ulaşılamaz. Misafir hesabını kaydedince sonraki rotasyonlar `REFRESH_TOKEN_TTL`'e döner. Sıfır ya da negatif değerde sunucu açılmaz |
 | `GOOGLE_CLIENT_IDS` | `928054180858-...apps.googleusercontent.com` |
-| `APPLE_CLIENT_ID` | iOS bundle id'n (Apple yoksa boş) |
+| `APPLE_CLIENT_ID` | iOS bundle id: `com.kaipra.kutularlaIngilizce` (Apple yoksa boş). Apple kimlik token'ının `aud` alanı buna eşit olmalı; farklıysa Apple girişi 401 verir. |
 | `APPLE_TEAM_ID` | Apple Developer hesabındaki 10 karakterlik Team ID — **iOS yayını için zorunlu** (aşağıdaki nota bak) |
 | `APPLE_KEY_ID` | "Sign in with Apple" için üretilen anahtarın Key ID'si — **iOS yayını için zorunlu** |
 | `APPLE_PRIVATE_KEY` | O anahtarın `.p8` içeriği (satır sonları `\n` olarak kaçırılabilir) — **iOS yayını için zorunlu**, gizli |
