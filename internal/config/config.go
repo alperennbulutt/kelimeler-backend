@@ -98,6 +98,11 @@ type Config struct {
 	AppleKeyID      string
 	ApplePrivateKey string
 
+	// Sözlük seed'inin (dictionary_words.sql) ve yamalarının
+	// (dictionary_patches/) bulunduğu klasör. Varsayılan imajdaki /seed'dir;
+	// lokalde depodaki ./seed verilebilir (bkz. DEPLOYMENT.md, 6. bölüm).
+	SeedDir string
+
 	// Sadece import-dictionary aracı kullanır.
 	FirebaseProjectID      string
 	FirebaseServiceAccount string
@@ -193,6 +198,7 @@ func FromEnv() (*Config, error) {
 		AppleTeamID:            getEnv("APPLE_TEAM_ID", ""),
 		AppleKeyID:             getEnv("APPLE_KEY_ID", ""),
 		ApplePrivateKey:        getEnv("APPLE_PRIVATE_KEY", ""),
+		SeedDir:                getEnv("SEED_DIR", "/seed"),
 		FirebaseProjectID:      getEnv("FIREBASE_PROJECT_ID", ""),
 		FirebaseServiceAccount: getEnv("FIREBASE_SERVICE_ACCOUNT", ""),
 		TestModeUnlockAll:      getBool("TEST_MODE_UNLOCK_ALL", false),

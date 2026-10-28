@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"syscall"
@@ -30,14 +31,12 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
+	"gorm.io/gorm"
 )
 
 // version, derleme sırasında -ldflags "-X main.version=<commit>" ile gömülür
 // (bkz. Dockerfile). Boşsa sürüm bilinmiyordur.
 var version string
-
-// seedPath, imaja gömülü sözlük dökümünün yoludur (bkz. Dockerfile).
-const seedPath = "/seed/dictionary_words.sql"
 
 func main() {
 	// Çalışma imajı distroless'tır (kabuk, curl, wget yok); container sağlık
@@ -81,6 +80,26 @@ func healthcheck(url string) int {
 		return 1
 	}
 	return 0
+}
+
+// applyDictionaryPatches, seed'den sonra henüz uygulanmamış sözlük yamalarını
+// uygular (bkz. db.ApplyDictionaryPatches).
+//
+// Başarısız yama açılışı durdurmaz: yama geri alınır ve sözlük son tutarlı
+// hâliyle (yalnızca bu düzeltmeler eksik) hizmet vermeye devam eder. Açılışı
+// durdurmak, bir içerik hatası yüzünden acil kod düzeltmeleri dahil her
+// deploy'u da durdururdu. Hata loglanır ve Sentry'ye gider; yamalar CI'da
+// gerçek seed'e karşı ayrıca sınanır (TestGercekSeedVeYamalar).
+func applyDictionaryPatches(database *gorm.DB, dir string) {
+	rep, err := db.ApplyDictionaryPatches(database, dir)
+	for _, w := range rep.Warnings {
+		log.Printf("uyarı: %s", w)
+		observability.CaptureWarning(w)
+	}
+	if err != nil {
+		log.Printf("hata: %v", err)
+		observability.CaptureError(err)
+	}
 }
 
 // run, sunucuyu kurar ve SIGTERM/SIGINT gelene kadar çalıştırır.
@@ -136,12 +155,14 @@ func run() (err error) {
 	// İlk açılışta (boş DB) imaja gömülü kelime sözlüğünü yükle. Production'da
 	// sözlüksüz açılmak yerine durulur: deploy başarısız görünür, Coolify eski
 	// container'ı çalıştırmaya devam eder.
-	if _, err := db.SeedDictionaryIfEmpty(database, seedPath); err != nil {
+	// Seed ve yamalar imajın /seed klasöründedir (SEED_DIR, bkz. Dockerfile).
+	if _, err := db.SeedDictionaryIfEmpty(database, filepath.Join(cfg.SeedDir, "dictionary_words.sql")); err != nil {
 		if cfg.IsProduction() {
 			return fmt.Errorf("sözlük yüklenemedi: %w", err)
 		}
 		log.Printf("uyarı: sözlük yüklenemedi, kelimeler gösterilemeyecek: %v", err)
 	}
+	applyDictionaryPatches(database, filepath.Join(cfg.SeedDir, "dictionary_patches"))
 
 	tokens := auth.NewTokenService(cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL).
 		WithGuestRefreshTTL(cfg.GuestRefreshTokenTTL)
