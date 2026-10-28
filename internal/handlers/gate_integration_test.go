@@ -400,7 +400,7 @@ func TestReviewGate_OgrenmeSwipeiKapiyaTakilmaz(t *testing.T) {
 	gdb, u, app := newGateTest(t, config.GateEnforce)
 	ids := dueWords(t, gdb, u.ID, "itest_gate_box1", 1, 1)
 	// Kutu 1'in sağa kaydırılması öğrenmedir: grup bugün açık olmalı (bkz.
-	// TestLearnGate_Kutu1SwipeGunlukKapidanGecer).
+	// TestSwipe_Kutu1SagGunlukKapidanGecer).
 	setUsage(t, gdb, u.ID, map[string]any{
 		"review_answers_today":       30,
 		"groups_started_today_count": 1,

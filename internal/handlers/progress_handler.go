@@ -55,7 +55,8 @@ func (h *Handlers) GetProgressForGroup(c *fiber.Ctx) error {
 // değiştirilmez (yalnızca sözlükten farklı yazılmış seviye/grup/metin
 // düzeltilir) ve mevcut durum döner. Aksi halde iki cihaz ya da bayat bir
 // öğrenme destesi, ilerlemiş bir kelimeyi sessizce kutu 2'ye geri atardı.
-// Yalnızca kutu 1'deki eski (Firestore'dan gelen) kayıtlar kutu 2'ye alınır.
+// Yalnızca kutu 1'deki kayıtlar (Firestore'dan gelen eski kayıtlar ve
+// "Bilmiyorum" ile yazılanlar, bkz. MarkUnknown) kutu 2'ye alınır.
 //
 // Yeni yazım reklam kapısından geçer (sözleşme K4, bkz. learnGate): grup bugün
 // açılmamışsa ya da haritada kilitliyse GATE_ENFORCEMENT=enforce'ta 403
