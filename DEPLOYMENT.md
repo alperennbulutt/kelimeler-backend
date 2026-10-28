@@ -203,26 +203,85 @@ curl -si https://<domain>/api/v1/health -H 'Origin: https://ornek.example' | gre
 
 ---
 
-## 6) Kelime sözlüğü (otomatik yüklenir)
+## 6) Kelime sözlüğü (otomatik yüklenir ve yamalanır)
 
-Elle bir şey çalıştırmak gerekmez. Sözlük imajın içindedir (`/seed/dictionary_words.sql`) ve uygulama her açılışta `dictionary_words` tablosu **boşsa** onu kendisi yükler; tablo doluysa dokunmaz.
+Elle bir şey çalıştırmak gerekmez. Sözlük imajın içindedir (`/seed`). Uygulama her açılışta, migrate'ten sonra sırasıyla şunları yapar:
+
+1. `dictionary_words` tablosu **boşsa** `/seed/dictionary_words.sql`'i yükler. Tablo doluysa ona dokunmaz.
+2. `/seed/dictionary_patches/` altındaki henüz uygulanmamış **sözlük yamalarını** sırayla uygular (aşağıdaki "Sözlük yamaları" bölümü).
 
 Doğrula:
 
-- İlk açılışın deploy logunda `db: seed tamamlandı, 9980 kelime yüklendi` satırı var.
-- `https://<domain>/api/v1/health` yanıtında `"dictionaryWords":9980` görünüyor.
+- İlk açılışın deploy logunda `db: seed tamamlandı, 9980 kelime yüklendi` satırı ve ardından her yama için `db: sözlük yaması <ad> uygulandı (...)` satırı var. Yeni kurulumda seed yamaların değerlerini zaten taşıdığından bu satır `0 kart değişti` der. Canlıdaki mevcut sözlükte `0001_kritik_ve_a1` ilk kez uygulanırken `136 kart, 136 kart değişti` beklenir; `uyarı:` satırı çıkmamalı.
+- `https://<domain>/api/v1/health` yanıtında `"dictionaryWords":9980` görünüyor. Yamalar kart eklemez ya da silmez, bu sayı değişmez.
+- PostgreSQL terminalinde: `SELECT name, words, updated, applied_at FROM dictionary_patches_applied ORDER BY name;`
 
 > Çalışma imajı distroless'tır ve root olmayan kullanıcıyla (`nonroot`, uid 65532) çalışır: içinde kabuk ve `psql` yoktur, Application terminali açılmaz. Firebase import aracı (`/import`) çalışma imajında yoktur; gerekirse lokalde `make import-dictionary` ya da `docker compose run --rm import` (ayrı `import` build hedefi) kullanılır. Veritabanına elle bakmak gerekirse Coolify'de **PostgreSQL kaynağının** terminalini kullan (`psql -U postgres -d <veritabanı-adı>`).
 
-### Sözlüğü yeniden yüklemek
+### Sözlük yamaları (kelime düzeltmek)
 
-Kelimeler değiştiyse:
+Bir kartın İngilizcesini, Türkçesini ya da örnek cümlesini düzeltmenin olağan yolu budur. Kesinti, `TRUNCATE` ya da elle SQL gerekmez; deploy yeterlidir.
 
-1. Yeni `seed/dictionary_words.sql` dosyasını üret (lokalde `make import-dictionary`, ardından `dictionary_words` tablosunun `pg_dump --data-only --column-inserts` dökümü), commit + deploy et.
+**Yeni yama eklemek:**
+
+1. `seed/dictionary_patches/` altına bir sonraki sıra numarasıyla `NNNN_ad.json` ekle (ör. `0002_b1_ornekler.json`; ad küçük harf, rakam ve alt çizgiden oluşur). Biçim:
+   ```json
+   {
+     "description": "Neden ve kaynak",
+     "changes": [
+       {"id": "A1_2_45",
+        "old": {"english": "bag", "turkish": "makyaj çantası", "example": "My makeup bag is pink."},
+        "new": {"english": "makeup bag", "turkish": "makyaj çantası", "example": "My makeup bag is pink."},
+        "kind": "bilesik_kelime", "reason": "..."}
+     ]
+   }
+   ```
+   `new`'deki üç alan zorunludur ve boş olamaz. `old` isteğe bağlıdır ama verilmesi önerilir (aşağıda "uyarılar"). `kind`, `reason`, `review_note` yalnızca inceleme içindir. Başka bir alan (ör. `level`) dosyayı geçersiz kılar: yama yalnızca var olan kartın `english`, `turkish`, `example` alanlarını **id ile** günceller. Kart ekleyemez, silemez; seviyesini, grubunu ya da sırasını değiştiremez.
+2. Aynı değişiklikleri `seed/dictionary_words.sql`'deki satırlara da işle ki yeni kurulan veritabanı doğrudan doğru sözlükle başlasın (yama orada hiçbir kartı değiştirmeden kaydedilir). `TestRepoYamalari_SeedIleUyumlu` seed'in her yamanın son değerini taşıdığını, `TestGercekSeedVeYamalar` ise yamaların gerçek seed'e uygulanabildiğini denetler (CI'da çalışır).
+3. `make check` ve entegrasyon testleri (`make ci`), commit, deploy.
+
+Biçim JSON'dur, SQL değil: SQL dosyası istediği her şeyi yapabilirdi; JSON'da "yalnızca id ile bu üç alanı güncelle" sınırını kod zorlar, bilinmeyen id'yi ve yazım hatalı alanı yakalar ve dosya incelemede okunaklı bir fark üretir.
+
+**Nasıl çalışır:**
+
+- Yamalar dosya adındaki sıra numarasına göre uygulanır. Her yama **tek transaction'dır**: kartlar güncellenir ve `dictionary_patches_applied` tablosuna kaydı (`name`, `checksum`, `words`, `updated`, `applied_at`) yazılır; ya hepsi ya hiçbiri.
+- Kaydı olan yama **bir daha uygulanmaz**. Uygulanmış bir yamanın dosyasını değiştirme: değişiklik uygulanmaz, açılışta uyarı verilir (checksum farklı). Düzeltme için yeni bir yama ekle.
+- Yama idempotenttir: içeriği zaten yeni değerde olan kart yeniden yazılmaz.
+- Birden çok replika aynı anda açılırsa advisory lock sayesinde yamayı yalnızca biri uygular; diğerleri kilidi bekler ve yamayı uygulanmış bulur.
+- `dictionary_words` boşsa (lokalde seed'siz açılış) yamalar atlanır ve kaydedilmez.
+- Tablo, açılıştaki AutoMigrate'le kurulur (yeni ve boş bir tablo; mevcut tablolara dokunulmaz, kilit beklemesi yok).
+
+**Yama başarısız olursa açılış durmaz.** Yama sözlükte olmayan bir id içerirse ya da bir veritabanı hatası olursa:
+
+- O yama bütünüyle geri alınır ve kaydedilmez. Sonraki yamalar da uygulanmaz, çünkü ona dayanıyor olabilirler.
+- Logda `hata: sözlük yaması <ad> uygulanamadı, geri alındı (sonraki yamalar da uygulanmadı): yama sözlükte olmayan kelime içeriyor: <id'ler>` satırı çıkar ve hata Sentry'ye gider.
+- Sunucu sözlüğün son tutarlı hâliyle açılır: kullanıcılar yalnızca bu düzeltmeleri görmez, başka hiçbir şey bozulmaz.
+- Düzeltme: yama dosyasını düzelt (başarısız yama kaydedilmediği için aynı dosya düzeltilebilir), deploy et. Geçici bir veritabanı hatasıysa uygulamayı yeniden başlatmak yeter, yama bir sonraki açılışta yeniden denenir.
+
+Neden durdurmuyoruz: Production'da açılışı durdurmak, Coolify'nin eski container'ı çalıştırmaya devam etmesi demek. Bu da tek bir içerik hatası düzelene kadar acil güvenlik düzeltmeleri dahil **her** deploy'un takılması anlamına gelir. Sözlüğün eski hâli ise tutarlı ve çalışır durumdadır. Bilinmeyen id'nin canlıya ulaşması zaten beklenmez: yamalar CI'da gerçek seed'e karşı uygulanır. Seed yüklenemezse (sözlük boş kalır) açılışın durması kuralı değişmedi.
+
+**Uyarılar** (açılışı durdurmaz; log `uyarı:` satırı + Sentry uyarısı):
+
+- `... "old" ile uyuşmuyordu (elle değiştirilmiş olabilir)`: Kartın canlıdaki içeriği ne yamanın `old`'u ne `new`'i. Kart daha önce elle ya da import aracıyla değiştirilmiş demektir. Yamadaki değer yine yazılır; listedeki id'lere bak.
+- `... uygulandıktan sonra değiştirilmiş (checksum farklı)`: Uygulanmış bir yamanın dosyası değişmiş. Değişiklik uygulanmadı; dosyayı geri al ve düzeltmeyi yeni bir yamayla yap.
+
+**Kullanıcı ilerlemesi:** Yama kartın id'sini, seviyesini, grubunu ve sırasını değiştirmez. Bu yüzden `word_progresses` satırları olduğu gibi o karta bağlı kalır: kutu, tarihler ve sayaçlar değişmez. Ürün kararı şu: kartın içeriği düzeltilir, ilerleme o karta ait kalır. İçeriği tamamen değişen bir kartta da böyledir: `A1_4_14`'ü (television → wall) öğrenmiş kullanıcının o kutusunda artık "wall" vardır. İlerleme satırı kartın `english`/`turkish` metninin bir kopyasını taşır (öğrenilen kelimeler ve istatistik listeleri onu gösterir). Yama bu kopyayı aynı transaction'da yeni metne eşitler, logdaki `N ilerleme satırının metni eşitlendi` bu sayıdır. Kopya eşitlenmeseydi kullanıcı bu listelerde kartın eski metnini görürdü.
+
+**Dikkat, import aracı:** `make import-dictionary` Firestore'daki sözlüğü id üzerinden upsert eder ve yamalanmış kartları eski metinlerine döndürür. Yamalar kayıtlı olduğu için kendiliğinden yeniden uygulanmaz. Yamalanmış bir veritabanında import çalıştırma. Çalıştırdıysan `DELETE FROM dictionary_patches_applied;` ile kayıtları sil ve uygulamayı yeniden başlat; yamalar idempotent olduğu için hepsi yeniden uygulanır.
+
+**Geri alma:** Kodu eski bir sürüme döndürmek sözlüğü geri almaz. Eski sürüm `dictionary_patches_applied` tablosunu tanımaz ve yok sayar; düzeltilmiş içerik yerinde kalır. Bir düzeltmeyi geri almak gerekirse `old`/`new`'i ters çevrilmiş yeni bir yama ekle.
+
+**Lokal geliştirme:** Sunucu seed'i ve yamaları varsayılan olarak `/seed`'de arar (`SEED_DIR`); lokalde bu klasör yoksa ikisi de atlanır. Lokal veritabanına yeni yamaları uygulatmak için sunucuyu depo kökünden `SEED_DIR=./seed go run ./cmd/server` ile bir kez başlat (`.env.example`'daki not).
+
+### Acil durum: sözlüğü baştan yüklemek (TRUNCATE)
+
+Yalnızca yamaların çözemeyeceği bir durumda kullan: satırlar eksik ya da bozuk, kart eklemek ya da silmek gerekiyor, seviye/grup/sıra değişiyor. Bu yol kesinti ve elle iş ister.
+
+1. Yeni `seed/dictionary_words.sql` dosyasını üret (lokalde `make import-dictionary`, ardından `dictionary_words` tablosunun `pg_dump --data-only --column-inserts` dökümü, sonra bütün yamaların değerlerini işle), commit + deploy et. **Var olan kartların id'leri aynı kalmalı:** `word_progresses` kartlara id ile bağlıdır, sözlükte karşılığı kalmayan ilerleme satırı kullanıcıda görünmez olur.
 2. PostgreSQL kaynağının terminalinde tabloyu boşalt: `psql -U postgres -d <veritabanı-adı> -c "TRUNCATE dictionary_words;"`
-3. Application'ı yeniden başlat; boş tabloyu görünce yeni seed'i yükler.
+3. Application'ı yeniden başlat; boş tabloyu görünce yeni seed'i yükler. Kayıtlı yamalar yeniden uygulanmaz; seed onların değerlerini zaten taşımalıdır (`TestRepoYamalari_SeedIleUyumlu`).
 
-2. ve 3. adım arasında uygulama kelime gösteremez; ikisini art arda ve sakin bir saatte yap. Tabloyu boşaltıp yeniden başlatmayı unutma: sözlük yalnızca açılışta yüklenir.
+2. ve 3. adım arasında uygulama kelime gösteremez; ikisini art arda ve sakin bir saatte yap. Tabloyu boşaltıp yeniden başlatmayı unutma: seed yalnızca açılışta ve tablo boşken yüklenir.
 
 ---
 
