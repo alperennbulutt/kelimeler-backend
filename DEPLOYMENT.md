@@ -544,7 +544,7 @@ Lokalde: `make cleanup-guests` (rapor) ve `make cleanup-guests ARGS="--apply"`. 
 
 Açık grup sınırı, haritanın sıralı kilidi (`map_locked`) gibi kapı kipine bağlıdır: `off`'ta denetlenmez, `log`'da kabul edilip raporlanır (`gate_violation ... reason=open_group_limit`), `enforce`'ta `403 open_group_limit` ile reddedilir. İşaretçi uçları (`current-group`, `advance-group`) kipten bağımsızdır. `TEST_MODE_UNLOCK_ALL=true` sınırı da kapatır. Neden `open_group_limit` sprint 1 notlarındaki "Nedenler" listesine eklendi.
 
-Dürüst istemci haritada kilitli gruba girmediği için ihlal üretmez. Yayındaki istemci "Bilmiyorum"u yazmadığı için onun kullanıcısında "görüldü" pratikte "tamamlandı" ile aynıdır ve en fazla bir açık grup oluşur; sınır ona hiç takılmaz. Yayındaki istemci `open_group_limit` kodunu tanımaz, genel hata gösterir (kabul edilen durum).
+Dürüst istemci haritada kilitli gruba girmediği için ihlal üretmez. Yayındaki istemci "Bilmiyorum"u yazmadığı için onun kullanıcısında "görüldü" pratikte "tamamlandı" ile aynıdır ve en fazla bir açık grup oluşur; sınır ona takılmaz. İstisna, Firestore'dan taşınan kutu 1 kayıtlarıdır: böyle bir kaydı olan grup görülmüş ama tamamlanmamış sayılır, sonraki grubu açar ve açık kalır. Bu kayıtlar birkaç grupta varsa eski istemcinin kullanıcısı da sınıra ulaşabilir; eski istemci kilit nedenini (`lockReason`) okumaz, grubu yalnızca "kilitli" gösterir. Yayındaki istemci `open_group_limit` kodunu tanımaz, genel hata gösterir (kabul edilen durum).
 
 ### Veritabanı
 
