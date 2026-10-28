@@ -104,3 +104,29 @@ func TestCompareGroupPositions(t *testing.T) {
 		}
 	}
 }
+
+func TestGroupLockReason(t *testing.T) {
+	cases := []struct {
+		name                                 string
+		previousLevel, started, previousSeen bool
+		open                                 int
+		want                                 string
+	}{
+		{"acik", true, false, true, 0, ""},
+		{"onceki seviye bitmedi", false, false, true, 0, LockReasonPreviousLevel},
+		// Önceki seviye, başlanmış grubu da kilitler (eski davranış).
+		{"onceki seviye bitmedi baslanmis grup", false, true, true, 0, LockReasonPreviousLevel},
+		{"onceki grup gorulmedi", true, false, false, 0, LockReasonPreviousNotSeen},
+		// Birden çok neden: önceki grup sınırdan önce gelir.
+		{"onceki grup gorulmedi ve sinir dolu", true, false, false, MaxOpenGroups, LockReasonPreviousNotSeen},
+		{"sinirin bir alti", true, false, true, MaxOpenGroups - 1, ""},
+		{"sinir dolu", true, false, true, MaxOpenGroups, LockReasonOpenGroupLimit},
+		// Sınır açık bir grubu kapatmaz.
+		{"sinir dolu baslanmis grup", true, true, false, MaxOpenGroups + 1, ""},
+	}
+	for _, c := range cases {
+		if got := GroupLockReason(c.previousLevel, c.started, c.previousSeen, c.open); got != c.want {
+			t.Errorf("%s: GroupLockReason = %q, beklenen %q", c.name, got, c.want)
+		}
+	}
+}

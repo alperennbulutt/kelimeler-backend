@@ -59,7 +59,8 @@ func (h *Handlers) GetProgressForGroup(c *fiber.Ctx) error {
 //
 // Yeni yazım reklam kapısından geçer (sözleşme K4, bkz. learnGate): grup bugün
 // açılmamışsa ya da haritada kilitliyse GATE_ENFORCEMENT=enforce'ta 403
-// gate_required döner, log'da ihlal raporlanıp yazılır.
+// gate_required, açık grup sınırı doluyken başlanmamış grupta 403
+// open_group_limit döner; log'da ihlal raporlanıp yazılır.
 func (h *Handlers) LearnWord(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	var req dto.LearnRequest
@@ -87,13 +88,13 @@ func (h *Handlers) LearnWord(c *fiber.Ctx) error {
 	services.LearnNewWord(&wp)
 
 	now := time.Now()
-	mapLocked, err := h.learnMapLocked(userID, &word)
+	mapState, err := h.learnMapLocked(userID, &word)
 	if err != nil {
 		return err
 	}
 	var resp models.WordProgress
 	err = h.DB.Transaction(func(tx *gorm.DB) error {
-		if err := h.learnGate(c, tx, userID, &word, mapLocked, now); err != nil {
+		if err := h.learnGate(c, tx, userID, &word, mapState, now); err != nil {
 			return err
 		}
 
@@ -150,6 +151,11 @@ var (
 		"bu grup bugün açılmadı; devam etmek için grubu açman gerekiyor")
 	errReviewGateRequired = apiErr(fiber.StatusForbidden, "review_gate_required",
 		"tekrara devam etmek için önce reklam kapısını geçmen gerekiyor")
+	// Açık grup sınırı (services.MaxOpenGroups) doluyken başlanmamış bir grup
+	// açılmak istendi. Reklam kapısı değildir: istemci açık grupları
+	// (/map/open-groups) gösterip önce onların bitirilmesini ister.
+	errOpenGroupLimit = apiErr(fiber.StatusForbidden, "open_group_limit",
+		"yeni bir grup açmak için önce açık gruplarından birini bitir")
 )
 
 // gateMode, GATE_ENFORCEMENT kipidir (boşsa varsayılan).
@@ -179,31 +185,57 @@ func (h *Handlers) applyGate(c *fiber.Ctx, v services.GateViolation, allowed boo
 	return nil
 }
 
-// learnMapLocked, kelimenin grubu haritada kilitliyse true döner (bkz.
-// groupLockedOnMap). Kapı kapalıysa ya da kelimenin zaten ilerlemesi varsa
+// learnMapState, öğrenme yazımından önce okunan harita durumudur (bkz.
+// learnMapLocked).
+type learnMapState struct {
+	// Grup haritada sıralı kilitle ya da önceki seviye bitmediği için
+	// kilitli (açık grup sınırı burada sayılmaz; o karar transaction içinde
+	// verilir, bkz. learnGate).
+	locked bool
+	// Grupta yazımdan önce ilerleme kaydı vardı. Kayıtlar silinmediği için
+	// (hesap silme dışında) transaction'da da başlanmış kalır.
+	started bool
+}
+
+// learnMapLocked, kelimenin grubunun haritadaki durumunu döner (bkz.
+// groupLockReason). Kapı kapalıysa ya da kelimenin zaten ilerlemesi varsa
 // (yazım olmayacak) hiç bakılmaz.
 //
-// Transaction'dan önce çalışır: kilit durumu yalnızca açılma yönünde değişir
-// (grup tamamlanması kalıcıdır), yazımdan önce bakmak yarış açmaz; transaction
-// içinde h.DB'yi kullanmak ise havuzdan ikinci bir bağlantı bekletirdi.
-func (h *Handlers) learnMapLocked(userID string, word *models.DictionaryWord) (bool, error) {
+// Transaction'dan önce çalışır: sıralı kilit ve önceki seviye yalnızca açılma
+// yönünde değişir (görülme ve tamamlanma kalıcıdır), yazımdan önce bakmak
+// yarış açmaz; transaction içinde h.DB'yi kullanmak ise havuzdan ikinci bir
+// bağlantı bekletirdi. Açık grup sınırı ise başka bir grubun başlatılmasıyla
+// kapanabilir; o yüzden learnGate'te kilit altında yeniden sorulur.
+func (h *Handlers) learnMapLocked(userID string, word *models.DictionaryWord) (learnMapState, error) {
 	if h.gateMode() == config.GateOff {
-		return false, nil
+		return learnMapState{}, nil
 	}
 	var existing []models.WordProgress
 	if err := h.DB.Select("box").Where("user_id = ? AND word_id = ?", userID, word.ID).
 		Limit(1).Find(&existing).Error; err != nil {
-		return false, err
+		return learnMapState{}, err
 	}
 	if len(existing) > 0 && existing[0].Box >= 2 {
-		return false, nil
+		return learnMapState{started: true}, nil
 	}
-	return h.groupLockedOnMap(userID, word.Level, word.Grp)
+	reason, started, err := h.groupLockReason(userID, word.Level, word.Grp)
+	if err != nil {
+		return learnMapState{}, err
+	}
+	locked := reason == services.LockReasonPreviousLevel || reason == services.LockReasonPreviousNotSeen
+	return learnMapState{locked: locked, started: started}, nil
 }
 
 // learnGate, kelimenin öğrenme yazımının kapısını tx içinde denetler.
-// mapLocked, grubun haritada kilitli olduğunu söyler (learnMapLocked); bu da
-// ihlaldir (neden map_locked, kod yine gate_required).
+// mapState.locked, grubun haritada kilitli olduğunu söyler (learnMapLocked);
+// bu da ihlaldir (neden map_locked, kod yine gate_required).
+//
+// Başlanmamış grubun ilk yazımında açık grup sınırı da sorulur: sınır
+// doluysa ihlal open_group_limit'tir, enforce'ta 403 open_group_limit döner.
+// Bu ihlal diğerlerinden önce gelir: reklam izlemek onu gidermez, istemci
+// kullanıcıya reklam göstermemelidir. Sınır kullanıcı başına bir advisory
+// lock altında sayılır: iki farklı yeni gruba aynı anda gelen yazımlar
+// sınırı birlikte aşamaz.
 //
 // Kapı yalnızca YENİ yazımda sorulur: kelimenin zaten ilerlemesi varsa
 // (kutu 2+) learn isteği hiçbir şey yazmaz (yinelenen istek, ikinci cihaz,
@@ -214,8 +246,8 @@ func (h *Handlers) learnMapLocked(userID string, word *models.DictionaryWord) (b
 // Kullanıcı satırı paylaşımlı kilitlenir: aynı kullanıcının learn'leri
 // birbirini beklemez, ama karar ile yazım arasında "bugün açılan gruplar"
 // değişemez.
-func (h *Handlers) learnGate(c *fiber.Ctx, tx *gorm.DB, userID string, word *models.DictionaryWord, mapLocked bool, now time.Time) error {
-	if h.gateMode() == config.GateOff || (h.Cfg != nil && h.Cfg.TestModeUnlockAll) {
+func (h *Handlers) learnGate(c *fiber.Ctx, tx *gorm.DB, userID string, word *models.DictionaryWord, mapState learnMapState, now time.Time) error {
+	if h.gateMode() == config.GateOff || h.unlockAll() {
 		return nil
 	}
 
@@ -232,7 +264,38 @@ func (h *Handlers) learnGate(c *fiber.Ctx, tx *gorm.DB, userID string, word *mod
 	if err := findUser(tx.Clauses(clause.Locking{Strength: "SHARE"}), userID, &user); err != nil {
 		return err
 	}
-	state := services.GateStateAt(&user, now)
+
+	if !mapState.started {
+		// Kilit transaction sonunda bırakılır; aynı kullanıcının başka bir
+		// yeni gruba gelen yazımı, bunun commit'ini görerek sayar.
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?::text))", "open_groups:"+userID).Error; err != nil {
+			return err
+		}
+		limited, err := h.openGroupLimitReached(tx, userID, word.Level, word.Grp)
+		if err != nil {
+			return err
+		}
+		if limited {
+			return h.applyGate(c, services.GateViolation{
+				Kind:   services.GateKindLearn,
+				Reason: services.GateReasonOpenGroupLimit,
+				UserID: userID,
+				WordID: word.ID,
+				Level:  word.Level,
+				Group:  word.Grp,
+			}, false, now, errOpenGroupLimit)
+		}
+	}
+	return h.dailyLearnGate(c, tx, &user, word, mapState.locked, now)
+}
+
+// dailyLearnGate, kelimenin grubunun bugün açılıp açılmadığını (ücretsiz hak,
+// reklam ya da gövdesiz eski kayıt) user'ın günlük durumuyla denetler.
+// mapLocked, haritadaki kilidi de ihlal sayar (neden map_locked). user,
+// çağıranın tx'inde en az paylaşımlı kilitli okunmuş olmalıdır.
+func (h *Handlers) dailyLearnGate(c *fiber.Ctx, tx *gorm.DB, user *models.User, word *models.DictionaryWord, mapLocked bool, now time.Time) error {
+	userID := user.ID
+	state := services.GateStateAt(user, now)
 	key, ok := services.UnlockedGroupKey(word.Level, word.Grp)
 	allowed := ok && services.LearnAllowedToday(state, key)
 	if !allowed && ok {
@@ -313,6 +376,105 @@ func (h *Handlers) reviewGate(c *fiber.Ctx, tx *gorm.DB, userID string, now time
 	}, services.ReviewAnswerAllowed(state.ReviewAnswers, state.ReviewAdPasses), now, errReviewGateRequired)
 }
 
+// boxOneLearnGate, kutu 1'deki kelimenin sağa kaydırılmasının (öğrenme)
+// günlük grup kapısıdır; wp, tx'te kilitli okunmuş satırdır. Grup anahtarı
+// kayıttaki seviye/gruptur (learn bunları sözlükle eşitler).
+func (h *Handlers) boxOneLearnGate(c *fiber.Ctx, tx *gorm.DB, wp *models.WordProgress, now time.Time) error {
+	if h.gateMode() == config.GateOff || h.unlockAll() {
+		return nil
+	}
+	var user models.User
+	if err := findUser(tx.Clauses(clause.Locking{Strength: "SHARE"}), wp.UserID, &user); err != nil {
+		return err
+	}
+	word := models.DictionaryWord{ID: wp.WordID, Level: wp.Level, Grp: wp.Grp}
+	return h.dailyLearnGate(c, tx, &user, &word, false, now)
+}
+
+// MarkUnknown: POST /progress/unknown {wordId} — öğrenme ekranında kaydı
+// olmayan kelimeye "Bilmiyorum" denildi. Kelime kutu 1'de kaydedilir: grup
+// tamamlanmaz (kutu 1 "kalan"dır) ama kelime görülmüş sayılır; grubun bütün
+// kelimeleri görülünce seviyedeki sonraki grup açılabilir (bkz.
+// services.GroupLockReason). Kutu 1 kaydı tekrar listelerine girmez, öğrenilen
+// sayılara katılmaz.
+//
+// Kelimenin zaten kaydı varsa (kutu fark etmez) hiçbir şey değişmez ve mevcut
+// kayıt döner: kayıtlı kelimenin "Bilmiyorum"u POST /progress/swipe (left)
+// ile gönderilir; bu uç ilerlemiş bir kelimeyi kutu 1'e geri atmaz. İstek
+// yinelenebilir.
+//
+// Yeni kayıt learn ile aynı kapıdan geçer (bkz. learnGate): grup bugün
+// açılmamışsa ya da haritada kilitliyse 403 gate_required, açık grup sınırı
+// doluyken başlanmamış grupta 403 open_group_limit (enforce kipinde). Yanıt
+// learn'ünkiyle aynı biçimde kelime ilerlemesidir.
+//
+// Eski sunucuda bu uç yoktur (404); istemci bunu "kaydedilmedi" sayıp akışı
+// sürdürebilir.
+func (h *Handlers) MarkUnknown(c *fiber.Ctx) error {
+	userID := middleware.UserID(c)
+	var req dto.UnknownWordRequest
+	if err := c.BodyParser(&req); err != nil || req.WordID == "" {
+		return apiErr(fiber.StatusBadRequest, "invalid_request", "wordId gerekli")
+	}
+
+	var word models.DictionaryWord
+	if err := h.DB.First(&word, "id = ?", req.WordID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return apiErr(fiber.StatusNotFound, "unknown_word", "kelime sözlükte bulunamadı")
+		}
+		return err
+	}
+
+	var existing []models.WordProgress
+	if err := h.DB.Where("user_id = ? AND word_id = ?", userID, word.ID).Limit(1).Find(&existing).Error; err != nil {
+		return err
+	}
+	if len(existing) > 0 {
+		return c.JSON(&existing[0])
+	}
+
+	wp := models.WordProgress{
+		UserID:  userID,
+		WordID:  word.ID,
+		Level:   word.Level,
+		Grp:     word.Grp,
+		English: word.English,
+		Turkish: word.Turkish,
+		Box:     1,
+	}
+	services.OnLeftSwipe(&wp)
+
+	now := time.Now()
+	mapState, err := h.learnMapLocked(userID, &word)
+	if err != nil {
+		return err
+	}
+	var resp models.WordProgress
+	err = h.DB.Transaction(func(tx *gorm.DB) error {
+		if err := h.learnGate(c, tx, userID, &word, mapState, now); err != nil {
+			return err
+		}
+		// Arada başka bir istek (learn ya da yinelenen unknown) kaydı
+		// yazdıysa ona dokunulmaz.
+		res := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "user_id"}, {Name: "word_id"}},
+			DoNothing: true,
+		}).Create(&wp)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected > 0 {
+			resp = wp
+			return nil
+		}
+		return tx.Where("user_id = ? AND word_id = ?", userID, word.ID).First(&resp).Error
+	})
+	if err != nil {
+		return err
+	}
+	return c.JSON(&resp)
+}
+
 // Swipe: POST /progress/swipe {wordId, direction} — box matematiği sunucuda.
 // Tekrar cevapları (swipe öncesi kutu 2..5) günlük review_answers_today
 // sayacına da yazılır; yanıt gövdesi yalnızca kelime ilerlemesidir.
@@ -327,6 +489,14 @@ func (h *Handlers) reviewGate(c *fiber.Ctx, tx *gorm.DB, userID string, now time
 // reviewGate): günün cevapları geçilmemiş bir kontrol noktasına (30/60/90)
 // dayanmışsa enforce'ta 403 review_gate_required döner ve hiçbir şey yazılmaz.
 // No-op swipe kapıya sorulmaz.
+//
+// Kutu 1'deki kelimeye "Biliyorum" (sağ) kelimeyi kutu 2'ye alır: bu bir
+// öğrenmedir ve learn gibi günlük grup kapısından geçer (bkz.
+// dailyLearnGate; enforce'ta 403 gate_required). Kutu 1 kaydı "Bilmiyorum"
+// ile (POST /progress/unknown) yazılabildiği için, aksi halde grubu bir kez
+// açıp bütün kelimelerine "Bilmiyorum" diyen istemci sonraki günlerde grubu
+// açmadan öğrenebilirdi. Grup başlanmış olduğundan harita kilidi ve açık grup
+// sınırı sorulmaz. Kutu 1'de "Bilmiyorum" (sol) kapıya sorulmaz.
 func (h *Handlers) Swipe(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	var req dto.SwipeRequest
@@ -367,6 +537,11 @@ func (h *Handlers) Swipe(c *fiber.Ctx) error {
 		// bakılırsa tekrar cevabı gibi görünür). Öğrenme swipe'ı (kutu 1)
 		// tekrar kapısına hiç girmez.
 		preBox := wp.Box
+		if preBox <= 1 && req.Direction == "right" {
+			if err := h.boxOneLearnGate(c, tx, &wp, now); err != nil {
+				return err
+			}
+		}
 		countsAsReview := services.CountsAsReviewAnswer(preBox)
 		if countsAsReview {
 			if err := h.reviewGate(c, tx, userID, now); err != nil {

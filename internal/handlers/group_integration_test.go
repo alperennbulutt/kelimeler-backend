@@ -383,10 +383,13 @@ func levelGroups(t *testing.T, app *fiber.App, level string) []dto.LevelGroupDTO
 	return groups
 }
 
-func grp(n, total, remaining int, completed, unlocked, started bool) dto.LevelGroupDTO {
+// grp, beklenen grup durumudur; seen, kaydı olan kelime sayısıdır (isSeen
+// bundan çıkar), reason kilit nedenidir.
+func grp(n, total, remaining int, completed, unlocked, started bool, seen int, reason string) dto.LevelGroupDTO {
 	return dto.LevelGroupDTO{
 		GroupNumber: n, TotalWords: total, RemainingInBox1: remaining,
 		IsCompleted: completed, IsUnlocked: unlocked, HasStarted: started,
+		IsSeen: total > 0 && seen == total, SeenWords: seen, LockReason: reason,
 	}
 }
 
@@ -415,10 +418,11 @@ func TestLevelGroups_SiraliKilitVeIlerleme(t *testing.T) {
 	mapScenario(t, gdb, u.ID)
 
 	want := []dto.LevelGroupDTO{
-		grp(1, 2, 0, true, true, true),
-		grp(2, 2, 1, false, true, true),
-		// Önceki grup bitmedi ve bu gruba başlanmadı: kilitli.
-		grp(3, 2, 2, false, false, false),
+		grp(1, 2, 0, true, true, true, 2, ""),
+		grp(2, 2, 1, false, true, true, 2, ""),
+		// Önceki grup bitmedi ama bütün kelimeleri görüldü (biri kutu 1'de):
+		// başlanmamış olsa da açık.
+		grp(3, 2, 2, false, true, false, 0, ""),
 	}
 	if got := levelGroups(t, app, "A1"); !reflect.DeepEqual(got, want) {
 		t.Errorf("A1 grupları = %+v\nbeklenen %+v", got, want)
@@ -426,8 +430,8 @@ func TestLevelGroups_SiraliKilitVeIlerleme(t *testing.T) {
 
 	// A1 bitmediği (ve rozeti olmadığı) için A2'nin tamamı kilitli.
 	wantA2 := []dto.LevelGroupDTO{
-		grp(1, 2, 2, false, false, false),
-		grp(2, 2, 2, false, false, false),
+		grp(1, 2, 2, false, false, false, 0, "previous_level"),
+		grp(2, 2, 2, false, false, false, 0, "previous_level"),
 	}
 	if got := levelGroups(t, app, "A2"); !reflect.DeepEqual(got, wantA2) {
 		t.Errorf("A2 grupları = %+v\nbeklenen %+v", got, wantA2)
@@ -451,8 +455,8 @@ func TestLevelGroups_OncekiSeviyeRozetleAcilir(t *testing.T) {
 	}
 
 	want := []dto.LevelGroupDTO{
-		grp(1, 2, 2, false, true, false),
-		grp(2, 2, 2, false, false, false),
+		grp(1, 2, 2, false, true, false, 0, ""),
+		grp(2, 2, 2, false, false, false, 0, "previous_not_seen"),
 	}
 	if got := levelGroups(t, app, "A2"); !reflect.DeepEqual(got, want) {
 		t.Errorf("A2 grupları = %+v\nbeklenen %+v", got, want)
@@ -469,16 +473,16 @@ func TestLevelGroups_OncekiSeviyeTamamlaninca(t *testing.T) {
 	setProgress(t, gdb, u.ID, a1[2][1], 4, nil)
 
 	wantA1 := []dto.LevelGroupDTO{
-		grp(1, 2, 0, true, true, true),
-		grp(2, 2, 0, true, true, true),
-		grp(3, 2, 0, true, true, true),
+		grp(1, 2, 0, true, true, true, 2, ""),
+		grp(2, 2, 0, true, true, true, 2, ""),
+		grp(3, 2, 0, true, true, true, 2, ""),
 	}
 	if got := levelGroups(t, app, "A1"); !reflect.DeepEqual(got, wantA1) {
 		t.Errorf("A1 grupları = %+v\nbeklenen %+v", got, wantA1)
 	}
 	wantA2 := []dto.LevelGroupDTO{
-		grp(1, 2, 2, false, true, false),
-		grp(2, 2, 2, false, false, false),
+		grp(1, 2, 2, false, true, false, 0, ""),
+		grp(2, 2, 2, false, false, false, 0, "previous_not_seen"),
 	}
 	if got := levelGroups(t, app, "A2"); !reflect.DeepEqual(got, wantA2) {
 		t.Errorf("A2 grupları = %+v\nbeklenen %+v", got, wantA2)

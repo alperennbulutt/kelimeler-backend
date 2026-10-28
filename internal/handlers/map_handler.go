@@ -36,6 +36,14 @@ func (r levelGroupProgress) completed() bool {
 	return r.TotalWords > 0 && r.StartedWords > 0 && r.RemainingInBox1 == 0
 }
 
+// seen, grubun "görüldü" kuralıdır: grupta kelime var ve hepsinin ilerleme
+// kaydı var (her kelime en az bir kez cevaplandı; bilindi ya da bilinmedi).
+// Seviyedeki sonraki grup, bu grup görülünce açılabilir (bkz.
+// services.GroupLockReason). Tamamlanan grup görülmüştür de.
+func (r levelGroupProgress) seen() bool {
+	return r.TotalWords > 0 && r.StartedWords == r.TotalWords
+}
+
 // levelGroupProgressColumns, levelProgressQuery üzerinden grup özetini sayan
 // SELECT listesidir.
 const levelGroupProgressColumns = `SELECT COUNT(*) AS total_words,
@@ -53,7 +61,7 @@ const levelProgressQuery = `
 
 // computeLevelGroups, bir seviye için grup durumlarını (kilit/tamamlanma) hesaplar.
 // Sözlük ve ilerleme satırları belleğe alınmaz; grup başına sayılar tek bir
-// aggregate sorguyla gelir.
+// aggregate sorguyla gelir. Kilit kuralı services.GroupLockReason'dadır.
 func (h *Handlers) computeLevelGroups(userID, level string) ([]dto.LevelGroupDTO, error) {
 	previousLevelCompleted, err := h.isPreviousLevelCompleted(userID, level)
 	if err != nil {
@@ -71,39 +79,152 @@ func (h *Handlers) computeLevelGroups(userID, level string) ([]dto.LevelGroupDTO
 		return nil, err
 	}
 
-	// Grup grup hesapla (sıralı-kilit mantığı korunur).
+	// Açık grup sayısı yalnızca başlanmamış bir grubun kararında gerekir;
+	// önceki seviye bitmemişse ya da test modunda hiç sorulmaz.
+	openGroups := 0
+	if previousLevelCompleted && !h.unlockAll() {
+		if openGroups, err = countOpenGroups(h.DB, userID); err != nil {
+			return nil, err
+		}
+	}
+
+	// Grup grup hesapla (sıralı kilit: önceki grup görülmeden sonraki açılmaz).
 	result := []dto.LevelGroupDTO{}
-	previousCompleted := true
+	previousSeen := true
 	for _, r := range rows {
 		hasStarted := r.StartedWords > 0
-		isCompleted := r.completed()
 
-		var isUnlocked bool
+		lockReason := ""
 		switch {
-		case h.Cfg.TestModeUnlockAll:
-			isUnlocked = true
-		case !previousLevelCompleted:
-			isUnlocked = false
-		case !hasStarted && !previousCompleted:
-			isUnlocked = false
+		case h.unlockAll():
+		case r.TotalWords == 0:
+			// Kelimesiz grup sorgudan gelmez (gruplar sözlük satırlarından
+			// sayılır); gelseydi açılacak bir şeyi olmazdı.
 		default:
-			isUnlocked = r.TotalWords > 0
+			lockReason = services.GroupLockReason(previousLevelCompleted, hasStarted, previousSeen, openGroups)
 		}
+		isUnlocked := lockReason == "" && (h.unlockAll() || r.TotalWords > 0)
 
 		result = append(result, dto.LevelGroupDTO{
 			GroupNumber:     r.Grp,
 			TotalWords:      r.TotalWords,
 			RemainingInBox1: r.RemainingInBox1,
-			IsCompleted:     isCompleted,
+			IsCompleted:     r.completed(),
 			IsUnlocked:      isUnlocked,
 			HasStarted:      hasStarted,
+			IsSeen:          r.seen(),
+			SeenWords:       r.StartedWords,
+			LockReason:      lockReason,
 		})
 
 		if r.TotalWords > 0 {
-			previousCompleted = isCompleted
+			previousSeen = r.seen()
 		}
 	}
 	return result, nil
+}
+
+// unlockAll, TEST_MODE_UNLOCK_ALL açık mı söyler: bütün gruplar kilitsizdir,
+// açık grup sınırı da uygulanmaz.
+func (h *Handlers) unlockAll() bool {
+	return h.Cfg != nil && h.Cfg.TestModeUnlockAll
+}
+
+// openGroupsQuery, kullanıcının açık gruplarını (başlanmış ama tamamlanmamış)
+// seviye ve grup sırasıyla döner. Sözlüğün tamamı değil, yalnızca kullanıcının
+// kaydı olan gruplar taranır. "Başlanmış" ve "tamamlanmamış" levelProgressQuery
+// ile aynı eşlemeyle sayılır: ilerleme satırı yalnızca kendi seviyesi sözlük
+// satırınınkiyle aynıysa sayılır, grup sözlükten okunur.
+const openGroupsQuery = `
+	WITH started AS (
+		SELECT DISTINCT d.level, d.grp
+		FROM word_progresses wp
+		JOIN dictionary_words d ON d.id = wp.word_id AND d.level = wp.level
+		WHERE wp.user_id = ?
+	)
+	SELECT s.level AS level, s.grp AS grp,
+	       COUNT(*) AS total_words,
+	       COUNT(*) FILTER (WHERE wp.id IS NULL OR wp.box = 1) AS remaining_in_box1
+	FROM started s
+	JOIN dictionary_words d ON d.level = s.level AND d.grp = s.grp
+	LEFT JOIN word_progresses wp
+	  ON wp.user_id = ? AND wp.word_id = d.id AND wp.level = d.level
+	GROUP BY s.level, s.grp
+	HAVING COUNT(*) FILTER (WHERE wp.id IS NULL OR wp.box = 1) > 0`
+
+// openGroupRow, openGroupsQuery'nin satırıdır.
+type openGroupRow struct {
+	Level           string
+	Grp             int
+	TotalWords      int
+	RemainingInBox1 int
+}
+
+// listOpenGroups, kullanıcının açık gruplarını seviye sırasıyla döner.
+// db, çağıranın transaction'ı olabilir.
+func listOpenGroups(db *gorm.DB, userID string) ([]openGroupRow, error) {
+	// Seviye adları (A1..C2) alfabetik sırada da seviye sırasındadır.
+	var rows []openGroupRow
+	err := db.Raw(openGroupsQuery+`
+	ORDER BY s.level, s.grp`, userID, userID).Scan(&rows).Error
+	return rows, err
+}
+
+// countOpenGroups, kullanıcının açık grup sayısıdır.
+func countOpenGroups(db *gorm.DB, userID string) (int, error) {
+	var n int
+	err := db.Raw(`SELECT COUNT(*) FROM (`+openGroupsQuery+`) open_groups`, userID, userID).Scan(&n).Error
+	return n, err
+}
+
+// groupStarted, (level, grp) grubunda kullanıcının en az bir ilerleme kaydı
+// olup olmadığını söyler (haritadaki hasStarted). db, çağıranın
+// transaction'ı olabilir.
+func groupStarted(db *gorm.DB, userID, level string, grp int) (bool, error) {
+	var started bool
+	err := db.Raw(`SELECT EXISTS (SELECT 1`+levelProgressQuery+`
+		  AND d.grp = ? AND wp.id IS NOT NULL)`, userID, level, grp).Scan(&started).Error
+	return started, err
+}
+
+// openGroupLimitReached, (level, grp) grubu başlanmamışken açık grup sınırı
+// (services.MaxOpenGroups) dolu mu söyler: true ise grup açılamaz. Başlanmış
+// grup sınırdan etkilenmez; TEST_MODE_UNLOCK_ALL sınırı kapatır. db,
+// çağıranın transaction'ı olabilir.
+func (h *Handlers) openGroupLimitReached(db *gorm.DB, userID, level string, grp int) (bool, error) {
+	if h.unlockAll() {
+		return false, nil
+	}
+	started, err := groupStarted(db, userID, level, grp)
+	if err != nil || started {
+		return false, err
+	}
+	n, err := countOpenGroups(db, userID)
+	return n >= services.MaxOpenGroups, err
+}
+
+// OpenGroups: GET /map/open-groups — açık gruplar ve sınır. İstemci "yeni bir
+// grup açmak için önce açık gruplarını bitir" mesajında bunları gösterir.
+func (h *Handlers) OpenGroups(c *fiber.Ctx) error {
+	userID := middleware.UserID(c)
+	rows, err := listOpenGroups(h.DB, userID)
+	if err != nil {
+		return err
+	}
+	groups := make([]dto.OpenGroupDTO, 0, len(rows))
+	for _, r := range rows {
+		groups = append(groups, dto.OpenGroupDTO{
+			Level:           r.Level,
+			Group:           r.Grp,
+			TotalWords:      r.TotalWords,
+			RemainingInBox1: r.RemainingInBox1,
+		})
+	}
+	return c.JSON(dto.OpenGroupsDTO{
+		OpenGroupCount: len(groups),
+		MaxOpenGroups:  services.MaxOpenGroups,
+		OpenGroups:     groups,
+	})
 }
 
 // groupCompleted, (level, grp) grubunun haritada tamamlanmış görünüp
@@ -118,40 +239,41 @@ func groupCompleted(db *gorm.DB, userID, level string, grp int) (bool, error) {
 	return r.completed(), nil
 }
 
-// groupLockedOnMap, (level, grp) grubunun haritada (computeLevelGroups)
-// kilitli görünüp görünmediğini söyler. Öğrenme yazımının kapısı bunu sorar
-// (bkz. LearnWord): haritada kilitli bir grubu yalnızca değiştirilmiş bir
-// istemci açabilir.
+// groupLockReason, (level, grp) grubunun haritadaki (computeLevelGroups)
+// kilit nedenini döner; grup açıksa "". Öğrenme yazımının kapısı bunu sorar
+// (bkz. learnMapLocked): haritada kilitli bir grubu yalnızca değiştirilmiş
+// bir istemci açabilir.
 //
-// Ucuz yol: grupta ilerleme varsa (başlanmış grup) sıralı kilit artık
-// uygulanmaz, yalnızca önceki seviyenin tamamlanmasına bakılır. Seviyenin
-// bütün gruplarını sayan computeLevelGroups yalnızca başlanmamış bir grubun
-// ilk kelimesinde çalışır.
-func (h *Handlers) groupLockedOnMap(userID, level string, grp int) (bool, error) {
-	if h.Cfg != nil && h.Cfg.TestModeUnlockAll {
-		return false, nil
+// Ucuz yol: grupta ilerleme varsa (başlanmış grup) sıralı kilit ve açık grup
+// sınırı uygulanmaz, yalnızca önceki seviyenin tamamlanmasına bakılır.
+// Seviyenin bütün gruplarını sayan computeLevelGroups yalnızca başlanmamış
+// bir grubun ilk kelimesinde çalışır.
+func (h *Handlers) groupLockReason(userID, level string, grp int) (reason string, started bool, err error) {
+	if h.unlockAll() {
+		return "", false, nil
 	}
-	var started bool
-	if err := h.DB.Raw(`SELECT EXISTS (SELECT 1`+levelProgressQuery+`
-		  AND d.grp = ? AND wp.id IS NOT NULL)`, userID, level, grp).Scan(&started).Error; err != nil {
-		return false, err
+	if started, err = groupStarted(h.DB, userID, level, grp); err != nil {
+		return "", false, err
 	}
 	if started {
 		done, err := h.isPreviousLevelCompleted(userID, level)
-		return !done, err
+		if err != nil || done {
+			return "", true, err
+		}
+		return services.LockReasonPreviousLevel, true, nil
 	}
 	groups, err := h.computeLevelGroups(userID, level)
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	for _, g := range groups {
 		if g.GroupNumber == grp {
-			return !g.IsUnlocked, nil
+			return g.LockReason, false, nil
 		}
 	}
 	// Grup sözlükte yok: kelime sözlükten okunduğu için olmamalı; kilit
 	// kararı verilecek bir veri de yok.
-	return false, nil
+	return "", false, nil
 }
 
 // isPreviousLevelCompleted: earnedBadges hızlı yolu, yoksa önceki seviyenin

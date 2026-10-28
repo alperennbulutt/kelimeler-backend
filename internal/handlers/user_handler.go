@@ -112,6 +112,11 @@ func (h *Handlers) txWithUserResponse(userID string, user *models.User, fn func(
 // aksi halde 400 invalid_group. İşaretçi yalnızca İLERİ yazılır: hedef mevcut
 // konumun gerisindeyse hiçbir alan değişmez ve güncel kullanıcı 200 ile döner
 // (eski bir gruba dönmek "kaldığın yer"i geri almaz).
+//
+// İleri yazım, açık grup sınırı (services.MaxOpenGroups) doluyken
+// başlanmamış bir gruba yapılamaz: 403 open_group_limit döner ve hiçbir alan
+// değişmez. Dürüst istemci haritada kilitli gruba girmez; istemci bu ucun
+// hatasını yok sayar (işaretçi yalnızca "kaldığın yer"dir).
 func (h *Handlers) SetCurrentGroup(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	var req dto.SetCurrentGroupRequest
@@ -139,8 +144,17 @@ func (h *Handlers) SetCurrentGroup(c *fiber.Ctx) error {
 		if err := lockUser(tx, userID, &user); err != nil {
 			return err
 		}
-		if services.CompareGroupPositions(req.Level, req.Group, user.CurrentLevel, user.CurrentGroup) < 0 {
+		switch services.CompareGroupPositions(req.Level, req.Group, user.CurrentLevel, user.CurrentGroup) {
+		case -1:
 			return nil
+		case 1:
+			limited, err := h.openGroupLimitReached(tx, userID, req.Level, req.Group)
+			if err != nil {
+				return err
+			}
+			if limited {
+				return errOpenGroupLimit
+			}
 		}
 
 		updates := map[string]any{
@@ -169,10 +183,11 @@ func (h *Handlers) SetCurrentGroup(c *fiber.Ctx) error {
 
 // AdvanceGroup: POST /users/me/advance-group — sonraki level/grup'u sunucu hesaplar.
 //
-// İsteğe bağlı gövde {"level","group"}, istemcinin tamamladığı gruptur:
-// işaretçi tam o gruptaysa bir ileri gider, değilse (zaten ileride ya da
-// geride) hiçbir şey değişmez. Yanıtı kaybolan isteğin yeniden denenmesi bu
-// yüzden grup atlatmaz.
+// İsteğe bağlı gövde {"level","group"}, istemcinin tamamladığı ya da bütün
+// kelimelerini gördüğü (bkz. levelGroupProgress.seen) gruptur: işaretçi tam o
+// gruptaysa bir ileri gider, değilse (zaten ileride ya da geride) hiçbir şey
+// değişmez. Yanıtı kaybolan isteğin yeniden denenmesi bu yüzden grup
+// atlatmaz.
 //
 // Gövdesiz istek (yayındaki eski istemci) işaretçiyi yalnızca işaretçinin
 // gösterdiği grup haritada tamamlanmışsa (bkz. groupCompleted) bir ileri
@@ -181,6 +196,12 @@ func (h *Handlers) SetCurrentGroup(c *fiber.Ctx) error {
 // kelimeler kutu 1'de kalsa da ve geride bir grubu tekrarlarken de
 // (current-group geri yazmaz) gövdesiz advance çağırır; koşulsuz ilerleme
 // işaretçiyi her turda bir grup, seviye sonunda bir seviye ileri kaydırırdı.
+//
+// İki yolda da işaretçi, açık grup sınırı (services.MaxOpenGroups) doluyken
+// başlanmamış bir gruba taşınmaz: hiçbir şey değişmez ve yanıtın
+// blockedReason alanı "open_group_limit" olur (ilerlediğinde ya da başka bir
+// nedenle değişmediğinde ""). Sınır açılınca (açık gruplardan biri
+// tamamlanınca) aynı istek işaretçiyi ilerletir.
 //
 // İki yolda da kullanıcı satırı kilitlenir: eşzamanlı istekler aynı işaretçiyi
 // okuyup birbirinin yazdığını ezmez. C2'nin son grubu bitince işaretçi
@@ -205,6 +226,7 @@ func (h *Handlers) AdvanceGroup(c *fiber.Ctx) error {
 
 	var user models.User
 	levelChanged := false
+	blockedReason := ""
 	u, err := h.txWithUserResponse(userID, &user, func(tx *gorm.DB) error {
 		if err := lockUser(tx, userID, &user); err != nil {
 			return err
@@ -229,6 +251,16 @@ func (h *Handlers) AdvanceGroup(c *fiber.Ctx) error {
 		if nextLevel == user.CurrentLevel && nextGroup == user.CurrentGroup {
 			return nil
 		}
+		if nextGroup >= 1 {
+			limited, err := h.openGroupLimitReached(tx, userID, nextLevel, nextGroup)
+			if err != nil {
+				return err
+			}
+			if limited {
+				blockedReason = services.LockReasonOpenGroupLimit
+				return nil
+			}
+		}
 		if err := tx.Model(&models.User{}).Where("id = ?", userID).
 			Updates(map[string]any{"current_level": nextLevel, "current_group": nextGroup}).Error; err != nil {
 			return err
@@ -245,6 +277,8 @@ func (h *Handlers) AdvanceGroup(c *fiber.Ctx) error {
 		"levelChanged": levelChanged,
 		"newLevel":     user.CurrentLevel,
 		"newGroup":     user.CurrentGroup,
+		// Sonradan eklendi: eski istemci tanımaz ve yok sayar.
+		"blockedReason": blockedReason,
 	})
 }
 
@@ -408,6 +442,12 @@ const freeGroupColumn = "groups_started_today_count"
 // Kullanıcı satırı karar ile yazım arasında kilitlidir: farklı iki gruba
 // aynı anda gelen ücretsiz açılışlardan yalnızca biri ücretsiz sayılır.
 //
+// Açık grup sınırı (services.MaxOpenGroups) doluyken başlanmamış bir grubun
+// açılışı da ihlaldir (neden open_group_limit; ücretsiz hak ihlalinden önce
+// gelir): log'da kabul edilip raporlanır, enforce'ta 403 open_group_limit
+// döner ve hiçbir şey yazılmaz, yani hak ya da reklam sayacı yanmaz. Dürüst
+// istemci haritada kilitli gruba girmez.
+//
 // Gövde göndermeyen (ya da geçersiz gönderen) istemcilerde uç yalnızca sayacı
 // artırır.
 func (h *Handlers) UnlockGroup(column string) fiber.Handler {
@@ -434,7 +474,21 @@ func (h *Handlers) UnlockGroup(column string) fiber.Handler {
 			if slices.Contains(services.SplitUnlockedGroups(user.UnlockedGroupsToday), key) {
 				return nil
 			}
-			if column == freeGroupColumn && user.GroupsStartedTodayCount >= 1 {
+			limited, err := h.openGroupLimitReached(tx, userID, req.Level, req.Group)
+			if err != nil {
+				return err
+			}
+			if limited {
+				if err := h.applyGate(c, services.GateViolation{
+					Kind:   services.GateKindLearn,
+					Reason: services.GateReasonOpenGroupLimit,
+					UserID: userID,
+					Level:  req.Level,
+					Group:  req.Group,
+				}, false, now, errOpenGroupLimit); err != nil {
+					return err
+				}
+			} else if column == freeGroupColumn && user.GroupsStartedTodayCount >= 1 {
 				if err := h.applyGate(c, services.GateViolation{
 					Kind:   services.GateKindLearn,
 					Reason: services.GateReasonFreeGroupReused,
