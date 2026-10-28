@@ -30,6 +30,10 @@ const (
 	// GateReasonMapLocked: grup haritada kilitli (sıralı kilit ya da önceki
 	// seviye bitmemiş).
 	GateReasonMapLocked = "map_locked"
+	// GateReasonOpenGroupLimit: MaxOpenGroups kadar açık grup varken
+	// başlanmamış bir grup açılmak ya da başlatılmak istendi. Ret kodu
+	// gate_required değil open_group_limit'tir: reklam izlemek kilidi açmaz.
+	GateReasonOpenGroupLimit = "open_group_limit"
 	// GateReasonFreeGroupReused: günün ücretsiz grup açılışı (group-started)
 	// zaten kullanılmışken başka bir grup ücretsiz açılmak istendi.
 	GateReasonFreeGroupReused = "free_group_reused"

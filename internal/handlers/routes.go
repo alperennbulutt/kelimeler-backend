@@ -101,6 +101,8 @@ func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService, authLi
 	prog.Get("/word/:wordId", h.GetUserWord)
 	prog.Get("/group", h.GetProgressForGroup)
 	prog.Post("/learn", h.LearnWord)
+	// Kaydı olmayan kelimeye "Bilmiyorum": kutu 1 kaydı (grup görülmüş sayılır).
+	prog.Post("/unknown", h.MarkUnknown)
 	prog.Post("/swipe", h.Swipe)
 	prog.Get("/review/box/:box", h.ReviewWordsForBox)
 	prog.Get("/review/box/:box/counts", h.UpcomingCountsForBox)
@@ -132,6 +134,8 @@ func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService, authLi
 	mp.Get("/levels/:level/groups", h.LevelGroups)
 	mp.Get("/levels/:level/max-group", h.MaxGroupForLevel)
 	mp.Get("/active-boxes-count", h.ActiveBoxesCount)
+	// Açık (başlanmış, tamamlanmamış) gruplar ve aynı anda açık grup sınırı.
+	mp.Get("/open-groups", h.OpenGroups)
 
 	// --- Home ---
 	home := api.Group("/home", guard)

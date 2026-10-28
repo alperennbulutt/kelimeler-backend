@@ -156,9 +156,13 @@ func TestAdvanceGroup_GovdesizTamamlanmisGrupBirIleri(t *testing.T) {
 }
 
 func TestAdvanceGroup_GovdeyleIdempotent(t *testing.T) {
+	// Gövdeli advance gövdedeki grubun sunucuda görülmüş olmasını ister;
+	// görülmüş ama tamamlanmamış grup (bir kelime kutu 1'de) yeterlidir.
 	gdb, u, app := newGroupTest(t, nil)
-	seedGroupLevels(t, gdb)
+	a1 := seedGroupLevels(t, gdb)["A1"]
 	setPointer(t, gdb, u.ID, "A1", 2)
+	setProgress(t, gdb, u.ID, a1[1][0], 2, nil)
+	setProgress(t, gdb, u.ID, a1[1][1], 1, nil)
 
 	// Yanıtı kaybolan isteğin yeniden denenmesi: aynı gövde ikinci kez gelir.
 	for i := 0; i < 2; i++ {
@@ -201,9 +205,14 @@ func TestAdvanceGroup_GovdeIsaretciyleUyusmazsaDegismez(t *testing.T) {
 }
 
 func TestAdvanceGroup_C2SonGrubuGovdeyleTamamlanir(t *testing.T) {
+	// "Tümü tamamlandı"ya (C2, grup 0) gövdeyle, seviye geçişi gibi yalnızca
+	// C2 tamamlanınca geçilir (bkz.
+	// TestAdvanceGroup_GovdeliSeviyeGecisiSeviyeTamamlaninca).
 	gdb, u, app := newGroupTest(t, nil)
-	seedGroupLevels(t, gdb)
+	c2 := seedGroupLevels(t, gdb)["C2"]
 	setPointer(t, gdb, u.ID, "C2", 2)
+	completeGroup(t, gdb, u.ID, c2[0])
+	completeGroup(t, gdb, u.ID, c2[1])
 
 	for i := 0; i < 2; i++ {
 		if status, body := send(t, app, advanceRequest(fiber.Map{"level": "C2", "group": 2})); status != fiber.StatusOK {
@@ -213,10 +222,146 @@ func TestAdvanceGroup_C2SonGrubuGovdeyleTamamlanir(t *testing.T) {
 	assertPointer(t, gdb, u.ID, "C2", 0)
 }
 
+// seeGroupDirect, grubun ilk kelimesini kutu 2'ye, kalanlarını kutu 1'e
+// yazar: grup görülür ama tamamlanmaz.
+func seeGroupDirect(t *testing.T, gdb *gorm.DB, userID string, words []models.DictionaryWord) {
+	t.Helper()
+	for i, w := range words {
+		box := 1
+		if i == 0 {
+			box = 2
+		}
+		setProgress(t, gdb, userID, w, box, nil)
+	}
+}
+
+// assertAdvanceResult, assertAdvance'e ek olarak status'u, blockedReason'ı
+// ve veritabanındaki işaretçiyi denetler.
+func assertAdvanceResult(t *testing.T, gdb *gorm.DB, userID string, status int, body map[string]any, wantLevel string, wantGroup int, wantChanged bool, wantReason string) {
+	t.Helper()
+	if status != fiber.StatusOK {
+		t.Fatalf("advance status = %d (body: %v)", status, body)
+	}
+	assertAdvance(t, body, wantLevel, wantGroup, wantChanged)
+	if body["blockedReason"] != wantReason {
+		t.Errorf("blockedReason = %v, beklenen %q", body["blockedReason"], wantReason)
+	}
+	assertPointer(t, gdb, userID, wantLevel, wantGroup)
+}
+
+func TestAdvanceGroup_GovdeliSeviyeGecisiSeviyeTamamlaninca(t *testing.T) {
+	// Ürün kararı: gövdeli advance seviyenin son grubundan sonraki seviyeye
+	// (C2'de "tümü tamamlandı"ya) yalnızca seviye tamamlanınca geçer.
+	// Bütün grupları görülmüş ama tamamlanmamış seviyede işaretçi son grupta
+	// kalır, blockedReason "previous_level" olur (haritada sonraki seviye de
+	// aynı nedenle kilitli). Seviye tamamlanınca aynı istek geçirir.
+	cases := []struct {
+		name        string
+		level       string
+		wantLevel   string
+		wantGroup   int
+		wantChanged bool
+	}{
+		{"A1 sonu A2'ye", "A1", "A2", 1, true},
+		{"C2 sonu tumu tamamlandi", "C2", "C2", 0, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gdb, u, app := newGroupTest(t, nil)
+			groups := seedGroupLevels(t, gdb)[c.level]
+			last := len(groups)
+			for _, g := range groups {
+				seeGroupDirect(t, gdb, u.ID, g)
+			}
+			setPointer(t, gdb, u.ID, c.level, last)
+			body := fiber.Map{"level": c.level, "group": last}
+
+			status, resp := send(t, app, advanceRequest(body))
+			assertAdvanceResult(t, gdb, u.ID, status, resp, c.level, last, false, "previous_level")
+
+			if err := gdb.Model(&models.WordProgress{}).Where("user_id = ? AND level = ?", u.ID, c.level).
+				Update("box", 2).Error; err != nil {
+				t.Fatalf("kayıtlar güncellenemedi: %v", err)
+			}
+			status, resp = send(t, app, advanceRequest(body))
+			assertAdvanceResult(t, gdb, u.ID, status, resp, c.wantLevel, c.wantGroup, c.wantChanged, "")
+
+			// Yeniden deneme: değişmez.
+			status, resp = send(t, app, advanceRequest(body))
+			assertAdvanceResult(t, gdb, u.ID, status, resp, c.wantLevel, c.wantGroup, false, "")
+		})
+	}
+}
+
+func TestAdvanceGroup_GovdeliSeviyeGecisiRozetleAcik(t *testing.T) {
+	// Seviye rozeti, haritanın previous_level kilidinde olduğu gibi seviyeyi
+	// tamamlanmış sayar (ör. rozetten sonra sözlüğe kelime eklendi). Son
+	// grup görülmüş ama tamamlanmamış: açık grup sayısı 1, sınır dolmaz.
+	gdb, u, app := newGroupTest(t, nil)
+	a1 := seedGroupLevels(t, gdb)["A1"]
+	completeGroup(t, gdb, u.ID, a1[0])
+	completeGroup(t, gdb, u.ID, a1[1])
+	seeGroupDirect(t, gdb, u.ID, a1[2])
+	if err := gdb.Create(&models.EarnedBadge{UserID: u.ID, BadgeID: "level_A1", EarnedAt: time.Now()}).Error; err != nil {
+		t.Fatalf("rozet yazılamadı: %v", err)
+	}
+	setPointer(t, gdb, u.ID, "A1", 3)
+
+	status, body := send(t, app, advanceRequest(fiber.Map{"level": "A1", "group": 3}))
+	assertAdvanceResult(t, gdb, u.ID, status, body, "A2", 1, true, "")
+}
+
+func TestAdvanceGroup_GovdeliGorulmemisGrupIlerletmez(t *testing.T) {
+	// İstemciye körü körüne güvenilmez: gövdedeki grup sunucuda görülmemişse
+	// (her kelimesinin kaydı yok) işaretçi yerinde kalır, blockedReason
+	// "previous_not_seen" olur. Seviyenin son grubunda da önce bu sorulur.
+	t.Run("seviye ici", func(t *testing.T) {
+		gdb, u, app := newGroupTest(t, nil)
+		a1 := seedGroupLevels(t, gdb)["A1"]
+		setPointer(t, gdb, u.ID, "A1", 1)
+		body := fiber.Map{"level": "A1", "group": 1}
+
+		status, resp := send(t, app, advanceRequest(body))
+		assertAdvanceResult(t, gdb, u.ID, status, resp, "A1", 1, false, "previous_not_seen")
+
+		setProgress(t, gdb, u.ID, a1[0][0], 2, nil)
+		status, resp = send(t, app, advanceRequest(body))
+		assertAdvanceResult(t, gdb, u.ID, status, resp, "A1", 1, false, "previous_not_seen")
+
+		// Son kelime "Bilmiyorum" ile kutu 1'e yazılınca grup görülür.
+		setProgress(t, gdb, u.ID, a1[0][1], 1, nil)
+		status, resp = send(t, app, advanceRequest(body))
+		assertAdvanceResult(t, gdb, u.ID, status, resp, "A1", 2, false, "")
+	})
+	t.Run("seviye sonu", func(t *testing.T) {
+		gdb, u, app := newGroupTest(t, nil)
+		a1 := seedGroupLevels(t, gdb)["A1"]
+		completeGroup(t, gdb, u.ID, a1[0])
+		completeGroup(t, gdb, u.ID, a1[1])
+		setProgress(t, gdb, u.ID, a1[2][0], 2, nil)
+		setPointer(t, gdb, u.ID, "A1", 3)
+
+		status, resp := send(t, app, advanceRequest(fiber.Map{"level": "A1", "group": 3}))
+		assertAdvanceResult(t, gdb, u.ID, status, resp, "A1", 3, false, "previous_not_seen")
+	})
+}
+
+func TestAdvanceGroup_TestModuGovdeliKosulAramaz(t *testing.T) {
+	// TEST_MODE_UNLOCK_ALL'da haritada kilit yoktur: gövdeli advance grubun
+	// görülmesini ve seviyenin tamamlanmasını aramaz.
+	gdb, u, app := newGroupTest(t, &config.Config{AppEnv: "test", TestModeUnlockAll: true})
+	seedGroupLevels(t, gdb)
+	setPointer(t, gdb, u.ID, "A1", 3)
+
+	status, body := send(t, app, advanceRequest(fiber.Map{"level": "A1", "group": 3}))
+	assertAdvanceResult(t, gdb, u.ID, status, body, "A2", 1, true, "")
+}
+
 func TestAdvanceGroup_EszamanliAyniGovdeTekIlerleme(t *testing.T) {
 	gdb, u, app := newGroupTest(t, nil)
-	seedGroupLevels(t, gdb)
+	a1 := seedGroupLevels(t, gdb)["A1"]
 	setPointer(t, gdb, u.ID, "A1", 1)
+	completeGroup(t, gdb, u.ID, a1[0])
 
 	statuses := kilitAltindaEszamanli(t, gdb, app, u.ID, 4, func(int) *http.Request {
 		return advanceRequest(fiber.Map{"level": "A1", "group": 1})
@@ -383,10 +528,13 @@ func levelGroups(t *testing.T, app *fiber.App, level string) []dto.LevelGroupDTO
 	return groups
 }
 
-func grp(n, total, remaining int, completed, unlocked, started bool) dto.LevelGroupDTO {
+// grp, beklenen grup durumudur; seen, kaydı olan kelime sayısıdır (isSeen
+// bundan çıkar), reason kilit nedenidir.
+func grp(n, total, remaining int, completed, unlocked, started bool, seen int, reason string) dto.LevelGroupDTO {
 	return dto.LevelGroupDTO{
 		GroupNumber: n, TotalWords: total, RemainingInBox1: remaining,
 		IsCompleted: completed, IsUnlocked: unlocked, HasStarted: started,
+		IsSeen: total > 0 && seen == total, SeenWords: seen, LockReason: reason,
 	}
 }
 
@@ -415,10 +563,11 @@ func TestLevelGroups_SiraliKilitVeIlerleme(t *testing.T) {
 	mapScenario(t, gdb, u.ID)
 
 	want := []dto.LevelGroupDTO{
-		grp(1, 2, 0, true, true, true),
-		grp(2, 2, 1, false, true, true),
-		// Önceki grup bitmedi ve bu gruba başlanmadı: kilitli.
-		grp(3, 2, 2, false, false, false),
+		grp(1, 2, 0, true, true, true, 2, ""),
+		grp(2, 2, 1, false, true, true, 2, ""),
+		// Önceki grup bitmedi ama bütün kelimeleri görüldü (biri kutu 1'de):
+		// başlanmamış olsa da açık.
+		grp(3, 2, 2, false, true, false, 0, ""),
 	}
 	if got := levelGroups(t, app, "A1"); !reflect.DeepEqual(got, want) {
 		t.Errorf("A1 grupları = %+v\nbeklenen %+v", got, want)
@@ -426,8 +575,8 @@ func TestLevelGroups_SiraliKilitVeIlerleme(t *testing.T) {
 
 	// A1 bitmediği (ve rozeti olmadığı) için A2'nin tamamı kilitli.
 	wantA2 := []dto.LevelGroupDTO{
-		grp(1, 2, 2, false, false, false),
-		grp(2, 2, 2, false, false, false),
+		grp(1, 2, 2, false, false, false, 0, "previous_level"),
+		grp(2, 2, 2, false, false, false, 0, "previous_level"),
 	}
 	if got := levelGroups(t, app, "A2"); !reflect.DeepEqual(got, wantA2) {
 		t.Errorf("A2 grupları = %+v\nbeklenen %+v", got, wantA2)
@@ -451,8 +600,8 @@ func TestLevelGroups_OncekiSeviyeRozetleAcilir(t *testing.T) {
 	}
 
 	want := []dto.LevelGroupDTO{
-		grp(1, 2, 2, false, true, false),
-		grp(2, 2, 2, false, false, false),
+		grp(1, 2, 2, false, true, false, 0, ""),
+		grp(2, 2, 2, false, false, false, 0, "previous_not_seen"),
 	}
 	if got := levelGroups(t, app, "A2"); !reflect.DeepEqual(got, want) {
 		t.Errorf("A2 grupları = %+v\nbeklenen %+v", got, want)
@@ -469,16 +618,16 @@ func TestLevelGroups_OncekiSeviyeTamamlaninca(t *testing.T) {
 	setProgress(t, gdb, u.ID, a1[2][1], 4, nil)
 
 	wantA1 := []dto.LevelGroupDTO{
-		grp(1, 2, 0, true, true, true),
-		grp(2, 2, 0, true, true, true),
-		grp(3, 2, 0, true, true, true),
+		grp(1, 2, 0, true, true, true, 2, ""),
+		grp(2, 2, 0, true, true, true, 2, ""),
+		grp(3, 2, 0, true, true, true, 2, ""),
 	}
 	if got := levelGroups(t, app, "A1"); !reflect.DeepEqual(got, wantA1) {
 		t.Errorf("A1 grupları = %+v\nbeklenen %+v", got, wantA1)
 	}
 	wantA2 := []dto.LevelGroupDTO{
-		grp(1, 2, 2, false, true, false),
-		grp(2, 2, 2, false, false, false),
+		grp(1, 2, 2, false, true, false, 0, ""),
+		grp(2, 2, 2, false, false, false, 0, "previous_not_seen"),
 	}
 	if got := levelGroups(t, app, "A2"); !reflect.DeepEqual(got, wantA2) {
 		t.Errorf("A2 grupları = %+v\nbeklenen %+v", got, wantA2)
@@ -614,10 +763,15 @@ func TestSetCurrentGroup_EszamanliIleriVeGeriSonuctaIleride(t *testing.T) {
 }
 
 func TestAdvanceGroup_GovdeliIstekSonGruptaSeviyeAtlarYanitAlanlari(t *testing.T) {
-	// Seviyenin son grubu gövdeyle tamamlanınca bir sonraki seviyeye geçilir;
-	// yanıt şekli (user, levelChanged, newLevel, newGroup) değişmemiştir.
+	// Seviye tamamlanmışken son grubu için gövdeli advance bir sonraki
+	// seviyeye geçer; yanıt şekli (user, levelChanged, newLevel, newGroup)
+	// değişmemiştir. Eskiden son grubun gövdesi seviye tamamlanmamışken de
+	// seviye atlatıyordu; ürün kararıyla seviye geçişi artık yalnızca seviye
+	// tamamlanınca olur, kurulum bu yüzden A1'in bütün gruplarını tamamlar.
 	gdb, u, app := newGroupTest(t, nil)
-	seedGroupLevels(t, gdb)
+	for _, g := range seedGroupLevels(t, gdb)["A1"] {
+		completeGroup(t, gdb, u.ID, g)
+	}
 	setPointer(t, gdb, u.ID, "A1", 3)
 
 	status, body := send(t, app, advanceRequest(fiber.Map{"level": "A1", "group": 3}))

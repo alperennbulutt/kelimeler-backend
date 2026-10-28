@@ -399,7 +399,13 @@ func TestReviewGate_OgrenmeSwipeiKapiyaTakilmaz(t *testing.T) {
 	kayit := kapiRaporunuYakala(t)
 	gdb, u, app := newGateTest(t, config.GateEnforce)
 	ids := dueWords(t, gdb, u.ID, "itest_gate_box1", 1, 1)
-	setUsage(t, gdb, u.ID, map[string]any{"review_answers_today": 30})
+	// Kutu 1'in sağa kaydırılması öğrenmedir: grup bugün açık olmalı (bkz.
+	// TestSwipe_Kutu1SagGunlukKapidanGecer).
+	setUsage(t, gdb, u.ID, map[string]any{
+		"review_answers_today":       30,
+		"groups_started_today_count": 1,
+		"unlocked_groups_today":      "A1:1",
+	})
 
 	if status, body := send(t, app, progressSwipe(ids[0], "right")); status != fiber.StatusOK {
 		t.Fatalf("kutu 1 swipe status = %d (body: %v)", status, body)

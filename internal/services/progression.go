@@ -82,3 +82,50 @@ func sign(n int) int {
 		return 0
 	}
 }
+
+// MaxOpenGroups, aynı anda açık kalabilecek grup sayısıdır. Açık grup:
+// başlanmış (en az bir kelimesinin ilerleme kaydı var) ama tamamlanmamış
+// (kaydı olmayan ya da kutu 1'de kelimesi kalan) grup; bütün seviyeler
+// birlikte sayılır. Önceki seviyesi tamamlanmamış (LockReasonPreviousLevel
+// ile kilitli) seviyenin grupları sayılmaz. Sınır doluyken başlanmamış bir
+// grup açılamaz, açık gruplardan biri tamamlanınca yer açılır.
+const MaxOpenGroups = 3
+
+// Haritada kilitli bir grubun kilit nedeni (LevelGroupDTO.lockReason). Açık
+// grubun nedeni boştur.
+const (
+	// LockReasonPreviousLevel: önceki seviyenin bütün grupları tamamlanmadı.
+	LockReasonPreviousLevel = "previous_level"
+	// LockReasonPreviousNotSeen: seviyedeki önceki grubun bütün kelimeleri en
+	// az bir kez cevaplanmadı (bkz. GroupLockReason).
+	LockReasonPreviousNotSeen = "previous_not_seen"
+	// LockReasonOpenGroupLimit: MaxOpenGroups kadar açık grup var.
+	LockReasonOpenGroupLimit = "open_group_limit"
+)
+
+// GroupLockReason, haritadaki bir grubun kilit nedenini döndürür; grup açıksa
+// boş döner.
+//
+//   - Önceki seviye tamamlanmadıysa seviyenin bütün grupları (başlanmış olsa
+//     da) kilitlidir.
+//   - Başlanmış grup her zaman açıktır: limit, açık bir grubu kapatmaz.
+//   - Başlanmamış grup, seviyedeki önceki grup "görüldüyse" (bütün
+//     kelimelerinin ilerleme kaydı var: bilindi ya da bilinmedi) ve açık grup
+//     sayısı MaxOpenGroups'tan azsa açılır. Seviyenin ilk grubunda
+//     previousSeen true verilir.
+//
+// Birden çok neden varsa sıradaki ilki döner: önceki seviye, önceki grup,
+// açık grup sınırı.
+func GroupLockReason(previousLevelCompleted, started, previousSeen bool, openGroups int) string {
+	switch {
+	case !previousLevelCompleted:
+		return LockReasonPreviousLevel
+	case started:
+		return ""
+	case !previousSeen:
+		return LockReasonPreviousNotSeen
+	case openGroups >= MaxOpenGroups:
+		return LockReasonOpenGroupLimit
+	}
+	return ""
+}
