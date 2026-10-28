@@ -259,16 +259,30 @@ func (h *Handlers) OpenGroups(c *fiber.Ctx) error {
 	})
 }
 
+// groupProgress, (level, grp) grubunun ilerleme özetidir
+// (computeLevelGroups'taki satırla aynı sayım). db, çağıranın transaction'ı
+// olabilir.
+func groupProgress(db *gorm.DB, userID, level string, grp int) (levelGroupProgress, error) {
+	var r levelGroupProgress
+	err := db.Raw(levelGroupProgressColumns+levelProgressQuery+`
+		  AND d.grp = ?`, userID, level, grp).Scan(&r).Error
+	return r, err
+}
+
 // groupCompleted, (level, grp) grubunun haritada tamamlanmış görünüp
 // görünmediğini söyler (computeLevelGroups'taki IsCompleted ile aynı kural).
 // db, çağıranın transaction'ı olabilir.
 func groupCompleted(db *gorm.DB, userID, level string, grp int) (bool, error) {
-	var r levelGroupProgress
-	if err := db.Raw(levelGroupProgressColumns+levelProgressQuery+`
-		  AND d.grp = ?`, userID, level, grp).Scan(&r).Error; err != nil {
-		return false, err
-	}
-	return r.completed(), nil
+	r, err := groupProgress(db, userID, level, grp)
+	return r.completed(), err
+}
+
+// groupSeen, (level, grp) grubunun haritada görülmüş görünüp görünmediğini
+// söyler (computeLevelGroups'taki IsSeen ile aynı kural). db, çağıranın
+// transaction'ı olabilir.
+func groupSeen(db *gorm.DB, userID, level string, grp int) (bool, error) {
+	r, err := groupProgress(db, userID, level, grp)
+	return r.seen(), err
 }
 
 // groupLockReason, (level, grp) grubunun haritadaki (computeLevelGroups)
@@ -308,25 +322,29 @@ func (h *Handlers) groupLockReason(userID, level string, grp int) (reason string
 	return "", false, nil
 }
 
-// isPreviousLevelCompleted: earnedBadges hızlı yolu, yoksa önceki seviyenin
-// tamamlanma sayımı. A1'in önceki seviyesi yoktur. db, çağıranın
-// transaction'ı olabilir.
+// isPreviousLevelCompleted: önceki seviye tamamlanmış mı (bkz. isLevelDone).
+// A1'in önceki seviyesi yoktur. db, çağıranın transaction'ı olabilir.
 func isPreviousLevelCompleted(db *gorm.DB, userID, level string) (bool, error) {
 	idx := services.IndexOfLevel(level)
 	if idx <= 0 {
 		return true, nil // A1 için önceki seviye yok
 	}
-	prev := services.Levels[idx-1]
+	return isLevelDone(db, userID, services.Levels[idx-1])
+}
 
+// isLevelDone: earnedBadges hızlı yolu, yoksa seviyenin tamamlanma sayımı.
+// Haritanın previous_level kilidi ve gövdeli advance-group'un seviye geçişi
+// aynı kuralı buradan okur. db, çağıranın transaction'ı olabilir.
+func isLevelDone(db *gorm.DB, userID, level string) (bool, error) {
 	var cnt int64
 	if err := db.Model(&models.EarnedBadge{}).
-		Where("user_id = ? AND badge_id = ?", userID, "level_"+prev).Count(&cnt).Error; err != nil {
+		Where("user_id = ? AND badge_id = ?", userID, "level_"+level).Count(&cnt).Error; err != nil {
 		return false, err
 	}
 	if cnt > 0 {
 		return true, nil
 	}
-	return isLevelCompleted(db, userID, prev)
+	return isLevelCompleted(db, userID, level)
 }
 
 // isLevelCompleted, seviyenin bütün grupları tamamlanmış mı söyler: seviyede

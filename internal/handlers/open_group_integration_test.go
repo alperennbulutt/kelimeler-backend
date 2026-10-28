@@ -693,3 +693,49 @@ func TestAdvanceGroup_GovdesizGorulenGrupIlerletmez(t *testing.T) {
 	}
 	assertPointer(t, gdb, u.ID, "A1", 1)
 }
+
+func TestAcikGrup_OncekiSeviyeBitinceSinirAsilirAdvanceBekler(t *testing.T) {
+	// Ürün kararı: önceki seviyesi bitmemiş seviyede sınır uygulanmaz.
+	// Taşınmış veri: A1 bitmeden A2'nin beş grubunda kayıt var (görülmüş, her
+	// birinde bir kelime kutu 1'de). A1 bitmemişken gövdeli advance A2'de
+	// sınıra takılmaz. A1 tamamlanınca beş grup birden sayılır (5/3, kabul
+	// edilen durum); sayı 3'ün altına inene kadar sunucu yeni grup açtırmaz.
+	gdb, u, app := newOpenGroupTest(t, config.GateEnforce)
+	a1 := testLevel(t, gdb, "A1", 2)
+	a2 := testLevel(t, gdb, "A2", 2, 2, 2, 2, 2, 2)
+	for g := 0; g < 5; g++ {
+		setProgress(t, gdb, u.ID, a2[g][0], 2, nil)
+		setProgress(t, gdb, u.ID, a2[g][1], 1, nil)
+	}
+	setPointer(t, gdb, u.ID, "A2", 5)
+	body := fiber.Map{"level": "A2", "group": 5}
+
+	status, resp := send(t, app, advanceRequest(body))
+	assertAdvanceResult(t, gdb, u.ID, status, resp, "A2", 6, false, "")
+
+	for _, w := range a1[0] {
+		setProgress(t, gdb, u.ID, w, 2, nil)
+	}
+	setPointer(t, gdb, u.ID, "A2", 5)
+	if og := openGroups(t, app); og.OpenGroupCount != 5 || og.MaxOpenGroups != services.MaxOpenGroups {
+		t.Fatalf("A1 bitince open-groups = %+v, beklenen 5/3", og)
+	}
+	if g := groupOf(t, app, "A2", 6); g.IsUnlocked || g.LockReason != services.LockReasonOpenGroupLimit {
+		t.Errorf("A2 grup 6 = %+v, beklenen kilitli open_group_limit", g)
+	}
+
+	// Açık gruplar birer birer tamamlanır: 4/3 ve 3/3'te de işaretçi yerinde.
+	for g := 0; g < 3; g++ {
+		status, resp = send(t, app, advanceRequest(body))
+		assertAdvanceResult(t, gdb, u.ID, status, resp, "A2", 5, false, "open_group_limit")
+		if err := gdb.Model(&models.WordProgress{}).Where("user_id = ? AND word_id = ?", u.ID, a2[g][1].ID).
+			Update("box", 2).Error; err != nil {
+			t.Fatalf("kayıt güncellenemedi: %v", err)
+		}
+	}
+	if og := openGroups(t, app); og.OpenGroupCount != 2 {
+		t.Fatalf("openGroupCount = %d, beklenen 2", og.OpenGroupCount)
+	}
+	status, resp = send(t, app, advanceRequest(body))
+	assertAdvanceResult(t, gdb, u.ID, status, resp, "A2", 6, false, "")
+}

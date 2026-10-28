@@ -187,7 +187,13 @@ func (h *Handlers) SetCurrentGroup(c *fiber.Ctx) error {
 // kelimelerini gördüğü (bkz. levelGroupProgress.seen) gruptur: işaretçi tam o
 // gruptaysa bir ileri gider, değilse (zaten ileride ya da geride) hiçbir şey
 // değişmez. Yanıtı kaybolan isteğin yeniden denenmesi bu yüzden grup
-// atlatmaz.
+// atlatmaz. İstemciye körü körüne güvenilmez: gövdedeki grup sunucuda
+// görülmüş değilse işaretçi yerinde kalır (blockedReason
+// "previous_not_seen"). Seviyenin son grubundan sonraki seviyeye (C2'de
+// "tümü tamamlandı"ya) yalnızca seviye tamamlanmışsa geçilir (haritadaki
+// previous_level kilidiyle aynı kural, bkz. isLevelDone); değilse işaretçi
+// son grupta kalır, levelChanged false ve blockedReason "previous_level"
+// olur.
 //
 // Gövdesiz istek (yayındaki eski istemci) işaretçiyi yalnızca işaretçinin
 // gösterdiği grup haritada tamamlanmışsa (bkz. groupCompleted) bir ileri
@@ -197,10 +203,13 @@ func (h *Handlers) SetCurrentGroup(c *fiber.Ctx) error {
 // (current-group geri yazmaz) gövdesiz advance çağırır; koşulsuz ilerleme
 // işaretçiyi her turda bir grup, seviye sonunda bir seviye ileri kaydırırdı.
 //
+// Gövdesiz yolda seviye geçişi için seviyenin tamamlanması aranmaz
+// (değişmedi).
+//
 // İki yolda da işaretçi, açık grup sınırı (services.MaxOpenGroups) doluyken
 // başlanmamış bir gruba taşınmaz: hiçbir şey değişmez ve yanıtın
-// blockedReason alanı "open_group_limit" olur (ilerlediğinde ya da başka bir
-// nedenle değişmediğinde ""). Sınır açılınca (açık gruplardan biri
+// blockedReason alanı "open_group_limit" olur (ilerlediğinde ya da yukarıdaki
+// nedenler dışında değişmediğinde ""). Sınır açılınca (açık gruplardan biri
 // tamamlanınca) aynı istek işaretçiyi ilerletir.
 //
 // İki yolda da kullanıcı satırı kilitlenir: eşzamanlı istekler aynı işaretçiyi
@@ -251,6 +260,14 @@ func (h *Handlers) AdvanceGroup(c *fiber.Ctx) error {
 		if nextLevel == user.CurrentLevel && nextGroup == user.CurrentGroup {
 			return nil
 		}
+		if completed != nil {
+			leavesLevel := nextLevel != user.CurrentLevel || nextGroup < 1
+			reason, err := h.bodiedAdvanceBlocked(tx, userID, user.CurrentLevel, user.CurrentGroup, leavesLevel)
+			if err != nil || reason != "" {
+				blockedReason = reason
+				return err
+			}
+		}
 		if nextGroup >= 1 {
 			limited, err := h.openGroupLimitReached(tx, userID, nextLevel, nextGroup)
 			if err != nil {
@@ -280,6 +297,34 @@ func (h *Handlers) AdvanceGroup(c *fiber.Ctx) error {
 		// Sonradan eklendi: eski istemci tanımaz ve yok sayar.
 		"blockedReason": blockedReason,
 	})
+}
+
+// bodiedAdvanceBlocked, gövdeli advance-group'un işaretçideki (level, grp)
+// grubundan ileri gitmesini engelleyen nedeni döner; engel yoksa "".
+// leavesLevel, sonraki konumun başka bir seviyede (ya da "tümü tamamlandı")
+// olduğunu söyler. Grup sunucuda görülmüş olmalıdır (previous_not_seen);
+// seviyeden çıkılıyorsa seviye de tamamlanmış olmalıdır (previous_level).
+// İkisi birden eksikse neden previous_not_seen'dir. TEST_MODE_UNLOCK_ALL'da
+// haritada kilit olmadığı için ikisi de sorulmaz.
+func (h *Handlers) bodiedAdvanceBlocked(tx *gorm.DB, userID, level string, grp int, leavesLevel bool) (string, error) {
+	if h.unlockAll() {
+		return "", nil
+	}
+	seen, err := groupSeen(tx, userID, level, grp)
+	if err != nil {
+		return "", err
+	}
+	if !seen {
+		return services.LockReasonPreviousNotSeen, nil
+	}
+	if !leavesLevel {
+		return "", nil
+	}
+	done, err := isLevelDone(tx, userID, level)
+	if err != nil || done {
+		return "", err
+	}
+	return services.LockReasonPreviousLevel, nil
 }
 
 // Gövdesiz advance-group'un, son kelimenin yazımını bekleme süresi ve
