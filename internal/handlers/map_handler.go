@@ -63,7 +63,7 @@ const levelProgressQuery = `
 // Sözlük ve ilerleme satırları belleğe alınmaz; grup başına sayılar tek bir
 // aggregate sorguyla gelir. Kilit kuralı services.GroupLockReason'dadır.
 func (h *Handlers) computeLevelGroups(userID, level string) ([]dto.LevelGroupDTO, error) {
-	previousLevelCompleted, err := h.isPreviousLevelCompleted(userID, level)
+	previousLevelCompleted, err := isPreviousLevelCompleted(h.DB, userID, level)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +83,7 @@ func (h *Handlers) computeLevelGroups(userID, level string) ([]dto.LevelGroupDTO
 	// önceki seviye bitmemişse ya da test modunda hiç sorulmaz.
 	openGroups := 0
 	if previousLevelCompleted && !h.unlockAll() {
-		if openGroups, err = countOpenGroups(h.DB, userID); err != nil {
+		if openGroups, err = h.countOpenGroups(h.DB, userID); err != nil {
 			return nil, err
 		}
 	}
@@ -130,11 +130,12 @@ func (h *Handlers) unlockAll() bool {
 	return h.Cfg != nil && h.Cfg.TestModeUnlockAll
 }
 
-// openGroupsQuery, kullanıcının açık gruplarını (başlanmış ama tamamlanmamış)
-// seviye ve grup sırasıyla döner. Sözlüğün tamamı değil, yalnızca kullanıcının
-// kaydı olan gruplar taranır. "Başlanmış" ve "tamamlanmamış" levelProgressQuery
-// ile aynı eşlemeyle sayılır: ilerleme satırı yalnızca kendi seviyesi sözlük
-// satırınınkiyle aynıysa sayılır, grup sözlükten okunur.
+// openGroupsQuery, kullanıcının başlanmış ama tamamlanmamış gruplarını döner
+// (önceki seviye süzgeci listOpenGroups'tadır). Sözlüğün tamamı değil,
+// yalnızca kullanıcının kaydı olan gruplar taranır. "Başlanmış" ve
+// "tamamlanmamış" levelProgressQuery ile aynı eşlemeyle sayılır: ilerleme
+// satırı yalnızca kendi seviyesi sözlük satırınınkiyle aynıysa sayılır, grup
+// sözlükten okunur.
 const openGroupsQuery = `
 	WITH started AS (
 		SELECT DISTINCT d.level, d.grp
@@ -160,21 +161,48 @@ type openGroupRow struct {
 	RemainingInBox1 int
 }
 
-// listOpenGroups, kullanıcının açık gruplarını seviye sırasıyla döner.
-// db, çağıranın transaction'ı olabilir.
-func listOpenGroups(db *gorm.DB, userID string) ([]openGroupRow, error) {
+// listOpenGroups, kullanıcının sınıra sayılan açık gruplarını seviye ve grup
+// sırasıyla döner. Önceki seviyesi tamamlanmamış seviyenin grupları başlanmış
+// olsa da sayılmaz: kendileri previous_level ile kilitlidir, kullanıcı onlara
+// zaten giremez. Sayılsalardı taşınmış veri ya da sözlüğe sonradan eklenen
+// bir grup (önceki seviyeyi yeniden "tamamlanmamış" yapar) kullanıcıyı
+// büsbütün takabilirdi: sayılan gruplar kilitli, yeni grup da sınırdan
+// açılamaz. TEST_MODE_UNLOCK_ALL'da kilit olmadığı için hepsi sayılır. db,
+// çağıranın transaction'ı olabilir.
+func (h *Handlers) listOpenGroups(db *gorm.DB, userID string) ([]openGroupRow, error) {
 	// Seviye adları (A1..C2) alfabetik sırada da seviye sırasındadır.
 	var rows []openGroupRow
-	err := db.Raw(openGroupsQuery+`
-	ORDER BY s.level, s.grp`, userID, userID).Scan(&rows).Error
-	return rows, err
+	if err := db.Raw(openGroupsQuery+`
+	ORDER BY s.level, s.grp`, userID, userID).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	if h.unlockAll() {
+		return rows, nil
+	}
+	// Önceki seviye her seviye için bir kez sorulur.
+	levelOpen := map[string]bool{}
+	counted := rows[:0]
+	for _, r := range rows {
+		open, ok := levelOpen[r.Level]
+		if !ok {
+			var err error
+			if open, err = isPreviousLevelCompleted(db, userID, r.Level); err != nil {
+				return nil, err
+			}
+			levelOpen[r.Level] = open
+		}
+		if open {
+			counted = append(counted, r)
+		}
+	}
+	return counted, nil
 }
 
-// countOpenGroups, kullanıcının açık grup sayısıdır.
-func countOpenGroups(db *gorm.DB, userID string) (int, error) {
-	var n int
-	err := db.Raw(`SELECT COUNT(*) FROM (`+openGroupsQuery+`) open_groups`, userID, userID).Scan(&n).Error
-	return n, err
+// countOpenGroups, kullanıcının sınıra sayılan açık grup sayısıdır (bkz.
+// listOpenGroups).
+func (h *Handlers) countOpenGroups(db *gorm.DB, userID string) (int, error) {
+	rows, err := h.listOpenGroups(db, userID)
+	return len(rows), err
 }
 
 // groupStarted, (level, grp) grubunda kullanıcının en az bir ilerleme kaydı
@@ -189,8 +217,9 @@ func groupStarted(db *gorm.DB, userID, level string, grp int) (bool, error) {
 
 // openGroupLimitReached, (level, grp) grubu başlanmamışken açık grup sınırı
 // (services.MaxOpenGroups) dolu mu söyler: true ise grup açılamaz. Başlanmış
-// grup sınırdan etkilenmez; TEST_MODE_UNLOCK_ALL sınırı kapatır. db,
-// çağıranın transaction'ı olabilir.
+// grup sınırdan etkilenmez; önceki seviyesi tamamlanmamış grup da etkilenmez:
+// başlasa da sınıra sayılmaz (bkz. listOpenGroups), kilidi previous_level'dir.
+// TEST_MODE_UNLOCK_ALL sınırı kapatır. db, çağıranın transaction'ı olabilir.
 func (h *Handlers) openGroupLimitReached(db *gorm.DB, userID, level string, grp int) (bool, error) {
 	if h.unlockAll() {
 		return false, nil
@@ -199,7 +228,10 @@ func (h *Handlers) openGroupLimitReached(db *gorm.DB, userID, level string, grp 
 	if err != nil || started {
 		return false, err
 	}
-	n, err := countOpenGroups(db, userID)
+	if done, err := isPreviousLevelCompleted(db, userID, level); err != nil || !done {
+		return false, err
+	}
+	n, err := h.countOpenGroups(db, userID)
 	return n >= services.MaxOpenGroups, err
 }
 
@@ -207,7 +239,7 @@ func (h *Handlers) openGroupLimitReached(db *gorm.DB, userID, level string, grp 
 // grup açmak için önce açık gruplarını bitir" mesajında bunları gösterir.
 func (h *Handlers) OpenGroups(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
-	rows, err := listOpenGroups(h.DB, userID)
+	rows, err := h.listOpenGroups(h.DB, userID)
 	if err != nil {
 		return err
 	}
@@ -256,7 +288,7 @@ func (h *Handlers) groupLockReason(userID, level string, grp int) (reason string
 		return "", false, err
 	}
 	if started {
-		done, err := h.isPreviousLevelCompleted(userID, level)
+		done, err := isPreviousLevelCompleted(h.DB, userID, level)
 		if err != nil || done {
 			return "", true, err
 		}
@@ -277,8 +309,9 @@ func (h *Handlers) groupLockReason(userID, level string, grp int) (reason string
 }
 
 // isPreviousLevelCompleted: earnedBadges hızlı yolu, yoksa önceki seviyenin
-// tamamlanma sayımı. A1'in önceki seviyesi yoktur.
-func (h *Handlers) isPreviousLevelCompleted(userID, level string) (bool, error) {
+// tamamlanma sayımı. A1'in önceki seviyesi yoktur. db, çağıranın
+// transaction'ı olabilir.
+func isPreviousLevelCompleted(db *gorm.DB, userID, level string) (bool, error) {
 	idx := services.IndexOfLevel(level)
 	if idx <= 0 {
 		return true, nil // A1 için önceki seviye yok
@@ -286,23 +319,23 @@ func (h *Handlers) isPreviousLevelCompleted(userID, level string) (bool, error) 
 	prev := services.Levels[idx-1]
 
 	var cnt int64
-	if err := h.DB.Model(&models.EarnedBadge{}).
+	if err := db.Model(&models.EarnedBadge{}).
 		Where("user_id = ? AND badge_id = ?", userID, "level_"+prev).Count(&cnt).Error; err != nil {
 		return false, err
 	}
 	if cnt > 0 {
 		return true, nil
 	}
-	return h.isLevelCompleted(userID, prev)
+	return isLevelCompleted(db, userID, prev)
 }
 
 // isLevelCompleted, seviyenin bütün grupları tamamlanmış mı söyler: seviyede
 // kelime vardır ve hiçbiri kaydı olmayan ya da kutu 1'de değildir. Bir grubun
 // tamamlanması kilit durumuna bağlı olmadığı için önceki seviyelere inmek
 // gerekmez.
-func (h *Handlers) isLevelCompleted(userID, level string) (bool, error) {
+func isLevelCompleted(db *gorm.DB, userID, level string) (bool, error) {
 	var r levelGroupProgress
-	if err := h.DB.Raw(`SELECT COUNT(*) AS total_words,
+	if err := db.Raw(`SELECT COUNT(*) AS total_words,
 		       COUNT(*) FILTER (WHERE wp.id IS NULL OR wp.box = 1) AS remaining_in_box1`+
 		levelProgressQuery, userID, level).Scan(&r).Error; err != nil {
 		return false, err

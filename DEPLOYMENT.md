@@ -523,8 +523,8 @@ Lokalde: `make cleanup-guests` (rapor) ve `make cleanup-guests ARGS="--apply"`. 
 
 - **Görüldü:** grubun bütün kelimelerinin ilerleme kaydı var (kutu fark etmez; "Bilmiyorum" denen yeni kelime kutu 1'de kaydedilir, bkz. `POST /progress/unknown`).
 - **Tamamlandı (değişmedi):** grupta kaydı olmayan ya da kutu 1'de kelime kalmadı. Tamamlanan grup görülmüştür de.
-- **Açık grup:** başlanmış (en az bir kayıt) ama tamamlanmamış grup; bütün seviyeler birlikte sayılır.
-- **Kilit:** önceki seviye tamamlanmadıysa seviyenin bütün grupları kilitli (değişmedi). Başlanmış grup her zaman açık. Başlanmamış grup, seviyedeki önceki grup **görüldüyse** (eskiden: tamamlandıysa) ve açık grup sayısı 3'ten azsa açık.
+- **Açık grup:** başlanmış (en az bir kayıt) ama tamamlanmamış grup; bütün seviyeler birlikte sayılır. Önceki seviyesi tamamlanmamış seviyenin grupları (kendileri `previous_level` ile kilitli) başlanmış olsa da sayılmaz ve `GET /map/open-groups` listesinde yer almaz. Neden: Firestore'dan taşınan kayıtlar ya da sözlüğe sonradan eklenen bir grup (önceki seviyeyi yeniden "tamamlanmamış" yapar) kilitli grupları sınıra doldurup kullanıcıyı büsbütün takabilirdi. Önceki seviye tamamlanınca bu gruplar açılır ve yeniden sayılır; sınırı aşmış olabilirler, yeni grup yine yer açılana kadar açılmaz.
+- **Kilit:** önceki seviye tamamlanmadıysa seviyenin bütün grupları kilitli (değişmedi). Başlanmış grup her zaman açık. Başlanmamış grup, seviyedeki önceki grup **görüldüyse** (eskiden: tamamlandıysa) ve açık grup sayısı 3'ten azsa açık. Birden çok neden varsa öncelik: `previous_level`, `previous_not_seen`, `open_group_limit`. Önceki seviyesi tamamlanmamış gruba sınır hiç uygulanmaz (başlasa da sayılmaz); ret nedeni `previous_level`'dır (learn'de `map_locked`, `403 gate_required`).
 - **Seviye tamamlama ve rozetler değişmedi:** seviye = bütün grupları tamamlandı.
 
 ### Yeni ve değişen uçlar
@@ -532,7 +532,7 @@ Lokalde: `make cleanup-guests` (rapor) ve `make cleanup-guests ARGS="--apply"`. 
 | Uç | Ne değişti |
 |---|---|
 | `GET /map/levels/:level/groups` | Her gruba `isSeen` (bool), `seenWords` (kaydı olan kelime sayısı) ve `lockReason` eklendi: `""` (açık), `"previous_level"`, `"previous_not_seen"`, `"open_group_limit"`. Eski alanlar (`isUnlocked`, `isCompleted`, `hasStarted`, `remainingInBox1`, `totalWords`) aynı anlamda. Önceki grubu görülmüş ama tamamlanmamış başlanmamış grup artık `isUnlocked: true` |
-| `GET /map/open-groups` | Yeni. `200 {"openGroupCount":2,"maxOpenGroups":3,"openGroups":[{"level":"A1","group":2,"totalWords":50,"remainingInBox1":7}]}`; liste seviye ve grup sırasında, boşsa `[]` |
+| `GET /map/open-groups` | Yeni. `200 {"openGroupCount":2,"maxOpenGroups":3,"openGroups":[{"level":"A1","group":2,"totalWords":50,"remainingInBox1":7}]}`; yalnızca sınıra sayılan gruplar (önceki seviyesi tamamlanmamış gruplar yok), `openGroupCount` listenin uzunluğu; liste seviye ve grup sırasında, boşsa `[]` |
 | `POST /progress/unknown` | Yeni. Gövde `{"wordId"}`: kaydı olmayan kelimeye "Bilmiyorum". Kelimeyi kutu 1'de kaydeder (`wrongCount: 1`), yanıt learn'ünkiyle aynı biçimde kelime ilerlemesi. Kaydı olan kelimede hiçbir şey değiştirmez, mevcut kaydı döner (idempotent; kutu 1'e geri atmaz). Learn ile aynı kapıdan geçer. Hatalar: `400 invalid_request`, `404 unknown_word`, `403 gate_required`, `403 open_group_limit` |
 | `POST /progress/learn` | Sınır doluyken başlanmamış grubun ilk kelimesi ihlaldir (`reason=open_group_limit`); `enforce`'ta `403 open_group_limit` |
 | `POST /progress/swipe` | Kutu 1'deki kelimeye sağ (öğrenme) artık learn gibi günlük grup kapısından geçer (`enforce`'ta `403 gate_required`). Kutu 1 kaydı "Bilmiyorum" ile yazılabildiği için gerekli: aksi halde grup bir kez açılıp sonraki günlerde reklamsız öğrenilirdi. Kutu 1 sol ve tekrar cevapları değişmedi |
@@ -544,11 +544,11 @@ Lokalde: `make cleanup-guests` (rapor) ve `make cleanup-guests ARGS="--apply"`. 
 
 Açık grup sınırı, haritanın sıralı kilidi (`map_locked`) gibi kapı kipine bağlıdır: `off`'ta denetlenmez, `log`'da kabul edilip raporlanır (`gate_violation ... reason=open_group_limit`), `enforce`'ta `403 open_group_limit` ile reddedilir. İşaretçi uçları (`current-group`, `advance-group`) kipten bağımsızdır. `TEST_MODE_UNLOCK_ALL=true` sınırı da kapatır. Neden `open_group_limit` sprint 1 notlarındaki "Nedenler" listesine eklendi.
 
-Dürüst istemci haritada kilitli gruba girmediği için ihlal üretmez. Yayındaki istemci "Bilmiyorum"u yazmadığı için onun kullanıcısında "görüldü" pratikte "tamamlandı" ile aynıdır ve en fazla bir açık grup oluşur; sınır ona takılmaz. İstisna, Firestore'dan taşınan kutu 1 kayıtlarıdır: böyle bir kaydı olan grup görülmüş ama tamamlanmamış sayılır, sonraki grubu açar ve açık kalır. Bu kayıtlar birkaç grupta varsa eski istemcinin kullanıcısı da sınıra ulaşabilir; eski istemci kilit nedenini (`lockReason`) okumaz, grubu yalnızca "kilitli" gösterir. Yayındaki istemci `open_group_limit` kodunu tanımaz, genel hata gösterir (kabul edilen durum).
+Dürüst istemci haritada kilitli gruba girmediği için ihlal üretmez. Yayındaki istemci "Bilmiyorum"u yazmadığı için onun kullanıcısında "görüldü" pratikte "tamamlandı" ile aynıdır ve en fazla bir açık grup oluşur; sınır ona takılmaz. İstisna, Firestore'dan taşınan kutu 1 kayıtlarıdır: böyle bir kaydı olan grup görülmüş ama tamamlanmamış sayılır, sonraki grubu açar ve açık kalır. Bu kayıtlar aynı seviyede ya da önceki seviyesi tamamlanmış seviyelerde birkaç grupta varsa eski istemcinin kullanıcısı da sınıra ulaşabilir (önceki seviyesi tamamlanmamış seviyedeki taşınmış kayıtlar sayılmaz); eski istemci kilit nedenini (`lockReason`) okumaz, grubu yalnızca "kilitli" gösterir. Yayındaki istemci `open_group_limit` kodunu tanımaz, genel hata gösterir (kabul edilen durum).
 
 ### Veritabanı
 
-Şema değişikliği yok. Açık grup sayımı kullanıcının kaydı olan grupları tarar; harita isteğinde ve başlanmamış grubun ilk kelimesinde birer sorgu eklenir.
+Şema değişikliği yok. Açık grup sayımı kullanıcının kaydı olan grupları tarar, sonra açık grupların bulunduğu her seviye için önceki seviyenin tamamlanmasını bir kez sorar (rozet varsa tek sorgu, yoksa önceki seviyenin sayımı); harita isteğinde ve başlanmamış grubun ilk kelimesinde bu sorgular eklenir.
 
 ### Yayın sırası
 

@@ -107,7 +107,8 @@ type LevelGroupDTO struct {
 	LockReason string `json:"lockReason"`
 }
 
-// OpenGroupDTO, açık (başlanmış ama tamamlanmamış) bir gruptur.
+// OpenGroupDTO, sınıra sayılan açık bir gruptur: başlanmış ama tamamlanmamış,
+// önceki seviyesi tamamlanmış (kendisi previous_level ile kilitli değil).
 type OpenGroupDTO struct {
 	Level           string `json:"level"`
 	Group           int    `json:"group"`

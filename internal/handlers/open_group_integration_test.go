@@ -372,6 +372,124 @@ func TestAcikGrup_SeviyelerBirlikteSayilir(t *testing.T) {
 	}
 }
 
+// openGroupKeys, open-groups listesini "A1:1,A2:3" biçiminde yazar.
+func openGroupKeys(og dto.OpenGroupsDTO) string {
+	var keys []string
+	for _, g := range og.OpenGroups {
+		keys = append(keys, fmt.Sprintf("%s:%d", g.Level, g.Group))
+	}
+	return strings.Join(keys, ",")
+}
+
+func TestAcikGrup_OncekiSeviyeKilitliGruplarSayilmaz(t *testing.T) {
+	// Taşınmış veri: A1 bitmeden A2'nin üç grubunda kayıt var (her birinde
+	// bir kelime kutu 1'de). Bu gruplar previous_level ile kilitli; sınıra
+	// sayılsalardı A1'in yeni grubu da open_group_limit ile kilitlenir,
+	// kullanıcı hiçbir gruba giremezdi.
+	kapiRaporunuYakala(t)
+	gdb, u, app := newOpenGroupTest(t, config.GateEnforce)
+	a1 := testLevel(t, gdb, "A1", 2, 2, 2, 2)
+	a2 := testLevel(t, gdb, "A2", 2, 2, 2, 2)
+	for g := 0; g < 3; g++ {
+		setProgress(t, gdb, u.ID, a2[g][0], 2, nil)
+		setProgress(t, gdb, u.ID, a2[g][1], 1, nil)
+	}
+	hepsiBugunAcik(t, gdb, u.ID, "A1:1", "A1:2", "A1:3", "A1:4", "A2:4")
+
+	for n := 1; n <= 3; n++ {
+		if g := groupOf(t, app, "A2", n); g.IsUnlocked || !g.HasStarted || g.LockReason != services.LockReasonPreviousLevel {
+			t.Errorf("A2 grup %d = %+v, beklenen başlanmış ve kilitli previous_level", n, g)
+		}
+	}
+	if og := openGroups(t, app); og.OpenGroupCount != 0 || len(og.OpenGroups) != 0 {
+		t.Errorf("open-groups = %+v, beklenen boş (A2 grupları sayılmaz)", og)
+	}
+
+	// A1'de sınır yalnızca A1 gruplarıyla dolar.
+	seeGroup(t, app, a1[0])
+	seeGroup(t, app, a1[1])
+	if g := groupOf(t, app, "A1", 3); !g.IsUnlocked || g.LockReason != "" {
+		t.Errorf("A1 grup 3 = %+v, beklenen açık", g)
+	}
+	seeGroup(t, app, a1[2])
+	if g := groupOf(t, app, "A1", 4); g.IsUnlocked || g.LockReason != services.LockReasonOpenGroupLimit {
+		t.Errorf("A1 grup 4 = %+v, beklenen kilitli open_group_limit", g)
+	}
+	og := openGroups(t, app)
+	if og.OpenGroupCount != 3 || openGroupKeys(og) != "A1:1,A1:2,A1:3" {
+		t.Errorf("open-groups = %+v, beklenen A1:1,A1:2,A1:3", og)
+	}
+	// Önceki seviyesi bitmemiş başlanmamış grup başlasa da sayılmaz: sınır
+	// ona uygulanmaz, ret nedeni haritadaki gibi önceki seviyedir.
+	status, body := send(t, app, learnRequest(fiber.Map{"wordId": a2[3][0].ID}))
+	if status != fiber.StatusForbidden || gateCode(body) != "gate_required" {
+		t.Errorf("A2:4 learn status = %d (body: %v), beklenen 403 gate_required (map_locked)", status, body)
+	}
+
+	// A1 tamamlanınca A2'nin başlanmış grupları açılır ve sayılır.
+	if err := gdb.Model(&models.WordProgress{}).Where("user_id = ? AND level = ?", u.ID, "A1").
+		Update("box", 2).Error; err != nil {
+		t.Fatalf("A1 kayıtları güncellenemedi: %v", err)
+	}
+	for _, w := range a1[3] {
+		setProgress(t, gdb, u.ID, w, 2, nil)
+	}
+	og = openGroups(t, app)
+	if og.OpenGroupCount != 3 || openGroupKeys(og) != "A2:1,A2:2,A2:3" {
+		t.Errorf("A1 bitince open-groups = %+v, beklenen A2:1,A2:2,A2:3", og)
+	}
+	if g := groupOf(t, app, "A2", 1); !g.IsUnlocked || g.LockReason != "" {
+		t.Errorf("A1 bitince A2 grup 1 = %+v, beklenen açık", g)
+	}
+	if g := groupOf(t, app, "A2", 4); g.IsUnlocked || g.LockReason != services.LockReasonOpenGroupLimit {
+		t.Errorf("A1 bitince A2 grup 4 = %+v, beklenen kilitli open_group_limit", g)
+	}
+}
+
+func TestAcikGrup_SozlugeEklenenGrupKullaniciyiTakmaz(t *testing.T) {
+	// A1 tamamlanmış (rozet yok), A2'de üç açık grup var: sınır dolu. Sözlüğe
+	// sonradan A1'e bir grup eklenince A1 yeniden tamamlanmamış sayılır ve
+	// A2 grupları previous_level ile kilitlenir. Sayılmadıkları için A1'in
+	// yeni grubu açılır; kullanıcı onu bitirince A2'ye döner.
+	gdb, u, app := newOpenGroupTest(t, config.GateEnforce)
+	a1 := testLevel(t, gdb, "A1", 2)
+	a2 := testLevel(t, gdb, "A2", 2, 2, 2)
+	for _, w := range a1[0] {
+		setProgress(t, gdb, u.ID, w, 2, nil)
+	}
+	for g := 0; g < 3; g++ {
+		setProgress(t, gdb, u.ID, a2[g][0], 2, nil)
+		setProgress(t, gdb, u.ID, a2[g][1], 1, nil)
+	}
+	hepsiBugunAcik(t, gdb, u.ID, "A1:2")
+	if og := openGroups(t, app); og.OpenGroupCount != 3 {
+		t.Fatalf("kurulum: openGroupCount = %d, beklenen 3", og.OpenGroupCount)
+	}
+
+	added := []models.DictionaryWord{
+		testDictWord(t, gdb, "itest_A1_2_1", "A1", 2, 1),
+		testDictWord(t, gdb, "itest_A1_2_2", "A1", 2, 2),
+	}
+	if g := groupOf(t, app, "A2", 1); g.IsUnlocked || g.LockReason != services.LockReasonPreviousLevel {
+		t.Errorf("A2 grup 1 = %+v, beklenen kilitli previous_level", g)
+	}
+	if og := openGroups(t, app); og.OpenGroupCount != 0 || len(og.OpenGroups) != 0 {
+		t.Errorf("open-groups = %+v, beklenen boş", og)
+	}
+	if g := groupOf(t, app, "A1", 2); !g.IsUnlocked || g.LockReason != "" {
+		t.Errorf("eklenen A1 grup 2 = %+v, beklenen açık", g)
+	}
+	for _, w := range added {
+		if status, body := send(t, app, learnRequest(fiber.Map{"wordId": w.ID})); status != fiber.StatusOK {
+			t.Fatalf("eklenen grup learn %s status = %d (body: %v)", w.ID, status, body)
+		}
+	}
+	og := openGroups(t, app)
+	if og.OpenGroupCount != 3 || openGroupKeys(og) != "A2:1,A2:2,A2:3" {
+		t.Errorf("A1 yeniden bitince open-groups = %+v, beklenen A2:1,A2:2,A2:3", og)
+	}
+}
+
 func TestAcikGrup_GrupAcilisiSinirDoluykenHakYakmaz(t *testing.T) {
 	gdb, u, app := newOpenGroupTest(t, config.GateEnforce)
 	a1 := testLevel(t, gdb, "A1", 2, 2, 2, 2)

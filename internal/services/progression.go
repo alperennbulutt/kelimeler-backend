@@ -86,8 +86,9 @@ func sign(n int) int {
 // MaxOpenGroups, aynı anda açık kalabilecek grup sayısıdır. Açık grup:
 // başlanmış (en az bir kelimesinin ilerleme kaydı var) ama tamamlanmamış
 // (kaydı olmayan ya da kutu 1'de kelimesi kalan) grup; bütün seviyeler
-// birlikte sayılır. Sınır doluyken başlanmamış bir grup açılamaz, açık
-// gruplardan biri tamamlanınca yer açılır.
+// birlikte sayılır. Önceki seviyesi tamamlanmamış (LockReasonPreviousLevel
+// ile kilitli) seviyenin grupları sayılmaz. Sınır doluyken başlanmamış bir
+// grup açılamaz, açık gruplardan biri tamamlanınca yer açılır.
 const MaxOpenGroups = 3
 
 // Haritada kilitli bir grubun kilit nedeni (LevelGroupDTO.lockReason). Açık
