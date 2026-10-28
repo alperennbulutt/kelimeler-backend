@@ -161,6 +161,7 @@ func migrate(gdb *gorm.DB) error {
 		&models.WordProgress{},
 		&models.DailyLogin{},
 		&models.EarnedBadge{},
+		&models.DictionaryPatchApplied{},
 	); err != nil {
 		return err
 	}
@@ -174,7 +175,9 @@ var ErrSeedFileMissing = errors.New("seed dosyası okunamadı")
 
 // SeedDictionaryIfEmpty, dictionary_words tablosu boşsa verilen SQL seed dosyasını
 // yükler ve yüklenen kelime sayısını döner. Production'da imaja gömülü
-// /seed/dictionary_words.sql ile ilk veriyi doldurur. Tablo zaten doluysa
+// /seed/dictionary_words.sql ile ilk veriyi doldurur. Sonraki içerik
+// düzeltmeleri bu dosyaya da işlenir ama dolu tabloya ancak sözlük yamalarıyla
+// (ApplyDictionaryPatches) ulaşır. Tablo zaten doluysa
 // (0, nil) döner; idempotenttir.
 //
 // Tablo boş kaldığı her durum hatadır (sayım hatası, dosya yok, INSERT/commit
