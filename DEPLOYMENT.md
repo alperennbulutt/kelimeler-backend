@@ -396,7 +396,7 @@ Kaynak: `git diff 6b85321..HEAD -- internal/models`. Yalnızca `refresh_tokens` 
 - **Reklam kapısı (`GATE_ENFORCEMENT`):** `log` kipinde ihlal loglanır ve Sentry'ye bilgi olarak gider, istek kabul edilir. `enforce` kipinde öğrenme `403 gate_required`, tekrar cevabı `403 review_gate_required` ile reddedilir.
   - **Günde bir ücretsiz grup:** `POST /users/me/usage/group-started` (gövdeli) bugün zaten ücretsiz bir grup açılmışken başka bir grup için gelirse ihlaldir (`reason=free_group_reused`): `off`'ta kabul, `log`'da kabul + rapor, `enforce`'ta `403 gate_required` ve hiçbir şey yazılmaz. Aynı gruba yeniden istek (yanıtı kaybolan deneme) ihlal değildir. Yayındaki istemci bu ucu yalnızca `groupsStartedTodayCount == 0` iken çağırır; dürüst kullanımda yalnızca iki cihazdan aynı anda farklı gruba ilk girişte görülebilir.
   - **İhlal kaydı:** Her ihlal tek satırdır: `gate_violation kind=<learn|review> reason=<neden> mode=<kip> user=<id> request_id=<id> app_version=<sürüm> ...`. `app_version`, istemcinin isteğe bağlı `X-App-Version` başlığıdır (ör. `1.0.3+57`); başlık yoksa `eski` (yayındaki istemci göndermez), geçersizse `gecersiz`. Sentry olayı aynı bilgiyi `gate_kind`, `gate_reason`, `gate_mode`, `app_version` etiketleriyle taşır.
-  - **Nedenler:** `group_not_unlocked` (grup bugün açılmadı), `map_locked` (grup haritada kilitli), `free_group_reused` (günün ücretsiz hakkı zaten kullanıldı), `review_checkpoint` (tekrar kapısı geçilmedi), `rollover_expired` (grup satırın son yazıldığı geçmiş günde açılmıştı ve gece yarısından sonraki 1 saatlik tolerans bitti: öğrenme sayfası gece boyunca açık kalan dürüst istemci de bunu üretir).
+  - **Nedenler:** `group_not_unlocked` (grup bugün açılmadı), `map_locked` (grup haritada kilitli), `free_group_reused` (günün ücretsiz hakkı zaten kullanıldı), `review_checkpoint` (tekrar kapısı geçilmedi), `rollover_expired` (grup satırın son yazıldığı geçmiş günde açılmıştı ve gece yarısından sonraki 1 saatlik tolerans bitti: öğrenme sayfası gece boyunca açık kalan dürüst istemci de bunu üretir), `open_group_limit` (3 açık grup varken başlanmamış bir grup açılmak istendi; bu nedenin ret kodu `gate_required` değil `403 open_group_limit`'tir, bkz. "Grup açma kuralı" bölümü).
   - **Sınır:** Reklam kayıtları (`group-unlocked-by-ad`, `review-ad-pass`) sunucuda doğrulanamaz (AdMob sunucu tarafı doğrulaması, SSV, yok). `enforce` yalnızca kaydı hiç yapmayan ya da ücretsiz hakkı yeniden kullanan istemcileri durdurur; reklam izlemeden kayıt çağrısını yapan değiştirilmiş bir istemciyi durduramaz.
 
 ### Güvenli yayın sırası
@@ -512,3 +512,50 @@ docker exec <container> /cleanup-guests --inactive-days 365 --apply
 ```
 
 Lokalde: `make cleanup-guests` (rapor) ve `make cleanup-guests ARGS="--apply"`. Çıktının sonunda `silindi: N, atlandı (bu arada etkinleşti): M, hata: K` yazar; hata varsa çıkış kodu 1'dir ve satırlar `HATA <id>: ...` ile listelenir. Çalıştırmadan önce taze bir yedek al (PostgreSQL → Backups → Backup Now): silme geri alınamaz.
+
+---
+
+## Grup açma kuralı ("görüldü") ve açık grup sınırı: sürüm notları
+
+Ürün kararı: kullanıcı bir grubun bütün kelimelerini bir kez cevapladıysa ("Biliyorum" ya da "Bilmiyorum") seviyedeki sonraki grup açılır; bilmediği kelimeler kalsa da beklemez. Aynı anda en fazla **3** grup açık kalabilir (`services.MaxOpenGroups`). Yayındaki mobil istemci için geriye dönük uyumludur: yanıtlara yalnızca alan eklendi, eski alanların anlamı değişmedi, eski uçlar çalışır.
+
+### Tanımlar
+
+- **Görüldü:** grubun bütün kelimelerinin ilerleme kaydı var (kutu fark etmez; "Bilmiyorum" denen yeni kelime kutu 1'de kaydedilir, bkz. `POST /progress/unknown`).
+- **Tamamlandı (değişmedi):** grupta kaydı olmayan ya da kutu 1'de kelime kalmadı. Tamamlanan grup görülmüştür de.
+- **Açık grup:** başlanmış (en az bir kayıt) ama tamamlanmamış grup; bütün seviyeler birlikte sayılır.
+- **Kilit:** önceki seviye tamamlanmadıysa seviyenin bütün grupları kilitli (değişmedi). Başlanmış grup her zaman açık. Başlanmamış grup, seviyedeki önceki grup **görüldüyse** (eskiden: tamamlandıysa) ve açık grup sayısı 3'ten azsa açık.
+- **Seviye tamamlama ve rozetler değişmedi:** seviye = bütün grupları tamamlandı.
+
+### Yeni ve değişen uçlar
+
+| Uç | Ne değişti |
+|---|---|
+| `GET /map/levels/:level/groups` | Her gruba `isSeen` (bool), `seenWords` (kaydı olan kelime sayısı) ve `lockReason` eklendi: `""` (açık), `"previous_level"`, `"previous_not_seen"`, `"open_group_limit"`. Eski alanlar (`isUnlocked`, `isCompleted`, `hasStarted`, `remainingInBox1`, `totalWords`) aynı anlamda. Önceki grubu görülmüş ama tamamlanmamış başlanmamış grup artık `isUnlocked: true` |
+| `GET /map/open-groups` | Yeni. `200 {"openGroupCount":2,"maxOpenGroups":3,"openGroups":[{"level":"A1","group":2,"totalWords":50,"remainingInBox1":7}]}`; liste seviye ve grup sırasında, boşsa `[]` |
+| `POST /progress/unknown` | Yeni. Gövde `{"wordId"}`: kaydı olmayan kelimeye "Bilmiyorum". Kelimeyi kutu 1'de kaydeder (`wrongCount: 1`), yanıt learn'ünkiyle aynı biçimde kelime ilerlemesi. Kaydı olan kelimede hiçbir şey değiştirmez, mevcut kaydı döner (idempotent; kutu 1'e geri atmaz). Learn ile aynı kapıdan geçer. Hatalar: `400 invalid_request`, `404 unknown_word`, `403 gate_required`, `403 open_group_limit` |
+| `POST /progress/learn` | Sınır doluyken başlanmamış grubun ilk kelimesi ihlaldir (`reason=open_group_limit`); `enforce`'ta `403 open_group_limit` |
+| `POST /progress/swipe` | Kutu 1'deki kelimeye sağ (öğrenme) artık learn gibi günlük grup kapısından geçer (`enforce`'ta `403 gate_required`). Kutu 1 kaydı "Bilmiyorum" ile yazılabildiği için gerekli: aksi halde grup bir kez açılıp sonraki günlerde reklamsız öğrenilirdi. Kutu 1 sol ve tekrar cevapları değişmedi |
+| `POST /users/me/usage/group-started`, `/group-unlocked-by-ad` (gövdeli) | Sınır doluyken başlanmamış grup için ihlal (`reason=open_group_limit`, ücretsiz hak ihlalinden önce gelir); `enforce`'ta `403 open_group_limit` ve hiçbir sayaç yazılmaz (hak ya da reklam sayılmaz). Gövdesiz istek değişmedi |
+| `PUT /users/me/current-group` | İleri yazım, sınır doluyken başlanmamış gruba `403 open_group_limit` döner ve hiçbir alan değişmez (kipten bağımsız; işaretçi kilitli gruba konmaz). Geri ve aynı gruba yazım değişmedi |
+| `POST /users/me/advance-group` | Yanıta `blockedReason` eklendi (`""` ya da `"open_group_limit"`). Gövdeli istek (`{"level","group"}`) artık grup görüldüğünde de gönderilebilir; işaretçi o gruptaysa ilerler. Sonraki grup başlanmamışsa ve sınır doluysa işaretçi yerinde kalır, `blockedReason: "open_group_limit"` döner (kipten bağımsız); yer açılınca aynı istek ilerletir. Gövdesiz istek (yayındaki istemci) eskisi gibi yalnızca işaretçideki grup **tamamlanmışsa** ilerler |
+
+### Kapı kipleri (`GATE_ENFORCEMENT`)
+
+Açık grup sınırı, haritanın sıralı kilidi (`map_locked`) gibi kapı kipine bağlıdır: `off`'ta denetlenmez, `log`'da kabul edilip raporlanır (`gate_violation ... reason=open_group_limit`), `enforce`'ta `403 open_group_limit` ile reddedilir. İşaretçi uçları (`current-group`, `advance-group`) kipten bağımsızdır. `TEST_MODE_UNLOCK_ALL=true` sınırı da kapatır. Neden `open_group_limit` sprint 1 notlarındaki "Nedenler" listesine eklendi.
+
+Dürüst istemci haritada kilitli gruba girmediği için ihlal üretmez. Yayındaki istemci "Bilmiyorum"u yazmadığı için onun kullanıcısında "görüldü" pratikte "tamamlandı" ile aynıdır ve en fazla bir açık grup oluşur; sınır ona hiç takılmaz. Yayındaki istemci `open_group_limit` kodunu tanımaz, genel hata gösterir (kabul edilen durum).
+
+### Veritabanı
+
+Şema değişikliği yok. Açık grup sayımı kullanıcının kaydı olan grupları tarar; harita isteğinde ve başlanmamış grubun ilk kelimesinde birer sorgu eklenir.
+
+### Yayın sırası
+
+1. Backend'i deploy et. Doğrulama: `GET /api/v1/map/open-groups` (token ile) `200` ve `maxOpenGroups: 3` dönmeli; harita yanıtında `lockReason` alanı görünmeli.
+2. "Bilmiyorum"u `POST /progress/unknown` ile yazan mobil sürümü backend canlıdayken yayınla, **önce değil**: eski backend'de uç `404` döner ve "Bilmiyorum" kaydedilmez (grup görülmüş sayılmaz, sonraki grup eskisi gibi tamamlanınca açılır).
+3. `log` kipinde birkaç gün `reason=open_group_limit` satırlarına bak: yeni istemciden gelmemeli.
+
+### Geri alma
+
+Bir önceki commit'i deploy etmek şemayı bozmaz. Eski sunucu kutu 1 kayıtlarını "kalan" sayar: "Bilmiyorum" ile kaydedilmiş kelimeler kalan sayılmaya devam eder, ama sonraki grup yeniden yalnızca önceki grup tamamlanınca açılır. Sınırla yeni açılmış (başlanmış) gruplar başlanmış olduğu için açık kalır. Yeni istemcinin `/progress/unknown` ve `/map/open-groups` çağrıları `404` alır.
