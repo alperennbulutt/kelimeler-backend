@@ -739,3 +739,33 @@ func TestAcikGrup_OncekiSeviyeBitinceSinirAsilirAdvanceBekler(t *testing.T) {
 	status, resp = send(t, app, advanceRequest(body))
 	assertAdvanceResult(t, gdb, u.ID, status, resp, "A2", 6, false, "")
 }
+
+func TestAdvanceGroup_GovdeliSeviyeSonuSinirDoluykenBekler(t *testing.T) {
+	// Seviye tamamlanınca da sonraki seviyenin ilk grubu sınırdan geçmelidir.
+	// Taşınmış veri: A1 bitmeden A2'nin 2-4. gruplarında kayıt var (görülmüş,
+	// her birinde bir kelime kutu 1'de). A1 bitince bunlar sayılır (3/3):
+	// gövdeli advance işaretçiyi A1'in son grubunda tutar, levelChanged false,
+	// blockedReason "open_group_limit" olur. Bir grup tamamlanınca aynı istek
+	// A2'ye geçirir.
+	gdb, u, app := newOpenGroupTest(t, config.GateEnforce)
+	a1 := testLevel(t, gdb, "A1", 2, 2)
+	a2 := testLevel(t, gdb, "A2", 2, 2, 2, 2, 2)
+	for g := 1; g <= 3; g++ {
+		setProgress(t, gdb, u.ID, a2[g][0], 2, nil)
+		setProgress(t, gdb, u.ID, a2[g][1], 1, nil)
+	}
+	completeGroup(t, gdb, u.ID, a1[0])
+	completeGroup(t, gdb, u.ID, a1[1])
+	setPointer(t, gdb, u.ID, "A1", 2)
+	body := fiber.Map{"level": "A1", "group": 2}
+
+	status, resp := send(t, app, advanceRequest(body))
+	assertAdvanceResult(t, gdb, u.ID, status, resp, "A1", 2, false, "open_group_limit")
+
+	if err := gdb.Model(&models.WordProgress{}).Where("user_id = ? AND word_id = ?", u.ID, a2[1][1].ID).
+		Update("box", 2).Error; err != nil {
+		t.Fatalf("kayıt güncellenemedi: %v", err)
+	}
+	status, resp = send(t, app, advanceRequest(body))
+	assertAdvanceResult(t, gdb, u.ID, status, resp, "A2", 1, true, "")
+}
