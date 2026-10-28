@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"kelimeler-backend/internal/config"
 	"kelimeler-backend/internal/dto"
@@ -334,6 +335,40 @@ func TestAcikGrup_UcAcikGrupDorduncuyuKilitler(t *testing.T) {
 	}
 	if og := openGroups(t, app); og.OpenGroupCount != 3 {
 		t.Errorf("openGroupCount = %d, beklenen 3", og.OpenGroupCount)
+	}
+}
+
+func TestAcikGrup_SeviyelerBirlikteSayilir(t *testing.T) {
+	// Sınır bütün seviyelerin açık gruplarını birlikte sayar; open-groups
+	// listesi seviye, sonra grup sırasındadır. A1 rozetle tamamlanmış
+	// sayılır ama A1:1'de kutu 1'de bir kelime kalmış (ör. eski kayıt):
+	// A1:1 açık grup olarak A2'deki sınırı da doldurur.
+	gdb, u, app := newOpenGroupTest(t, config.GateEnforce)
+	a1 := testLevel(t, gdb, "A1", 2)
+	a2 := testLevel(t, gdb, "A2", 2, 2, 2)
+	if err := gdb.Create(&models.EarnedBadge{UserID: u.ID, BadgeID: "level_A1", EarnedAt: time.Now()}).Error; err != nil {
+		t.Fatalf("rozet yazılamadı: %v", err)
+	}
+	setProgress(t, gdb, u.ID, a1[0][0], 2, nil)
+	setProgress(t, gdb, u.ID, a1[0][1], 1, nil)
+	hepsiBugunAcik(t, gdb, u.ID, "A2:1", "A2:2", "A2:3")
+	seeGroup(t, app, a2[0])
+	seeGroup(t, app, a2[1])
+
+	if g := groupOf(t, app, "A2", 3); g.IsUnlocked || g.LockReason != services.LockReasonOpenGroupLimit {
+		t.Errorf("A2 grup 3 = %+v, beklenen kilitli open_group_limit", g)
+	}
+	og := openGroups(t, app)
+	var got []string
+	for _, g := range og.OpenGroups {
+		got = append(got, fmt.Sprintf("%s:%d", g.Level, g.Group))
+	}
+	if og.OpenGroupCount != 3 || strings.Join(got, ",") != "A1:1,A2:1,A2:2" {
+		t.Errorf("open-groups = %+v, beklenen A1:1,A2:1,A2:2", og)
+	}
+	status, body := send(t, app, learnRequest(fiber.Map{"wordId": a2[2][0].ID}))
+	if status != fiber.StatusForbidden || gateCode(body) != "open_group_limit" {
+		t.Errorf("A2:3 learn status = %d (body: %v), beklenen 403 open_group_limit", status, body)
 	}
 }
 
