@@ -1,0 +1,140 @@
+{
+  "description": "Sözlük dil denetimi, tur 2 sonu: 2. tur yamalarından çakışma yüzünden çıkarılan 8 kart ve C2'deki 'while' kartı (9 kart). Kart id'leri, seviye, grup ve sıra değişmez.",
+  "changes": [
+    {
+      "id": "C1_8_36",
+      "old": {
+        "english": "computational accuracy validation",
+        "turkish": "hesaplama doğruluğu doğrulaması",
+        "example": "Computational accuracy validation prevents error."
+      },
+      "new": {
+        "english": "cache",
+        "turkish": "önbellek",
+        "example": "Clearing the cache made the app faster."
+      },
+      "kind": "uydurma_yerine_gercek",
+      "reason": "Uydurma öbek; 2. turda önerilen 'plug-in' B1'deki 'plugin' ile çakıştığı için yamadan çıkmıştı."
+    },
+    {
+      "id": "C1_8_24",
+      "old": {
+        "english": "machine learning pipeline",
+        "turkish": "makine öğrenmesi hattı",
+        "example": "Machine learning pipeline automates processing."
+      },
+      "new": {
+        "english": "reboot",
+        "turkish": "yeniden başlatmak",
+        "example": "We had to reboot the server after the update."
+      },
+      "kind": "uydurma_yerine_gercek",
+      "reason": "'machine learning pipeline' doğal bir terim değil; 'open source' B1 kartıyla çakışıyordu."
+    },
+    {
+      "id": "C1_13_37",
+      "old": {
+        "english": "discursive boundary setting",
+        "turkish": "söylemsel sınır belirleme",
+        "example": "Discursive boundary setting limits debate."
+      },
+      "new": {
+        "english": "fact-check",
+        "turkish": "doğruluğunu kontrol etmek",
+        "example": "Reporters must fact-check every claim before publishing."
+      },
+      "kind": "uydurma_yerine_gercek",
+      "reason": "Uydurma öbek; 'shadow ban' C2'deki 'shadowban' ile çakışıyordu."
+    },
+    {
+      "id": "C1_20_69",
+      "old": {
+        "english": "lose momentum",
+        "turkish": "ivme kaybetmek",
+        "example": "The campaign lost momentum."
+      },
+      "new": {
+        "english": "keep the ball rolling",
+        "turkish": "işin devamını sağlamak",
+        "example": "Let's keep the ball rolling after today's meeting."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'lose momentum' B2_21_76 ile aynı; önerilen deyim A2'deki kartla çakışıyordu."
+    },
+    {
+      "id": "C1_20_44",
+      "old": {
+        "english": "call the shots",
+        "turkish": "kontrolü elinde tutmak",
+        "example": "She calls the shots now."
+      },
+      "new": {
+        "english": "fall at the first hurdle",
+        "turkish": "ilk engelde takılmak",
+        "example": "The proposal fell at the first hurdle."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'call the shots' B2'deki 'hold the reins' ile eş anlamlı; önerilen deyim B2 kartıyla çakışıyordu."
+    },
+    {
+      "id": "C1_5_6",
+      "old": {
+        "english": "analytical framework outline",
+        "turkish": "analitik çerçeve taslağı",
+        "example": "Analytical framework outline guides interpretation."
+      },
+      "new": {
+        "english": "endnote",
+        "turkish": "son not",
+        "example": "The original source is listed in an endnote."
+      },
+      "kind": "uydurma_yerine_gercek",
+      "reason": "Uydurma öbek; 'keywords' B1'deki 'key word' ile çakışıyordu."
+    },
+    {
+      "id": "B1_20_60",
+      "old": {
+        "english": "result monitoring",
+        "turkish": "sonuç izleme",
+        "example": "Result monitoring prevents mistakes."
+      },
+      "new": {
+        "english": "self-assessment",
+        "turkish": "öz değerlendirme",
+        "example": "A weekly self-assessment helps you see your progress."
+      },
+      "kind": "uydurma_yerine_gercek",
+      "reason": "Uydurma öbek; 'progress report' B2 kartıyla çakışıyordu."
+    },
+    {
+      "id": "B2_17_64",
+      "old": {
+        "english": "reader response perspective",
+        "turkish": "okur tepkisi bakış açısı",
+        "example": "Reader response perspective values interpretation."
+      },
+      "new": {
+        "english": "plot summary",
+        "turkish": "olay örgüsü özeti",
+        "example": "Write a short plot summary of the novel."
+      },
+      "kind": "uydurma_yerine_gercek",
+      "reason": "Uydurma öbek; 'book review' B1 kartıyla çakışıyordu."
+    },
+    {
+      "id": "C2_2_81",
+      "old": {
+        "english": "while",
+        "turkish": "bir süre",
+        "example": "We waited for a while."
+      },
+      "new": {
+        "english": "lest",
+        "turkish": "-mesin diye",
+        "example": "Speak softly, lest you wake the baby."
+      },
+      "kind": "seviye",
+      "reason": "'while' A2 düzeyinde ve B1'deki 'for a while' ile örtüşüyordu; grubun edebî/eski kelime konusuna uygun C2 kelimesi."
+    }
+  ]
+}
