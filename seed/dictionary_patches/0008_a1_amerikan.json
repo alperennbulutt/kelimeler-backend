@@ -1,0 +1,35 @@
+{
+  "description": "Sözlük: A1'de Amerikan İngilizcesine uyum (wash up anlamı, cinema → movie theater; 2 kart). Kart id'leri, seviye, grup ve sıra değişmez.",
+  "changes": [
+    {
+      "id": "A1_12_42",
+      "old": {
+        "english": "wash up",
+        "turkish": "bulaşık yıkamak",
+        "example": "I wash up after lunch."
+      },
+      "new": {
+        "english": "wash up",
+        "turkish": "elini yüzünü yıkamak",
+        "example": "Please wash up before dinner."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "Amerikan İngilizcesinde 'wash up' el yüz yıkamaktır; 'bulaşık yıkamak' İngiliz kullanımı ve A2_1_26 'wash the dishes' ile aynı anlamdaydı."
+    },
+    {
+      "id": "A1_6_28",
+      "old": {
+        "english": "cinema",
+        "turkish": "sinema",
+        "example": "We go to the cinema."
+      },
+      "new": {
+        "english": "movie theater",
+        "turkish": "sinema",
+        "example": "We go to the movie theater on Saturdays."
+      },
+      "kind": "yazim",
+      "reason": "Amerikan İngilizcesi esas alınır: 'cinema' yerine 'movie theater'."
+    }
+  ]
+}
