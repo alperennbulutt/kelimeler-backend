@@ -214,7 +214,7 @@ Doğrula:
 
 - İlk açılışın deploy logunda `db: seed tamamlandı, 9980 kelime yüklendi` satırı ve ardından her yama için `db: sözlük yaması <ad> uygulandı (...)` satırı var. Yeni kurulumda seed yamaların değerlerini zaten taşıdığından bu satır `0 kart değişti` der. Canlıdaki mevcut sözlükte `0001_kritik_ve_a1` ilk kez uygulanırken `136 kart, 136 kart değişti` beklenir; `uyarı:` satırı çıkmamalı.
 
-> **İlk deploy'da 6 yama birden uygulanır** (toplam 5524 kart; sözlüğün yarısından fazlası değişir). **Öncesinde mutlaka yedek al:** PostgreSQL kaynağı → Backups → **Backup Now**, satır "Success" olmalı. Yama geri alınabilir ama tek adımda geri dönüşün yolu bu yedektir. Logda sırasıyla şu satırlar beklenir (`N ilerleme satırının metni eşitlendi` kullanıcı sayısına göre değişir), hiçbir `uyarı:` satırı çıkmamalı:
+> **İlk deploy'da 8 yama birden uygulanır** (toplam 5534 kart; sözlüğün yarısından fazlası değişir). **Öncesinde mutlaka yedek al:** PostgreSQL kaynağı → Backups → **Backup Now**, satır "Success" olmalı. Yama geri alınabilir ama tek adımda geri dönüşün yolu bu yedektir. Logda sırasıyla şu satırlar beklenir (`N ilerleme satırının metni eşitlendi` kullanıcı sayısına göre değişir), hiçbir `uyarı:` satırı çıkmamalı:
 >
 > | Yama | Beklenen log |
 > |---|---|
@@ -224,8 +224,10 @@ Doğrula:
 > | `0004_b2` | `1448 kart, 1448 kart değişti` |
 > | `0005_c1` | `1701 kart, 1701 kart değişti` |
 > | `0006_c2` | `1144 kart, 1144 kart değişti` |
+> | `0007_tur2_kalanlar` | `8 kart, 8 kart değişti` |
+> | `0008_a1_amerikan` | `2 kart, 2 kart değişti` |
 >
-> Sonra `SELECT name, words, updated FROM dictionary_patches_applied ORDER BY name;` 6 satır döner. İçeriği değişen kartlarda kullanıcının ilerlemesi (kutu, tarihler) o karta bağlı kalır, kartta artık yeni kelime görünür (aşağıda "Kullanıcı ilerlemesi").
+> Sonra `SELECT name, words, updated FROM dictionary_patches_applied ORDER BY name;` 8 satır döner. İçeriği değişen kartlarda kullanıcının ilerlemesi (kutu, tarihler) o karta bağlı kalır, kartta artık yeni kelime görünür (aşağıda "Kullanıcı ilerlemesi").
 - `https://<domain>/api/v1/health` yanıtında `"dictionaryWords":9980` görünüyor. Yamalar kart eklemez ya da silmez, bu sayı değişmez.
 - PostgreSQL terminalinde: `SELECT name, words, updated, applied_at FROM dictionary_patches_applied ORDER BY name;`
 

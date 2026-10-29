@@ -159,12 +159,12 @@
         "example": "While time passed, hope endured."
       },
       "new": {
-        "english": "while",
-        "turkish": "bir süre",
-        "example": "We waited for a while."
+        "english": "lest",
+        "turkish": "-mesin diye",
+        "example": "Speak softly, lest you wake the baby."
       },
-      "kind": "anlam_duzeltme",
-      "reason": "Türkçe isim ('süre') verilmiş ama örnekte 'while' bağlaçtı; isim anlamı ('a while' = bir süre) ve onu gösteren örnek verildi. Bağlaç anlamı A2'de zaten var."
+      "kind": "seviye",
+      "reason": "'while' A2 düzeyinde (C2'de yanlış seviye) ve B1'deki 'for a while' ile örtüşüyordu; grubun edebî/eski kelime konusuna uygun C2 kelimesi 'lest' kondu."
     },
     {
       "id": "C2_2_25",

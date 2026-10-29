@@ -1,5 +1,5 @@
 {
-  "description": "Sözlük dil denetimi, tur 2 sonu: 2. tur yamalarından çakışma yüzünden çıkarılan 8 kart ve C2'deki 'while' kartı (9 kart). Kart id'leri, seviye, grup ve sıra değişmez.",
+  "description": "Sözlük dil denetimi, tur 2 sonu: 2. tur yamalarından çakışma yüzünden çıkarılan 8 kart. Kart id'leri, seviye, grup ve sıra değişmez.",
   "changes": [
     {
       "id": "C1_8_36",
@@ -120,21 +120,6 @@
       },
       "kind": "uydurma_yerine_gercek",
       "reason": "Uydurma öbek; 'book review' B1 kartıyla çakışıyordu."
-    },
-    {
-      "id": "C2_2_81",
-      "old": {
-        "english": "while",
-        "turkish": "bir süre",
-        "example": "We waited for a while."
-      },
-      "new": {
-        "english": "lest",
-        "turkish": "-mesin diye",
-        "example": "Speak softly, lest you wake the baby."
-      },
-      "kind": "seviye",
-      "reason": "'while' A2 düzeyinde ve B1'deki 'for a while' ile örtüşüyordu; grubun edebî/eski kelime konusuna uygun C2 kelimesi."
     }
   ]
 }
