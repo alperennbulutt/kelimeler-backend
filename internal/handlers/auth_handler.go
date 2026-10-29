@@ -539,11 +539,14 @@ func providerEmail(si *auth.SocialIdentity) string {
 // İlk giriş aynı anda iki kez gelirse (çift dokunuş, yeniden deneme) ikinci
 // istek kullanıcıyı ya da kimliği yazarken unique kısıta çarpar. Kısıt ancak
 // öteki istek commit edince ihlal verir; bu yüzden bir kez yeniden okumak
-// öteki isteğin açtığı hesabı bulur ve aynı kullanıcı döner. Hesap, kimlikleri
-// kilitlenene kadar değişmişse (aynı anda süren bir geri alma adresi taşıdı;
-// errAccountChanged) ya da PostgreSQL kilitlenme (40P01) ile işlemi iptal
-// ettiyse de bir kez yeniden denenir: transaction geri alındığı için deneme
-// temiz başlar.
+// öteki isteğin açtığı hesabı bulur ve aynı kullanıcı döner. Öteki istek, bu
+// isteğin subject araması ile e-postayla araması arasında commit ettiyse kısıta
+// çarpılmaz: e-postayla bulunan hesapta bu isteğin kimliği (aynı sağlayıcı, aynı
+// subject) görünür ve hesap döner; bu, 409 verilen "aynı sağlayıcının başka bir
+// kimliği" sayılmaz. Hesap, kimlikleri kilitlenene kadar değişmişse (aynı anda
+// süren bir geri alma adresi taşıdı; errAccountChanged) ya da PostgreSQL
+// kilitlenme (40P01) ile işlemi iptal ettiyse de bir kez yeniden denenir:
+// transaction geri alındığı için deneme temiz başlar.
 func (h *Handlers) authenticateSocial(provider string, si *auth.SocialIdentity, displayName string) (*models.User, error) {
 	user, err := h.authenticateSocialOnce(provider, si, displayName)
 	if isUniqueViolation(err) || errors.Is(err, errAccountChanged) || isDeadlock(err) {
@@ -614,6 +617,17 @@ func (h *Handlers) authenticateSocialOnce(provider string, si *auth.SocialIdenti
 			}
 			if !strings.EqualFold(user.Email, email) {
 				return errAccountChanged
+			}
+			// Kimliğin kendisi bu hesapta olabilir: çift dokunuşta öteki istek,
+			// bu isteğin subject araması (transaction dışında, kimlik yoktu) ile
+			// e-postayla arama arasında commit ettiyse hesabı ve kimliği o açmıştır.
+			// Bu, aynı sağlayıcının başka bir kimliği değildir (409 değil); hesap
+			// olduğu gibi döner, hiçbir şey yazılmaz. Öteki istek kimliği bu hesaba
+			// bağladığına göre geri alma ya da devir de onda yapılmıştır.
+			for _, identity := range identities {
+				if identity.Provider == provider && identity.ProviderSubject != nil && *identity.ProviderSubject == si.Subject {
+					return nil
+				}
 			}
 
 			match, password := decideEmailMatch(identities, provider, email, verified)

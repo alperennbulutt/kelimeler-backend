@@ -1219,6 +1219,77 @@ func TestAuthenticateSocial_EszamanliIlkGirisAyniKullaniciyiDoner(t *testing.T) 
 	}
 }
 
+// Çift dokunuşun öteki sıralaması: öteki istek, bu isteğin subject araması
+// (transaction dışında, öteki commit etmeden önce: kimlik yok) ile e-postayla
+// arama (commit'ten sonra: öteki isteğin açtığı hesap) arasında commit eder.
+// Bu istek unique kısıta çarpmaz; e-postayla bulduğu hesapta kendi kimliğini
+// (aynı sağlayıcı, aynı subject) görür. Bu "aynı sağlayıcının başka bir
+// kimliği" değildir: 409 değil, aynı hesap dönmelidir.
+//
+// Sıralama, subject aramasından hemen sonra çalışan bir GORM geri çağrısıyla
+// kurulur (gdb bu teste özel bir havuzdur, geri çağrı başka testi etkilemez).
+func TestAuthenticateSocial_SubjectAramasindanSonraCommitEdilenIlkGirisAyniKullaniciyiDoner(t *testing.T) {
+	for _, c := range []struct {
+		ad    string
+		email func() string // sağlayıcının verdiği adres
+	}{
+		{"doğrulanmış adres", func() string { return benzersizEposta("cift-sira") }},
+		// Adres yoksa iki istek de aynı yer tutucu adresle (subject'ten) hesap açar.
+		{"adres yok", func() string { return "" }},
+	} {
+		t.Run(c.ad, func(t *testing.T) {
+			gdb := testDB(t)
+			h := New(gdb, &config.Config{AppEnv: "test"}, testTokens(), nil)
+
+			email := c.email()
+			si := &auth.SocialIdentity{Subject: "cift-sira-" + benzersizEposta("s"), Email: email}
+			kayitli := email
+			if kayitli == "" {
+				kayitli = dto.SyntheticEmail("apple_" + si.Subject)
+			}
+			t.Cleanup(func() { gdb.Delete(&models.User{}, "email = ?", kayitli) })
+
+			oteki := gdb.Begin()
+			defer oteki.Rollback()
+			ilk := models.User{Email: kayitli, DisplayName: "Çift", CurrentLevel: "A1", CurrentGroup: 1}
+			if err := oteki.Create(&ilk).Error; err != nil {
+				t.Fatalf("öteki istek kullanıcıyı yazamadı: %v", err)
+			}
+			sub := si.Subject
+			if err := oteki.Create(&models.AuthIdentity{UserID: ilk.ID, Provider: "apple",
+				ProviderSubject: &sub, Email: &kayitli, EmailVerified: email != ""}).Error; err != nil {
+				t.Fatalf("öteki istek kimliği yazamadı: %v", err)
+			}
+
+			var once sync.Once
+			commitErr := errors.New("öteki istek commit edilmedi")
+			if err := gdb.Callback().Query().After("gorm:query").Register("test:oteki_commit", func(tx *gorm.DB) {
+				if tx.Statement.Table == "auth_identities" {
+					once.Do(func() { commitErr = oteki.Commit().Error })
+				}
+			}); err != nil {
+				t.Fatalf("geri çağrı kaydedilemedi: %v", err)
+			}
+
+			got, err := h.authenticateSocial("apple", si, "")
+			if commitErr != nil {
+				t.Fatalf("sıralama kurulamadı: %v", commitErr)
+			}
+			if err != nil {
+				t.Fatalf("subject aramasından sonra commit edilen ilk giriş hata verdi: %v", err)
+			}
+			if got.ID != ilk.ID {
+				t.Errorf("kullanıcı = %s, beklenen öteki isteğin açtığı %s", got.ID, ilk.ID)
+			}
+			var n int64
+			gdb.Model(&models.AuthIdentity{}).Where("provider = 'apple' AND provider_subject = ?", sub).Count(&n)
+			if n != 1 {
+				t.Errorf("apple kimliği = %d satır, beklenen 1", n)
+			}
+		})
+	}
+}
+
 func linkApp(h *Handlers, userID, provider string, si *auth.SocialIdentity) *fiber.App {
 	app := fiber.New(fiber.Config{ErrorHandler: middleware.ErrorHandler})
 	app.Post("/link", func(c *fiber.Ctx) error { return h.linkProvider(c, userID, provider, si) })
