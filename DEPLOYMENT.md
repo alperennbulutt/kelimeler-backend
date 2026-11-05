@@ -125,6 +125,9 @@ Sunucu açılırken yapılandırmayı denetler. Şu durumlarda **açılmaz** (de
 - `APPLE_TEAM_ID`/`APPLE_KEY_ID`/`APPLE_PRIVATE_KEY`'den biri eksik (hesap silmede Apple token iptali yapılmaz) ya da anahtar geçersiz.
 - `GOOGLE_CLIENT_IDS` boş (her Google girişi reddedilir).
 - `TEST_MODE_UNLOCK_ALL=true` (tüm gruplar kilitsiz açılır, reklam kapıları devre dışı).
+- `MIN_APP_VERSION_IOS` ayarlı ama `APP_STORE_URL_IOS` boş ("Güncelle" butonu App Store'un ana sayfasını açar).
+
+Zorunlu güncelleme ayarlarındaki (`MIN_/LATEST_APP_VERSION_*`, `APP_STORE_URL_*`) geçersiz bir değer de açılışı engellemez: **her ortamda** `config: uyarı:` satırı düşer, Sentry'ye gider ve değer yok sayılır (o sınır uygulanmaz). Bkz. "Zorunlu güncelleme".
 
 Apple girişi açıkken (`APPLE_CLIENT_ID` dolu) revoke yapılandırılamadıysa açılış loguna ayrıca `!!! UYARI !!!` ile başlayan bir satır düşer ve Sentry'ye hata olarak gider: bu durumda hesap silme Apple'ın şart koştuğu token iptalini yapamaz (App Store 5.1.1(v)).
 
@@ -633,3 +636,34 @@ Dürüst istemci haritada kilitli gruba girmediği için ihlal üretmez. Yayınd
 ### Geri alma
 
 Bir önceki commit'i deploy etmek şemayı bozmaz. Eski sunucu kutu 1 kayıtlarını "kalan" sayar: "Bilmiyorum" ile kaydedilmiş kelimeler kalan sayılmaya devam eder, ama sonraki grup yeniden yalnızca önceki grup tamamlanınca açılır. Sınırla yeni açılmış (başlanmış) gruplar başlanmış olduğu için açık kalır. Yeni istemcinin `/progress/unknown` ve `/map/open-groups` çağrıları `404` alır.
+
+## Zorunlu güncelleme (en düşük uygulama sürümü)
+
+Sunucudan tek ayarla eski mobil sürümleri güncellemeye zorlamak içindir. Karar sunucuda verilir, istemci yalnızca sonucu uygular. Ayarların hepsi **isteğe bağlıdır**; hiçbiri girilmezse hiçbir istemci engellenmez. Açılış logunda geçerli değerler `sürüm denetimi ios: en düşük=... en güncel=... mağaza=...` satırlarında görünür.
+
+| Anahtar | Örnek | Anlamı |
+|---|---|---|
+| `MIN_APP_VERSION_IOS` | `1.0.0` | Altındaki iOS sürümleri zorunlu güncellemeye düşer |
+| `MIN_APP_VERSION_ANDROID` | `1.0.0+3` | Android için aynı |
+| `LATEST_APP_VERSION_IOS` | `1.1.0` | Altındakilere kapatılabilir "Yeni sürüm hazır" diyaloğu gösterilir (aynı sürüm için bir kez) |
+| `LATEST_APP_VERSION_ANDROID` | `1.1.0` | Android için aynı |
+| `APP_STORE_URL_IOS` | `https://apps.apple.com/app/id<numara>` | "Güncelle" butonunun açacağı adres. Boşsa uygulama App Store'un ana sayfasını açar |
+| `APP_STORE_URL_ANDROID` | (varsayılan) `https://play.google.com/store/apps/details?id=com.kaipra.kutularlaIngilizce` | Android adresi |
+
+**Sürüm karşılaştırma:** pubspec biçimi (`1.2.0+15`). Ad kısmı sayısal karşılaştırılır, eksik parça 0'dır (`1.2` = `1.2.0`). Sınır `+build` içeriyorsa adlar eşitken build de karşılaştırılır (`1.2.0+14` < `1.2.0+15`); sınırda build yoksa yalnızca ad. Ayrıştırılamayan istemci sürümü, bilinmeyen platform ya da build'siz istemci sürümü build'li sınırla eşit adda ise istemci **engellenmez** (fail-open). Boş sınır = sınır yok.
+
+**Uçlar:**
+
+- `GET /api/v1/app/version-check?platform=ios|android&version=1.2.0+15` — kimliksiz, genel hız sınırına tabi, `Cache-Control: no-store`. Sorgu yoksa `X-App-Platform` / `X-App-Version` başlıkları okunur. Her zaman `200 {"updateRequired":bool,"updateAvailable":bool,"minVersion":"","latestVersion":"","storeUrl":""}`; eksik ya da bilinmeyen değerde iki bayrak `false` (400 dönmez). `updateRequired` iken `updateAvailable` da `true`'dur.
+- Diğer bütün `/api/v1` uçları (`/health` ve `/app/version-check` hariç): istek `X-App-Platform` **ve** `X-App-Version` taşıyorsa ve sürüm o platformun `MIN_APP_VERSION_*`'ının altındaysa `426 {"code":"upgrade_required","error":"Bu sürüm artık desteklenmiyor. Lütfen uygulamayı güncelleyin.","storeUrl":"..."}`. Denetim kimlik doğrulamadan önce çalışır (giriş uçları da dahil). Başlıklardan biri yoksa (yayındaki eski istemci) engellenmez.
+
+**Bir güncellemeyi zorlamak:**
+
+1. Yeni sürüm mağazada **yayında** olsun (incelemeden geçmiş ve kullanıcıya görünür). Önce değil: kullanıcı "Güncelle"ye basıp mağazada eski sürümü bulur ve uygulamaya giremez.
+2. Coolify → Environment'ta `MIN_APP_VERSION_IOS` / `MIN_APP_VERSION_ANDROID`'i yeni sürüme (gerekirse `+build` ile) ayarla.
+3. Redeploy et (ortam değişkenleri yalnızca açılışta okunur). Açılış logunda `sürüm denetimi` satırlarını ve `config: uyarı:` olmadığını kontrol et.
+4. Doğrula: `curl -s 'https://<domain>/api/v1/app/version-check?platform=ios&version=0.0.1'` → `"updateRequired":true`.
+
+Yumuşak duyuru için yalnızca `LATEST_APP_VERSION_*` ayarlanır. Geri almak için değişkeni boşalt (ya da eski değere çek) ve redeploy et.
+
+> `APP_STORE_URL_IOS`'u App Store kimliği (App Store Connect → Uygulama → Genel Bilgi → Apple ID) belli olunca bir kez gir: `https://apps.apple.com/app/id<Apple ID>`. Boşken `MIN_APP_VERSION_IOS` ayarlanırsa production açılış loguna uyarı düşer.

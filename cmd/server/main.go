@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"kelimeler-backend/internal/appversion"
 	"kelimeler-backend/internal/auth"
 	"kelimeler-backend/internal/config"
 	"kelimeler-backend/internal/db"
@@ -202,12 +203,8 @@ func run() (err error) {
 	// statik site kaynağına gerek yok.
 	web.Register(app)
 
-	api := app.Group("/api/v1")
-
-	// Genel hız sınırı: tüm API uçları için kullanıcı ya da IP başına.
-	api.Use(apiLimiter(cfg, tokens))
-
-	handlers.RegisterRoutes(api, h, tokens, authLimiter(cfg))
+	logAppVersions(cfg)
+	registerAPI(app, cfg, h, tokens)
 
 	addr := ":" + cfg.Port
 	ln, err := net.Listen("tcp", addr)
@@ -229,6 +226,39 @@ func run() (err error) {
 	defer stopCleanup()
 
 	return serve(ctx, app, ln, cfg.ShutdownTimeout)
+}
+
+// apiPrefix, bütün API uçlarının ortak yoludur.
+const apiPrefix = "/api/v1"
+
+// registerAPI, API grubunu ara katmanlarıyla birlikte kurar. Sıra:
+//
+//	genel hız sınırı → zorunlu güncelleme (426) → rota (auth, sıkı sınır, handler)
+//
+// Sürüm denetimi kimlik doğrulamadan önce çalışır ki eski istemci giriş
+// uçlarında da 426 alsın. Sağlık kontrolü ve sürüm kontrolü ondan muaftır.
+func registerAPI(app *fiber.App, cfg *config.Config, h *handlers.Handlers, tokens *auth.TokenService) {
+	api := app.Group(apiPrefix)
+
+	// Genel hız sınırı: tüm API uçları için kullanıcı ya da IP başına.
+	api.Use(apiLimiter(cfg, tokens))
+
+	api.Use(middleware.RequireAppVersion(cfg.AppVersions, handlers.AppVersionExempt(apiPrefix)...))
+
+	handlers.RegisterRoutes(api, h, tokens, authLimiter(cfg))
+}
+
+// logAppVersions, geçerli zorunlu güncelleme ayarlarını açılış loguna yazar:
+// bir redeploy'dan sonra sınırın gerçekten uygulandığı buradan görülür.
+func logAppVersions(cfg *config.Config) {
+	for _, p := range []struct {
+		ad   string
+		rule appversion.Rule
+	}{{"ios", cfg.AppVersions.IOS}, {"android", cfg.AppVersions.Android}} {
+		log.Printf("sürüm denetimi %s: en düşük=%s en güncel=%s mağaza=%s", p.ad,
+			orDefault(p.rule.Min.Raw, "yok"), orDefault(p.rule.Latest.Raw, "yok"),
+			orDefault(p.rule.StoreURL, "yok"))
+	}
 }
 
 // serve, uygulamayı ln üzerinde ctx iptal edilene kadar çalıştırır; sonra yeni
@@ -351,7 +381,8 @@ func corsConfig(cfg *config.Config) (corsCfg cors.Config, ok bool) {
 	if len(cfg.CORSAllowedOrigins) > 0 {
 		return cors.Config{
 			AllowOrigins: strings.Join(cfg.CORSAllowedOrigins, ","),
-			AllowHeaders: "Origin, Content-Type, Accept, Authorization, " + observability.AppVersionHeader,
+			AllowHeaders: "Origin, Content-Type, Accept, Authorization, " +
+				observability.AppVersionHeader + ", " + observability.AppPlatformHeader,
 			AllowMethods: "GET, POST, PUT, PATCH, DELETE, OPTIONS",
 		}, true
 	}

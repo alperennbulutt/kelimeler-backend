@@ -286,3 +286,155 @@ func TestFromEnv_GuestRefreshTokenTTL(t *testing.T) {
 		})
 	}
 }
+
+// Sürüm ayarlarını temizler: geliştiricinin ortamındaki değerler testi bozmasın.
+func surumAyarlariniTemizle(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{
+		"MIN_APP_VERSION_IOS", "MIN_APP_VERSION_ANDROID",
+		"LATEST_APP_VERSION_IOS", "LATEST_APP_VERSION_ANDROID",
+		"APP_STORE_URL_IOS", "APP_STORE_URL_ANDROID",
+	} {
+		t.Setenv(k, "")
+	}
+}
+
+func TestFromEnv_SurumAyarlariVarsayilan(t *testing.T) {
+	t.Setenv("APP_ENV", "development")
+	surumAyarlariniTemizle(t)
+
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv: %v", err)
+	}
+	p := cfg.AppVersions
+	if !p.IOS.Min.IsZero() || !p.IOS.Latest.IsZero() || !p.Android.Min.IsZero() || !p.Android.Latest.IsZero() {
+		t.Errorf("ayar yokken sınır var: %+v", p)
+	}
+	if p.IOS.StoreURL != "" {
+		t.Errorf("iOS mağaza adresi = %q, beklenen boş", p.IOS.StoreURL)
+	}
+	if p.Android.StoreURL != DefaultAppStoreURLAndroid {
+		t.Errorf("Android mağaza adresi = %q, beklenen varsayılan", p.Android.StoreURL)
+	}
+	if w := cfg.Warnings(); len(w) != 0 {
+		t.Errorf("Warnings() = %q, beklenen yok", w)
+	}
+}
+
+func TestFromEnv_SurumAyarlariOkunur(t *testing.T) {
+	t.Setenv("APP_ENV", "development")
+	surumAyarlariniTemizle(t)
+	t.Setenv("MIN_APP_VERSION_IOS", "1.0.0")
+	t.Setenv("LATEST_APP_VERSION_IOS", " 1.1.0 ")
+	t.Setenv("MIN_APP_VERSION_ANDROID", "1.0.0+3")
+	t.Setenv("LATEST_APP_VERSION_ANDROID", "1.1.0")
+	t.Setenv("APP_STORE_URL_IOS", "https://apps.apple.com/app/id123")
+	t.Setenv("APP_STORE_URL_ANDROID", "https://play.google.com/store/apps/details?id=baska")
+
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv: %v", err)
+	}
+	p := cfg.AppVersions
+	for ad, c := range map[string][2]string{
+		"ios min":        {p.IOS.Min.Raw, "1.0.0"},
+		"ios latest":     {p.IOS.Latest.Raw, "1.1.0"},
+		"android min":    {p.Android.Min.Raw, "1.0.0+3"},
+		"android latest": {p.Android.Latest.Raw, "1.1.0"},
+		"ios url":        {p.IOS.StoreURL, "https://apps.apple.com/app/id123"},
+		"android url":    {p.Android.StoreURL, "https://play.google.com/store/apps/details?id=baska"},
+	} {
+		if c[0] != c[1] {
+			t.Errorf("%s = %q, beklenen %q", ad, c[0], c[1])
+		}
+	}
+	if w := cfg.Warnings(); len(w) != 0 {
+		t.Errorf("Warnings() = %q, beklenen yok", w)
+	}
+}
+
+// Geçersiz değer açılışı durdurmaz: uyarılır (development'ta da) ve yok sayılır.
+func TestFromEnv_GecersizSurumAyarlariUyarilirVeYokSayilir(t *testing.T) {
+	t.Setenv("APP_ENV", "development")
+	surumAyarlariniTemizle(t)
+	t.Setenv("MIN_APP_VERSION_IOS", "v1.2")
+	t.Setenv("LATEST_APP_VERSION_ANDROID", "1.2.0-beta")
+	t.Setenv("MIN_APP_VERSION_ANDROID", "1.0.0")
+	t.Setenv("APP_STORE_URL_IOS", "apps.apple.com/app/id123")
+	t.Setenv("APP_STORE_URL_ANDROID", "javascript:alert(1)")
+
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("geçersiz sürüm ayarı açılışı durdurdu: %v", err)
+	}
+	p := cfg.AppVersions
+	if !p.IOS.Min.IsZero() || !p.Android.Latest.IsZero() {
+		t.Errorf("geçersiz değer yok sayılmadı: %+v", p)
+	}
+	if p.Android.Min.Raw != "1.0.0" {
+		t.Errorf("geçerli değer kayboldu: android min = %q", p.Android.Min.Raw)
+	}
+	if p.IOS.StoreURL != "" || p.Android.StoreURL != DefaultAppStoreURLAndroid {
+		t.Errorf("geçersiz adres yok sayılmadı: ios=%q android=%q", p.IOS.StoreURL, p.Android.StoreURL)
+	}
+
+	w := cfg.Warnings()
+	if len(w) != 4 {
+		t.Fatalf("Warnings() = %q, beklenen 4 uyarı", w)
+	}
+	hepsi := strings.Join(w, "\n")
+	for _, sub := range []string{"MIN_APP_VERSION_IOS", "LATEST_APP_VERSION_ANDROID", "APP_STORE_URL_IOS", "APP_STORE_URL_ANDROID"} {
+		if !strings.Contains(hepsi, sub) {
+			t.Errorf("Warnings() = %q, %q geçmiyor", w, sub)
+		}
+	}
+}
+
+func TestFromEnv_LatestMindenDusukseUyarilir(t *testing.T) {
+	t.Setenv("APP_ENV", "development")
+	surumAyarlariniTemizle(t)
+	t.Setenv("MIN_APP_VERSION_ANDROID", "1.2.0")
+	t.Setenv("LATEST_APP_VERSION_ANDROID", "1.1.0")
+
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv: %v", err)
+	}
+	if w := cfg.Warnings(); len(w) != 1 || !strings.Contains(w[0], "LATEST_APP_VERSION_ANDROID") {
+		t.Errorf("Warnings() = %q, beklenen LATEST < MIN uyarısı", w)
+	}
+	// İki değer de korunur: en düşük sürüm yine uygulanır.
+	if cfg.AppVersions.Android.Min.Raw != "1.2.0" || cfg.AppVersions.Android.Latest.Raw != "1.1.0" {
+		t.Errorf("değerler değişti: %+v", cfg.AppVersions.Android)
+	}
+}
+
+func TestWarnings_ProductiondaIOSMagazaAdresiEksik(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("JWT_SECRET", gucluSecret)
+	t.Setenv("APPLE_TEAM_ID", "T")
+	t.Setenv("APPLE_KEY_ID", "K")
+	t.Setenv("APPLE_PRIVATE_KEY", "P")
+	t.Setenv("GOOGLE_CLIENT_IDS", "g")
+	t.Setenv("TEST_MODE_UNLOCK_ALL", "false")
+	surumAyarlariniTemizle(t)
+	t.Setenv("MIN_APP_VERSION_IOS", "1.0.0")
+
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv: %v", err)
+	}
+	if w := cfg.Warnings(); len(w) != 1 || !strings.Contains(w[0], "APP_STORE_URL_IOS") {
+		t.Errorf("Warnings() = %q, beklenen APP_STORE_URL_IOS uyarısı", w)
+	}
+
+	t.Setenv("APP_STORE_URL_IOS", "https://apps.apple.com/app/id123")
+	cfg, err = FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv: %v", err)
+	}
+	if w := cfg.Warnings(); len(w) != 0 {
+		t.Errorf("Warnings() = %q, beklenen yok", w)
+	}
+}

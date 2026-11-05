@@ -25,6 +25,7 @@ var ortakUclar = []string{
 	"POST /api/v1/auth/link/password",
 	"POST /api/v1/dictionary/words/batch",
 	"GET /api/v1/health",
+	"GET /api/v1/app/version-check",
 }
 
 // kayitliRotalar, rota tablosunu verilen ortamla kurar ve "METOT yol"

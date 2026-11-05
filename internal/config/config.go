@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"kelimeler-backend/internal/appversion"
 
 	"github.com/joho/godotenv"
 )
@@ -49,6 +52,10 @@ var DefaultTrustedProxies = []string{
 
 // DefaultGuestRefreshTokenTTL, GUEST_REFRESH_TOKEN_TTL verilmezse kullanılır (1 yıl).
 const DefaultGuestRefreshTokenTTL = 8760 * time.Hour
+
+// DefaultAppStoreURLAndroid, APP_STORE_URL_ANDROID verilmezse "Güncelle"
+// butonunun açtığı Play Store adresidir.
+const DefaultAppStoreURLAndroid = "https://play.google.com/store/apps/details?id=com.kaipra.kutularlaIngilizce"
 
 // MinJWTSecretBytes, production'da kabul edilen en kısa JWT_SECRET uzunluğudur
 // (HS256 anahtarı en az özet boyu kadar olmalı).
@@ -160,6 +167,18 @@ type Config struct {
 	// süre. Docker'ın durdurma süresinden (varsayılan 10 sn) kısa olmalı; yoksa
 	// süreç bu süre dolmadan SIGKILL ile öldürülür ve Sentry kuyruğu boşaltılamaz.
 	ShutdownTimeout time.Duration
+
+	// --- Zorunlu güncelleme ---
+
+	// AppVersions, platform başına en düşük (MIN_APP_VERSION_*) ve en güncel
+	// (LATEST_APP_VERSION_*) istemci sürümü ile mağaza adresidir
+	// (APP_STORE_URL_*). Hepsi isteğe bağlıdır; sıfır değeri hiçbir istemciyi
+	// engellemez.
+	AppVersions appversion.Policy
+
+	// appVersionWarnings, okunurken yok sayılan geçersiz sürüm/adres
+	// ayarlarıdır; ortamdan bağımsız olarak Warnings'te döner.
+	appVersionWarnings []string
 }
 
 // Load, .env dosyasını (varsa) yükler, Config'i okur ve doğrular. Yapılandırma
@@ -227,6 +246,7 @@ func FromEnv() (*Config, error) {
 
 		ShutdownTimeout: getDuration("SHUTDOWN_TIMEOUT", 8*time.Second),
 	}
+	cfg.AppVersions, cfg.appVersionWarnings = loadAppVersions()
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -287,11 +307,14 @@ func (c *Config) Validate() error {
 
 // Warnings, sunucunun açılmasını engellemeyen ama production'da bir özelliği
 // bozan eksikleri döndürür. Açılışta loglanır ve Sentry'ye bildirilir.
+//
+// Geçersiz sürüm/mağaza adresi ayarları her ortamda uyarılır: yok sayılan bir
+// MIN_APP_VERSION_* zorunlu güncellemenin sessizce çalışmaması demektir.
 func (c *Config) Warnings() []string {
+	w := append([]string(nil), c.appVersionWarnings...)
 	if !c.IsProduction() {
-		return nil
+		return w
 	}
-	var w []string
 	if c.AppleTeamID == "" || c.AppleKeyID == "" || c.ApplePrivateKey == "" {
 		w = append(w, "APPLE_TEAM_ID/APPLE_KEY_ID/APPLE_PRIVATE_KEY eksik: "+
 			"Apple hesap silmede token iptali YAPILMAYACAK (Apple bunu şart koşar)")
@@ -302,7 +325,75 @@ func (c *Config) Warnings() []string {
 	if c.TestModeUnlockAll {
 		w = append(w, "TEST_MODE_UNLOCK_ALL=true: tüm gruplar kilitsiz açılıyor (reklam kapıları devre dışı)")
 	}
+	if !c.AppVersions.IOS.Min.IsZero() && c.AppVersions.IOS.StoreURL == "" {
+		w = append(w, "MIN_APP_VERSION_IOS ayarlı ama APP_STORE_URL_IOS boş: "+
+			"\"Güncelle\" butonu uygulamanın sayfası yerine App Store'un ana sayfasını açacak")
+	}
 	return w
+}
+
+// loadAppVersions, zorunlu güncelleme ayarlarını okur. Geçersiz bir değer
+// açılışı durdurmaz: uyarı döner ve değer yok sayılır (sürüm sınırı yok,
+// mağaza adresi boş ya da Android'de varsayılan). Bir yazım hatası yüzünden
+// sunucunun açılmaması, acil bir düzeltmenin de yayınlanamaması demekti.
+func loadAppVersions() (appversion.Policy, []string) {
+	var warnings []string
+	version := func(key string) appversion.Version {
+		raw := os.Getenv(key)
+		if strings.TrimSpace(raw) == "" {
+			return appversion.Version{}
+		}
+		v, ok := appversion.Parse(raw)
+		if !ok {
+			warnings = append(warnings, fmt.Sprintf("%s=%q geçersiz (beklenen ör. 1.2.0 ya da 1.2.0+15): "+
+				"YOK SAYILDI, bu sınır uygulanmıyor", key, raw))
+		}
+		return v
+	}
+	storeURL := func(key, def string) string {
+		raw := strings.TrimSpace(os.Getenv(key))
+		if raw == "" {
+			return def
+		}
+		if !validStoreURL(raw) {
+			warnings = append(warnings, fmt.Sprintf("%s=%q geçerli bir adres değil (https://... bekleniyor): "+
+				"YOK SAYILDI", key, raw))
+			return def
+		}
+		return raw
+	}
+	rule := func(platform string, defURL string) appversion.Rule {
+		r := appversion.Rule{
+			Min:      version("MIN_APP_VERSION_" + platform),
+			Latest:   version("LATEST_APP_VERSION_" + platform),
+			StoreURL: storeURL("APP_STORE_URL_"+platform, defURL),
+		}
+		if r.Latest.Below(r.Min) {
+			warnings = append(warnings, fmt.Sprintf("LATEST_APP_VERSION_%s=%q, MIN_APP_VERSION_%s=%q'dan düşük: "+
+				"en güncel sürüm en düşük sürümden küçük olamaz, ayarları kontrol edin",
+				platform, r.Latest.Raw, platform, r.Min.Raw))
+		}
+		return r
+	}
+	p := appversion.Policy{
+		IOS:     rule("IOS", ""),
+		Android: rule("ANDROID", DefaultAppStoreURLAndroid),
+	}
+	return p, warnings
+}
+
+// validStoreURL, mağaza adresinin mutlak ve uygulamanın açabileceği bir
+// şemada olduğunu denetler.
+func validStoreURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	switch u.Scheme {
+	case "https", "http", "itms-apps", "market":
+		return true
+	}
+	return false
 }
 
 func getEnv(key, def string) string {

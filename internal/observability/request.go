@@ -55,6 +55,11 @@ func validRequestID(id string) bool {
 // (ör. "1.0.3+57"). Yayındaki eski istemci göndermez.
 const AppVersionHeader = "X-App-Version"
 
+// AppPlatformHeader, mobil istemcinin platformunu ("ios" | "android") taşıyan
+// isteğe bağlı başlıktır. Zorunlu güncelleme denetimi yalnızca bu başlık ve
+// AppVersionHeader birlikte geldiğinde yapılır (bkz. middleware.RequireAppVersion).
+const AppPlatformHeader = "X-App-Platform"
+
 // Başlığı olmayan ya da geçersiz değer gönderen isteklerin sürüm etiketi.
 const (
 	AppVersionLegacy  = "eski"

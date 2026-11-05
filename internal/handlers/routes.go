@@ -41,13 +41,31 @@ func health(gdb *gorm.DB) fiber.Handler {
 	}
 }
 
+// Zorunlu güncelleme middleware'inin (middleware.RequireAppVersion) dışında
+// kalan uçlar, API grubuna göre yollarıyla.
+const (
+	HealthPath       = "/health"
+	VersionCheckPath = "/app/version-check"
+)
+
+// AppVersionExempt, prefix altındaki (ör. "/api/v1") zorunlu güncelleme
+// denetiminden muaf tam yolları döner. Sağlık kontrolü sürüm başlığı taşımaz;
+// sürüm kontrolü ise 426 alsaydı istemci storeUrl'i ve sınırları göremezdi.
+func AppVersionExempt(prefix string) []string {
+	return []string{prefix + HealthPath, prefix + VersionCheckPath}
+}
+
 // RegisterRoutes, tüm API route'larını mount eder.
 //
 // authLimit, parola/sosyal giriş, e-posta sorgusu, misafir hesabı ve parola
 // bağlama uçlarına uygulanan sıkı hız sınırıdır; deneme saldırılarını
 // yavaşlatmak için genel sınırdan ayrıdır.
 func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService, authLimit fiber.Handler) {
-	api.Get("/health", health(h.DB))
+	api.Get(HealthPath, health(h.DB))
+
+	// Açılıştaki zorunlu güncelleme kontrolü: kimliksizdir, girişten önce
+	// çağrılır. 426 middleware'inin dışında tutulur (bkz. AppVersionExempt).
+	api.Get(VersionCheckPath, h.VersionCheck)
 
 	guard := middleware.RequireAuth(ts)
 
