@@ -117,6 +117,7 @@ func TestVersionCheck(t *testing.T) {
 	}{
 		{"zorunlu", "?platform=ios&version=0.9.0%2B5", nil, bayrak(ios, true, true)},
 		{"android build ile zorunlu", "?platform=android&version=1.0.0%2B2", nil, bayrak(android, true, true)},
+		{"kodlanmamis arti bosluga cozulse de okunur", "?platform=android&version=1.0.0+2", nil, bayrak(android, true, true)},
 		{"yeni surum var", "?platform=ios&version=1.0.1%2B9", nil, bayrak(ios, false, true)},
 		{"guncel", "?platform=android&version=1.1.0%2B20", nil, bayrak(android, false, false)},
 		{"1.2 = 1.2.0", "?platform=ios&version=1.1", nil, bayrak(ios, false, false)},

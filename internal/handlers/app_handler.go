@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"strings"
+
 	"kelimeler-backend/internal/observability"
 
 	"github.com/gofiber/fiber/v2"
@@ -22,7 +24,10 @@ func (h *Handlers) VersionCheck(c *fiber.Ctx) error {
 	if platform == "" {
 		platform = c.Get(observability.AppPlatformHeader)
 	}
-	version := c.Query("version")
+	// Sorgu dizesinde kodlanmamış "+" boşluğa çözülür: elle yazılan
+	// "?version=1.0.0+6" sunucuya "1.0.0 6" olarak gelir ve sürüm okunamayıp
+	// kontrol sessizce "güncelleme gerekmiyor" derdi. Tek boşluk "+" sayılır.
+	version := strings.Replace(strings.TrimSpace(c.Query("version")), " ", "+", 1)
 	if version == "" {
 		version = c.Get(observability.AppVersionHeader)
 	}
