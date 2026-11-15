@@ -204,6 +204,11 @@ func run() (err error) {
 	web.Register(app)
 
 	logAppVersions(cfg)
+	if r := cfg.SentryRelay; r != nil {
+		log.Printf("sentry rölesi: açık (proje %s → %s)", r.ProjectID, r.Host)
+	} else {
+		log.Printf("sentry rölesi: kapalı (SENTRY_RELAY_DSN boş ya da geçersiz)")
+	}
 	registerAPI(app, cfg, h, tokens)
 
 	addr := ":" + cfg.Port

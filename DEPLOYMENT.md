@@ -81,6 +81,7 @@ Depo özelse Coolify'de kaynak olarak **GitHub App** (Private Repository) kullan
 | `AUTH_RATE_LIMIT` | `10` — giriş/kayıt uçlarının (Google/Apple, e-posta/parola, e-posta sorgusu, misafir, parola bağlama) sıkı hız sınırı, IP başına istek/dk; hepsi tek kovayı paylaşır. E-posta önce akışında bir giriş iki istektir (sorgu + giriş/kayıt). `/auth/refresh` buna değil `API_RATE_LIMIT`'e tabidir |
 | `SENTRY_DSN` | Sentry projesinin DSN'i. Boşsa hata raporlama kapalıdır |
 | `SENTRY_RELEASE` | Boş bırakılabilir: imaj derlenirken gömülen sürüm (commit) kullanılır. Elle verilirse o geçerlidir |
+| `SENTRY_RELAY_DSN` | Mobil uygulamanın **gerçek** Sentry DSN'i (`https://ANAHTAR@o….ingest.us.sentry.io/PROJE_NO`). Uygulamanın hata raporlarını Sentry'ye aktaran röleyi açar; boşsa röle kapalıdır. Bkz. "Sentry rölesi" |
 | `CORS_ALLOWED_ORIGINS` | **Boş bırak** (API'yi çağıran bir web sitesi yoksa). Gerekirse virgülle ayrılmış origin listesi, ör. `https://panel.example.com` |
 
 > `USAGE_TIMEZONE`, sunucudaki bütün "bugün" hesaplarının gün sınırıdır: günlük kullanım sayaçları, giriş serisi ve giriş günleri, tekrar listesi ve `/counts` içindeki `today`, yanlış cevaptan sonraki "ertesi gün". Sürecin genel saat dilimini değiştiren `TZ` değişkenini **girme**; gün hesapları ona bakmaz, yalnızca log saatlerini değiştirir ve iki ayarın farklı görünmesi kafa karıştırır.
@@ -312,6 +313,48 @@ flutter build apk --release --dart-define=API_BASE_URL=https://<coolify-domain>/
 # iOS:
 flutter build ipa --release --dart-define=API_BASE_URL=https://<coolify-domain>/api/v1
 ```
+
+---
+
+## Sentry rölesi
+
+**Neden:** Türk Telekom (TTNet) Sentry'nin alım adreslerini (`*.ingest.us.sentry.io`, `*.ingest.de.sentry.io`) DNS/SNI düzeyinde engelliyor (adresler `195.175.254.2`'ye çözülüyor). Bu hatlardaki kullanıcıların çökme raporları Sentry'ye hiç ulaşmıyor. İstanbul'daki sunucumuz Sentry'ye ulaşabildiği için uygulama raporlarını kendi API'mize gönderir, sunucu da onları olduğu gibi Sentry'ye aktarır.
+
+**Nasıl çalışır:** Sentry SDK'sı gönderim adresini DSN'den kurar: `https://ANAHTAR@HOST/yol/PROJE_NO` için `https://HOST/yol/api/PROJE_NO/envelope/`. Mobil uygulama DSN'i API adresimizi gösterecek biçimde derlenir; istekler `POST /api/v1/sentry/api/<PROJE_NO>/envelope/` ucuna gelir. Sunucu:
+
+- yalnızca yol'daki proje numarası ve `X-Sentry-Auth` başlığındaki (ya da sorgudaki) `sentry_key`, `SENTRY_RELAY_DSN`'deki proje ve açık anahtarla aynıysa aktarır; aksi halde `403`,
+- gövdeyi açmadan, değiştirmeden ve loglamadan `https://<sentry-host>/api/<PROJE_NO>/envelope/` adresine gönderir; yalnızca `X-Sentry-Auth`, `Content-Type`, `Content-Encoding` ve `User-Agent` başlıkları gider. İstemcinin IP'si (`X-Forwarded-For` vb.) ve çerezler **gitmez**: Sentry isteği sunucudan gelmiş görür,
+- Sentry'nin durum kodunu (2xx/4xx/5xx; `Retry-After` ve `X-Sentry-Rate-Limits` başlıklarıyla) olduğu gibi döner; Sentry'ye 10 sn içinde ulaşılamazsa `502`,
+- 1 MiB'tan büyük gövdeyi `413` ile reddeder; `SENTRY_RELAY_DSN` boşsa `404` döner.
+
+Uç kimliksizdir, zorunlu güncelleme (426) denetiminden muaftır (eski sürümün raporları da gelmeli) ve genel hız sınırına (`API_RATE_LIMIT`, IP başına) tabidir.
+
+**Ortam değişkeni:** `SENTRY_RELAY_DSN` = mobil projenin Sentry'deki gerçek DSN'i (Sentry → Project Settings → Client Keys). Geçersizse (https değil, anahtar ya da sayısal proje numarası yok) sunucu yine açılır, açılış loguna `config: uyarı: SENTRY_RELAY_DSN geçersiz ...` yazılır ve röle kapalı kalır. Sunucunun kendi hatalarını raporladığı `SENTRY_DSN`'den bağımsızdır.
+
+**Mobil derleme:** Uygulama, gerçek DSN yerine **röle DSN'i** ile derlenmelidir; anahtar ve proje numarası gerçek DSN'dekiyle aynıdır, yalnızca host ve yol değişir:
+
+```
+gerçek:  https://ANAHTAR@o4512437762981888.ingest.us.sentry.io/PROJE_NO
+röle:    https://ANAHTAR@<api-host>/api/v1/sentry/PROJE_NO
+```
+
+**Doğrulama:** deploy logunda `sentry rölesi: açık (proje <PROJE_NO> → <sentry-host>)` satırı görünmeli (`kapalı` yazıyorsa değişken boş ya da geçersizdir; geçersizse açılışın başındaki `config: uyarı: SENTRY_RELAY_DSN geçersiz ...` satırı nedenini söyler). Ardından (boş bir envelope Sentry'de olay oluşturmaz):
+
+```bash
+# Sentry'nin kendi yanıtı beklenir (genelde 200; boş envelope'a Sentry 4xx de dönebilir, o da
+# rölenin Sentry'ye ulaştığını gösterir). Rölenin kendi yanıtları: 404 {"code":"not_found"} =
+# SENTRY_RELAY_DSN boş/geçersiz; 403 {"code":"forbidden"} = anahtar ya da proje uyuşmuyor;
+# gövdesiz 502 = sunucu Sentry'ye ulaşamadı.
+curl -s -w '\n%{http_code}\n' -X POST "https://<api-host>/api/v1/sentry/api/<PROJE_NO>/envelope/" \
+  -H 'Content-Type: application/x-sentry-envelope' \
+  -H 'X-Sentry-Auth: Sentry sentry_version=7, sentry_client=curl/1.0, sentry_key=<ANAHTAR>' \
+  --data-binary $'{}\n'
+# Yanlış anahtar 403 beklenir (Sentry'ye gitmez):
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "https://<api-host>/api/v1/sentry/api/<PROJE_NO>/envelope/" \
+  -H 'X-Sentry-Auth: Sentry sentry_key=yanlis' --data-binary $'{}\n'
+```
+
+Uçtan uca kontrol: röle DSN'iyle derlenmiş uygulamada test hatası üret (Türk Telekom hattında, Wi-Fi kapalı) ve olayın birkaç saniye içinde Sentry'de göründüğünü gör.
 
 ---
 
@@ -667,3 +710,20 @@ Sunucudan tek ayarla eski mobil sürümleri güncellemeye zorlamak içindir. Kar
 Yumuşak duyuru için yalnızca `LATEST_APP_VERSION_*` ayarlanır. Geri almak için değişkeni boşalt (ya da eski değere çek) ve redeploy et.
 
 > `APP_STORE_URL_IOS`'u App Store kimliği (App Store Connect → Uygulama → Genel Bilgi → Apple ID) belli olunca bir kez gir: `https://apps.apple.com/app/id<Apple ID>`. Boşken `MIN_APP_VERSION_IOS` ayarlanırsa production açılış loguna uyarı düşer.
+
+## Parola sıfırlama desteği (elle)
+
+Uygulamada parola sıfırlama henüz yok. "Parolamı unuttum" penceresi kullanıcıyı
+`devruler.support@gmail.com` adresine **kayıtlı e-posta adresinden** yazmaya
+yönlendirir. Böyle bir e-posta gelince:
+
+1. E-postanın gönderen adresi, sıfırlanacak hesabın adresiyle aynı mı bak. Değilse
+   sıfırlama yapma (başkasının hesabı olabilir); kayıtlı adresinden yazmasını iste.
+2. Backend klasöründe: `make password-reset-sql EMAIL=<adres>`. Komut bir geçici parola
+   üretir ve canlı veritabanında çalıştırılacak bloğu yazdırır; veritabanına kendisi
+   bağlanmaz, parolayı hiçbir yere kaydetmez.
+3. Coolify → kelimeler-db → Terminal'e bloğun tamamını yapıştır. Çıktı
+   `UPDATE 1`, `DELETE n`, `UPDATE 1`, `COMMIT` olmalı. `UPDATE 0` hesap yok ya da
+   hesabın parola girişi yok (Google/Apple ile açılmış) demektir; hiçbir şey değişmez.
+4. Geçici parolayı yalnızca kullanıcının e-postasına yanıt olarak ilet. Sıfırlama
+   kullanıcının bütün cihazlardaki oturumlarını kapatır.

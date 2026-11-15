@@ -31,14 +31,32 @@ const (
 // platform ve ayrıştırılamayan sürüm de engellenmez (bkz. appversion.Policy).
 // skip, denetlenmeyen tam yollardır (sağlık kontrolü ve sürüm kontrolünün
 // kendisi); Fiber'ın varsayılan yönlendirmesi gibi sondaki "/" ve büyük/küçük
-// harf fark etmez.
+// harf fark etmez. "/*" ile biten bir giriş önektir: "/a/*", "/a/" altındaki
+// her yolu (ör. Sentry rölesinin proje numaralı yollarını) muaf tutar.
 func RequireAppVersion(policy appversion.Policy, skip ...string) fiber.Handler {
 	skipped := make(map[string]bool, len(skip))
+	var prefixes []string
 	for _, p := range skip {
+		if strings.HasSuffix(p, "/*") {
+			prefixes = append(prefixes, strings.ToLower(strings.TrimSuffix(p, "*")))
+			continue
+		}
 		skipped[normalizePath(p)] = true
 	}
+	isSkipped := func(path string) bool {
+		n := normalizePath(path)
+		if skipped[n] {
+			return true
+		}
+		for _, pre := range prefixes {
+			if strings.HasPrefix(n+"/", pre) {
+				return true
+			}
+		}
+		return false
+	}
 	return func(c *fiber.Ctx) error {
-		if skipped[normalizePath(c.Path())] {
+		if isSkipped(c.Path()) {
 			return c.Next()
 		}
 		platform := c.Get(observability.AppPlatformHeader)

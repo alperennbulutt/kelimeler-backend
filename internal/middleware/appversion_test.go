@@ -133,3 +133,29 @@ func TestRequireAppVersion_AyarYoksaEngellemez(t *testing.T) {
 		t.Errorf("status = %d, beklenen 200", status)
 	}
 }
+
+// "/*" ile biten muaf giriş önektir: altındaki her yol muaftır, önekle yalnızca
+// harf olarak başlayan kardeş yol muaf değildir.
+func TestRequireAppVersion_OnekMuafiyeti(t *testing.T) {
+	app := fiber.New(fiber.Config{ErrorHandler: ErrorHandler})
+	api := app.Group("/api/v1")
+	api.Use(RequireAppVersion(surumPolitikasi(t), "/api/v1/sentry/*"))
+	ok := func(c *fiber.Ctx) error { return c.SendString("ok") }
+	api.Post("/sentry/api/:projectId/envelope", ok)
+	api.Post("/sentryx", ok)
+
+	for ad, c := range map[string]struct {
+		path string
+		want int
+	}{
+		"onek altindaki yol": {"/api/v1/sentry/api/42/envelope", fiber.StatusOK},
+		"sondaki egik cizgi": {"/api/v1/sentry/api/42/envelope/", fiber.StatusOK},
+		"buyuk harf":         {"/API/v1/Sentry/api/42/envelope", fiber.StatusOK},
+		"benzer adli kardes": {"/api/v1/sentryx", fiber.StatusUpgradeRequired},
+	} {
+		status, body, _ := surumDurum(t, app, surumIstegi{method: http.MethodPost, path: c.path, platform: "ios", version: "0.1.0"})
+		if status != c.want {
+			t.Errorf("%s: status = %d (%v), beklenen %d", ad, status, body, c.want)
+		}
+	}
+}

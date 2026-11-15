@@ -19,10 +19,18 @@ type Handlers struct {
 
 	// Yapılandırılmamışsa nil; hesap silme revoke olmadan devam eder.
 	AppleRevoker *auth.AppleRevoker
+
+	// SentryRelay, SENTRY_RELAY_DSN verilmemişse ya da geçersizse nil'dir;
+	// röle ucu o zaman 404 döner.
+	SentryRelay *SentryRelay
 }
 
 func New(db *gorm.DB, cfg *config.Config, tokens *auth.TokenService, apple *auth.AppleVerifier) *Handlers {
-	return &Handlers{DB: db, Cfg: cfg, Tokens: tokens, Apple: apple}
+	h := &Handlers{DB: db, Cfg: cfg, Tokens: tokens, Apple: apple}
+	if cfg != nil && cfg.SentryRelay != nil {
+		h.SentryRelay = NewSentryRelay(*cfg.SentryRelay)
+	}
+	return h
 }
 
 // WithAppleRevoker, Apple token iptal servisini bağlar.

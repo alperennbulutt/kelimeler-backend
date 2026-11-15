@@ -120,3 +120,54 @@ func TestRegisterAPI_MuafUclar(t *testing.T) {
 		t.Errorf("version-check: status = %d, gövde %s; beklenen 200 ve updateRequired:true", resp.StatusCode, govde)
 	}
 }
+
+// Sentry rölesi gerçek API zincirinde de 426 almaz: eski sürümün çökme
+// raporları da Sentry'ye ulaşmalı. Genel hız sınırı ise uygulanır.
+func TestRegisterAPI_SentryRolesiSurumDenetimindenMuaf(t *testing.T) {
+	var gelen int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gelen++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	sinir, _ := appversion.Parse("1.2.0")
+	dsn, err := config.ParseSentryDSN("https://anahtar@o1.ingest.us.sentry.io/42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		AppEnv:              config.EnvDevelopment,
+		APIRateLimit:        2,
+		APIRateLimitWindow:  time.Minute,
+		AuthRateLimit:       1000,
+		AuthRateLimitWindow: time.Minute,
+		AppVersions:         appversion.Policy{IOS: appversion.Rule{Min: sinir}},
+		SentryRelay:         &dsn,
+	}
+	tokens := auth.NewTokenService("test-secret-test-secret-test-secret", time.Hour, time.Hour)
+	h := handlers.New(nil, cfg, tokens, nil)
+	h.SentryRelay.UpstreamURL = upstream.URL + "/api/42/envelope/"
+	app := newApp(cfg, io.Discard)
+	registerAPI(app, cfg, h, tokens)
+
+	zarf := func() *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sentry/api/42/envelope/", strings.NewReader("{}\n"))
+		req.Header.Set(observability.AppPlatformHeader, "ios")
+		req.Header.Set(observability.AppVersionHeader, "1.0.0+1")
+		req.Header.Set("Content-Type", "application/x-sentry-envelope")
+		req.Header.Set("X-Sentry-Auth", "Sentry sentry_version=7, sentry_key=anahtar")
+		return req
+	}
+	for i := 0; i < 2; i++ {
+		if resp, govde := istek(t, app, zarf()); resp.StatusCode != http.StatusOK {
+			t.Fatalf("eski sürümle röle: status = %d, beklenen 200 (%s)", resp.StatusCode, govde)
+		}
+	}
+	if gelen != 2 {
+		t.Errorf("Sentry'ye %d istek gitti, beklenen 2", gelen)
+	}
+	if resp, govde := istek(t, app, zarf()); resp.StatusCode != fiber.StatusTooManyRequests {
+		t.Errorf("hız sınırı aşılınca status = %d, beklenen 429 (%s)", resp.StatusCode, govde)
+	}
+}
