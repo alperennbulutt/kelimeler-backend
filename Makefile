@@ -22,6 +22,12 @@ import-dictionary:
 cleanup-guests:
 	go run ./cmd/cleanup-guests $(ARGS)
 
+# "Parolamı unuttum" desteği: geçici parola ve canlı DB'ye yapıştırılacak SQL.
+#   make password-reset-sql EMAIL=ayse@example.com
+password-reset-sql:
+	@test -n "$(EMAIL)" || (echo "Kullanım: make password-reset-sql EMAIL=ayse@example.com" >&2; exit 2)
+	@go run ./cmd/password-reset-sql "$(EMAIL)"
+
 # Tüm yığını (postgres + app) docker'da çalıştır.
 up:
 	docker compose up --build

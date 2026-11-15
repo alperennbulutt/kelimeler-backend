@@ -710,3 +710,20 @@ Sunucudan tek ayarla eski mobil sürümleri güncellemeye zorlamak içindir. Kar
 Yumuşak duyuru için yalnızca `LATEST_APP_VERSION_*` ayarlanır. Geri almak için değişkeni boşalt (ya da eski değere çek) ve redeploy et.
 
 > `APP_STORE_URL_IOS`'u App Store kimliği (App Store Connect → Uygulama → Genel Bilgi → Apple ID) belli olunca bir kez gir: `https://apps.apple.com/app/id<Apple ID>`. Boşken `MIN_APP_VERSION_IOS` ayarlanırsa production açılış loguna uyarı düşer.
+
+## Parola sıfırlama desteği (elle)
+
+Uygulamada parola sıfırlama henüz yok. "Parolamı unuttum" penceresi kullanıcıyı
+`devruler.support@gmail.com` adresine **kayıtlı e-posta adresinden** yazmaya
+yönlendirir. Böyle bir e-posta gelince:
+
+1. E-postanın gönderen adresi, sıfırlanacak hesabın adresiyle aynı mı bak. Değilse
+   sıfırlama yapma (başkasının hesabı olabilir); kayıtlı adresinden yazmasını iste.
+2. Backend klasöründe: `make password-reset-sql EMAIL=<adres>`. Komut bir geçici parola
+   üretir ve canlı veritabanında çalıştırılacak bloğu yazdırır; veritabanına kendisi
+   bağlanmaz, parolayı hiçbir yere kaydetmez.
+3. Coolify → kelimeler-db → Terminal'e bloğun tamamını yapıştır. Çıktı
+   `UPDATE 1`, `DELETE n`, `UPDATE 1`, `COMMIT` olmalı. `UPDATE 0` hesap yok ya da
+   hesabın parola girişi yok (Google/Apple ile açılmış) demektir; hiçbir şey değişmez.
+4. Geçici parolayı yalnızca kullanıcının e-postasına yanıt olarak ilet. Sıfırlama
+   kullanıcının bütün cihazlardaki oturumlarını kapatır.
