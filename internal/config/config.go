@@ -130,6 +130,14 @@ type Config struct {
 	SentryDSN     string
 	SentryRelease string
 
+	// SentryRelayDSN, mobil uygulamanın gerçek Sentry DSN'idir
+	// (SENTRY_RELAY_DSN). Verilirse sunucu POST /api/v1/sentry/api/:projectId/envelope
+	// ucunda uygulamanın hata raporlarını Sentry'ye aktarır (bkz. DEPLOYMENT.md,
+	// "Sentry rölesi"). SentryRelay, ayrıştırılmış hâlidir; boş ya da geçersizse
+	// nil'dir ve röle kapalıdır.
+	SentryRelayDSN string
+	SentryRelay    *SentryDSN
+
 	// --- Güvenlik ---
 
 	// CORS'a izin verilen origin listesi. Boşsa production'da hiçbir origin'e
@@ -179,6 +187,10 @@ type Config struct {
 	// appVersionWarnings, okunurken yok sayılan geçersiz sürüm/adres
 	// ayarlarıdır; ortamdan bağımsız olarak Warnings'te döner.
 	appVersionWarnings []string
+
+	// sentryRelayWarning, SENTRY_RELAY_DSN ayrıştırılamadıysa uyarıdır;
+	// ortamdan bağımsız olarak Warnings'te döner.
+	sentryRelayWarning string
 }
 
 // Load, .env dosyasını (varsa) yükler, Config'i okur ve doğrular. Yapılandırma
@@ -247,6 +259,8 @@ func FromEnv() (*Config, error) {
 		ShutdownTimeout: getDuration("SHUTDOWN_TIMEOUT", 8*time.Second),
 	}
 	cfg.AppVersions, cfg.appVersionWarnings = loadAppVersions()
+	cfg.SentryRelayDSN = strings.TrimSpace(os.Getenv("SENTRY_RELAY_DSN"))
+	cfg.SentryRelay, cfg.sentryRelayWarning = loadSentryRelay(cfg.SentryRelayDSN)
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -312,6 +326,9 @@ func (c *Config) Validate() error {
 // MIN_APP_VERSION_* zorunlu güncellemenin sessizce çalışmaması demektir.
 func (c *Config) Warnings() []string {
 	w := append([]string(nil), c.appVersionWarnings...)
+	if c.sentryRelayWarning != "" {
+		w = append(w, c.sentryRelayWarning)
+	}
 	if !c.IsProduction() {
 		return w
 	}
@@ -380,6 +397,21 @@ func loadAppVersions() (appversion.Policy, []string) {
 		Android: rule("ANDROID", DefaultAppStoreURLAndroid),
 	}
 	return p, warnings
+}
+
+// loadSentryRelay, SENTRY_RELAY_DSN'i ayrıştırır. Boşsa röle kapalıdır.
+// Geçersiz değer açılışı durdurmaz: uyarı döner ve röle kapalı kalır (hata
+// raporlarının gitmemesi, sunucunun açılmamasından iyidir).
+func loadSentryRelay(raw string) (*SentryDSN, string) {
+	if raw == "" {
+		return nil, ""
+	}
+	d, err := ParseSentryDSN(raw)
+	if err != nil {
+		return nil, fmt.Sprintf("SENTRY_RELAY_DSN geçersiz (%v; beklenen https://ANAHTAR@HOST/PROJE_NO): "+
+			"YOK SAYILDI, Sentry rölesi kapalı", err)
+	}
+	return &d, ""
 }
 
 // validStoreURL, mağaza adresinin mutlak ve uygulamanın açabileceği bir

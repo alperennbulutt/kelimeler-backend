@@ -46,13 +46,19 @@ func health(gdb *gorm.DB) fiber.Handler {
 const (
 	HealthPath       = "/health"
 	VersionCheckPath = "/app/version-check"
+	// SentryRelayPrefix, Sentry rölesinin yol önekidir. Mobil uygulama DSN'i
+	// https://KEY@<api-host>/api/v1/sentry/PROJE olarak derlenir; Sentry SDK'sı
+	// buna /api/PROJE/envelope/ ekler (bkz. SentryRelayEnvelope).
+	SentryRelayPrefix = "/sentry"
 )
 
 // AppVersionExempt, prefix altındaki (ör. "/api/v1") zorunlu güncelleme
-// denetiminden muaf tam yolları döner. Sağlık kontrolü sürüm başlığı taşımaz;
+// denetiminden muaf yolları döner ("/*" ile bitenler önektir, bkz.
+// middleware.RequireAppVersion). Sağlık kontrolü sürüm başlığı taşımaz;
 // sürüm kontrolü ise 426 alsaydı istemci storeUrl'i ve sınırları göremezdi.
+// Sentry rölesi de muaftır: eski sürümün çökme raporları da Sentry'ye ulaşmalı.
 func AppVersionExempt(prefix string) []string {
-	return []string{prefix + HealthPath, prefix + VersionCheckPath}
+	return []string{prefix + HealthPath, prefix + VersionCheckPath, prefix + SentryRelayPrefix + "/*"}
 }
 
 // RegisterRoutes, tüm API route'larını mount eder.
@@ -66,6 +72,11 @@ func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService, authLi
 	// Açılıştaki zorunlu güncelleme kontrolü: kimliksizdir, girişten önce
 	// çağrılır. 426 middleware'inin dışında tutulur (bkz. AppVersionExempt).
 	api.Get(VersionCheckPath, h.VersionCheck)
+
+	// Sentry rölesi: kimliksizdir, istemcinin hata raporlarını Sentry'ye
+	// aktarır. Kapalıysa 404 döner. Fiber sondaki "/"yu yok sayar; SDK'nın
+	// gönderdiği ".../envelope/" de eşleşir.
+	api.Post(SentryRelayPrefix+"/api/:projectId/envelope", h.SentryRelayEnvelope)
 
 	guard := middleware.RequireAuth(ts)
 

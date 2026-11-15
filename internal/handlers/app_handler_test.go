@@ -176,15 +176,19 @@ func TestVersionCheck_KimlikDogrulamaIstemez(t *testing.T) {
 
 func TestAppVersionExempt(t *testing.T) {
 	got := AppVersionExempt("/api/v1")
-	want := []string{"/api/v1/health", "/api/v1/app/version-check"}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+	want := []string{"/api/v1/health", "/api/v1/app/version-check", "/api/v1/sentry/*"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
 		t.Errorf("AppVersionExempt = %q, beklenen %q", got, want)
 	}
 	// Muaf yolların gerçekten kayıtlı olduğundan emin ol (yol değişirse kaçmasın).
 	rotalar := kayitliRotalar(config.EnvProduction)
-	for _, p := range want {
+	for _, p := range want[:2] {
 		if !rotalar["GET "+p] {
 			t.Errorf("GET %s kayıtlı değil", p)
 		}
+	}
+	// Önek muafiyeti Sentry rölesinin rotasını kapsamalı.
+	if !rotalar["POST /api/v1/sentry/api/:projectId/envelope"] {
+		t.Error("Sentry rölesi rotası muaf önekin altında kayıtlı değil")
 	}
 }
