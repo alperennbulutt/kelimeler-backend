@@ -22,11 +22,33 @@ services:
       db:
         condition: service_healthy
     env_file: .env
+    # SIGTERM'den sonra SHUTDOWN_TIMEOUT (8s) + Sentry boşaltma için pay.
+    stop_grace_period: 15s
     environment:
       # docker ağı içinde Postgres host'u "db"dir.
       DATABASE_URL: postgres://postgres:postgres@db:5432/kelimeler?sslmode=disable
+      # Bu düzende önde proxy yok, port doğrudan yayınlanır. Varsayılan güvenilen
+      # aralıklar (özel ağlar) kalsaydı docker ağ geçidinden (172.x) gelen
+      # bağlantılar proxy sayılır, X-Forwarded-For uydurularak hız sınırı
+      # atlatılabilirdi. Önüne bir reverse proxy koyarsanız onun adresini girin.
+      TRUSTED_PROXIES: 127.0.0.1/32
     ports:
       - "8080:8080"
+
+  # Firebase'den sözlük aktarımı (isteğe bağlı): docker compose run --rm import
+  # Çalışma imajında import aracı yoktur; bu servis ayrı build hedefini kullanır.
+  import:
+    profiles: ["tools"]
+    build:
+      context: .
+      target: import
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@db:5432/kelimeler?sslmode=disable
+      FIREBASE_SERVICE_ACCOUNT: /secrets/service-account.json
     volumes:
       # import-dictionary aracının service-account JSON'ına erişimi için.
       - ./secrets:/secrets:ro

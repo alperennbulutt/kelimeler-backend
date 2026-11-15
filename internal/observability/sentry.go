@@ -56,3 +56,19 @@ func CaptureError(err error) {
 	}
 	sentry.CaptureException(err)
 }
+
+// CaptureWarning, bir yapılandırma uyarısını Sentry'ye uyarı düzeyinde bildirir.
+// Sentry kapalıysa no-op'tur.
+func CaptureWarning(msg string) {
+	CaptureWarningWithTags(msg, nil)
+}
+
+// CaptureWarningWithTags, CaptureWarning'in olaya etiket ekleyen halidir
+// (Sentry'de etikete göre süzmek için). Sentry kapalıysa no-op'tur.
+func CaptureWarningWithTags(msg string, tags map[string]string) {
+	sentry.WithScope(func(scope *sentry.Scope) {
+		scope.SetLevel(sentry.LevelWarning)
+		scope.SetTags(tags)
+		sentry.CaptureMessage(msg)
+	})
+}

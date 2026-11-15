@@ -4,7 +4,17 @@
 #
 #   ./scripts/restore-verify.sh [dump_dosyasi]
 #
-# Dump verilmezse en yeni yedek kullanılır. Geri yükleme, ADI ÇAKIŞMAYAN
+#   MIN_USERS=1200 ./scripts/restore-verify.sh ~/indirilenler/coolify-yedek.dmp
+#
+# Dump verilmezse BACKUP_DIR'deki en yeni yedek kullanılır. Coolify'nin
+# zamanlanmış yedeği gibi pg_restore'un okuyabildiği (custom format) her dump
+# verilebilir. Ayarlar:
+#   MIN_USERS             users tablosunda beklenen en az satır (varsayılan 0).
+#                         Production yedeğini sınarken güncel kullanıcı
+#                         sayısına yakın bir değer verin; yoksa kullanıcı
+#                         verisi olmayan bir dump da "doğrulandı" sayılır.
+#   MIN_DICTIONARY_WORDS  dictionary_words için en az satır (varsayılan 1).
+# Geri yükleme, ADI ÇAKIŞMAYAN
 # geçici bir veritabanına yapılır ve iş bitince o veritabanı silinir —
 # production verisine dokunulmaz.
 #
@@ -13,6 +23,12 @@
 set -euo pipefail
 
 BACKUP_DIR="${BACKUP_DIR:-./backups}"
+MIN_USERS="${MIN_USERS:-0}"
+MIN_DICTIONARY_WORDS="${MIN_DICTIONARY_WORDS:-1}"
+
+for v in MIN_USERS MIN_DICTIONARY_WORDS; do
+  [[ "${!v}" =~ ^[0-9]+$ ]] || { echo "HATA: $v sayı olmalı (verilen: ${!v})." >&2; exit 1; }
+done
 
 if [[ -z "${DATABASE_URL:-}" && -f .env ]]; then
   # shellcheck disable=SC1091
@@ -74,12 +90,15 @@ check_table() {
   printf "  %-20s %8s satır  ✓\n" "$table" "$n"
 }
 
-# dictionary_words her zaman dolu olmalı; kullanıcı tabloları boş olabilir.
-check_table dictionary_words 1
-check_table users 0
+# Tüm uygulama tabloları geri yüklenmiş ve okunabilir olmalı. dictionary_words
+# her zaman dolu olmalı; users için alt sınır MIN_USERS ile verilir.
+check_table dictionary_words "$MIN_DICTIONARY_WORDS"
+check_table users "$MIN_USERS"
 check_table auth_identities 0
+check_table refresh_tokens 0
 check_table word_progresses 0
 check_table daily_logins 0
+check_table earned_badges 0
 
 echo ""
 if [[ "$FAIL" -ne 0 ]]; then

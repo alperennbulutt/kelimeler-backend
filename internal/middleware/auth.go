@@ -9,8 +9,9 @@ import (
 )
 
 const (
-	userIDKey    = "userID"
-	userEmailKey = "userEmail"
+	userIDKey       = "userID"
+	userEmailKey    = "userEmail"
+	tokenVersionKey = "tokenVersion"
 )
 
 // RequireAuth, Authorization: Bearer <token> başlığını doğrular ve
@@ -27,8 +28,16 @@ func RequireAuth(ts *auth.TokenService) fiber.Handler {
 		}
 		c.Locals(userIDKey, claims.Subject)
 		c.Locals(userEmailKey, claims.Email)
+		c.Locals(tokenVersionKey, claims.TokenVersion)
 		return c.Next()
 	}
+}
+
+// TokenVersion, RequireAuth sonrası access token'ın taşıdığı oturum sürümünü
+// döndürür (bkz. models.User.TokenVersion); claim'siz token'da 0'dır.
+func TokenVersion(c *fiber.Ctx) int {
+	v, _ := c.Locals(tokenVersionKey).(int)
+	return v
 }
 
 // UserID, RequireAuth sonrası context'teki kullanıcı id'sini döndürür.

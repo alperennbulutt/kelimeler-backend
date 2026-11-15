@@ -1,0 +1,2080 @@
+{
+  "description": "Kritik anlam/örnek düzeltmeleri ve A1 temizliği (136 kart). Kaynak: sözlük dil denetimi, tur 1 (editör + inceleme).",
+  "changes": [
+    {
+      "id": "A2_11_27",
+      "old": {
+        "english": "since",
+        "turkish": "…den beri",
+        "example": "I live here since 2015."
+      },
+      "new": {
+        "english": "since",
+        "turkish": "…den beri",
+        "example": "I have lived here since 2015."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'since' present perfect ister; geniş zamanlı örnek dil bilgisi hatası öğretiyordu."
+    },
+    {
+      "id": "B1_8_9",
+      "old": {
+        "english": "consciousness",
+        "turkish": "bilinç",
+        "example": "Humans have self-consciousness."
+      },
+      "new": {
+        "english": "consciousness",
+        "turkish": "bilinç",
+        "example": "She lost consciousness after the accident."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'self-consciousness' utangaçlık demek ve kelime tek başına geçmiyordu; örnek 'bilinç' anlamını gösterecek biçimde değişti."
+    },
+    {
+      "id": "B2_8_72",
+      "old": {
+        "english": "information overload",
+        "turkish": "bilgi kirliliği",
+        "example": "People face information overload."
+      },
+      "new": {
+        "english": "information overload",
+        "turkish": "aşırı bilgi yükü",
+        "example": "People face information overload."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "'Bilgi kirliliği' misinformation demektir; information overload aşırı bilgi yüküdür."
+    },
+    {
+      "id": "B1_13_80",
+      "old": {
+        "english": "even-tempered",
+        "turkish": "sakin mizahlı",
+        "example": "He is even-tempered under stress."
+      },
+      "new": {
+        "english": "even-tempered",
+        "turkish": "sakin mizaçlı",
+        "example": "He is even-tempered under stress."
+      },
+      "kind": "yazim",
+      "reason": "'mizahlı' yazım hatası; doğrusu 'mizaçlı' (huy)."
+    },
+    {
+      "id": "B1_20_69",
+      "old": {
+        "english": "self-accounting",
+        "turkish": "kendine hesap verme",
+        "example": "Self-accounting improves results."
+      },
+      "new": {
+        "english": "self-accountability",
+        "turkish": "kendine hesap verme",
+        "example": "Self-accountability helps you reach your goals."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "'self-accounting' bu anlamda kullanılmaz; doğru ifade 'self-accountability'. 'accountability' B1_8_43'te ayrı kart olarak var."
+    },
+    {
+      "id": "B2_28_35",
+      "old": {
+        "english": "I see where you are coming from",
+        "turkish": "nereden geldiğini anlıyorum",
+        "example": "I see where you are coming from."
+      },
+      "new": {
+        "english": "I see where you are coming from",
+        "turkish": "bakış açını anlıyorum",
+        "example": "I see where you are coming from."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "Kelimesi kelimesine çeviri fiziksel bir yer anlatıyordu; deyimin anlamı karşı tarafın bakış açısını anlamak."
+    },
+    {
+      "id": "B2_21_20",
+      "old": {
+        "english": "get your head around something",
+        "turkish": "bir şeyi kavramak",
+        "example": "I can’t get your head around something."
+      },
+      "new": {
+        "english": "get your head around something",
+        "turkish": "bir şeyi kavramak",
+        "example": "I can’t get my head around this new system."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "Örnekte sözlük maddesinin yer tutucuları ('your', 'something') olduğu gibi kopyalanmıştı."
+    },
+    {
+      "id": "C2_16_25",
+      "old": {
+        "english": "euphonic effect",
+        "turkish": "ötümlü ses etkisi",
+        "example": "Euphonic effect pleases the ear."
+      },
+      "new": {
+        "english": "euphonic effect",
+        "turkish": "ahenkli ses etkisi",
+        "example": "The euphonic effect of the poem pleases the ear."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "'Ötümlü' voiced demektir; euphony kulağa hoş gelen, ahenkli sestir. Örnekte artikel de eksikti."
+    },
+    {
+      "id": "C2_18_13",
+      "old": {
+        "english": "aspiration duration",
+        "turkish": "patlama süresi",
+        "example": "Aspiration duration differentiates stops."
+      },
+      "new": {
+        "english": "aspiration duration",
+        "turkish": "soluklama (aspirasyon) süresi",
+        "example": "Aspiration duration differentiates stops."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "'Patlama' plosion/burst demektir; aspiration soluklamadır."
+    },
+    {
+      "id": "C2_2_44",
+      "old": {
+        "english": "wood",
+        "turkish": "orman",
+        "example": "Wood surrounded the village."
+      },
+      "new": {
+        "english": "woods",
+        "turkish": "orman, koru",
+        "example": "The woods surrounded the village."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "Tekil 'wood' tahta/odun demektir; orman anlamı 'woods' ile verilir. Türkçe anlam korundu, İngilizce düzeltildi."
+    },
+    {
+      "id": "C2_2_81",
+      "old": {
+        "english": "while",
+        "turkish": "süre",
+        "example": "While time passed, hope endured."
+      },
+      "new": {
+        "english": "lest",
+        "turkish": "-mesin diye",
+        "example": "Speak softly, lest you wake the baby."
+      },
+      "kind": "seviye",
+      "reason": "'while' A2 düzeyinde (C2'de yanlış seviye) ve B1'deki 'for a while' ile örtüşüyordu; grubun edebî/eski kelime konusuna uygun C2 kelimesi 'lest' kondu."
+    },
+    {
+      "id": "C2_2_25",
+      "old": {
+        "english": "love",
+        "turkish": "sevgi",
+        "example": "Love guided her choices."
+      },
+      "new": {
+        "english": "adoration",
+        "turkish": "tapınırcasına sevgi",
+        "example": "She looked at her son with adoration."
+      },
+      "kind": "seviye",
+      "reason": "'love' A1 kelimesi (A1_1_29) C2'de yeni kart olarak duruyordu; grubun duygu kelimeleri bölümüne uygun C2 düzeyinde bir isimle değiştirildi."
+    },
+    {
+      "id": "C2_4_81",
+      "old": {
+        "english": "good",
+        "turkish": "iyi",
+        "example": "The result was good."
+      },
+      "new": {
+        "english": "commendable",
+        "turkish": "takdire değer",
+        "example": "The team’s effort was commendable."
+      },
+      "kind": "seviye",
+      "reason": "'good' A1 kelimesi (A1_7_11) C2'de duruyordu; grubun nitelik sıfatları (adequate, excellent, remarkable) arasına uygun C2 sıfatı kondu."
+    },
+    {
+      "id": "C1_20_34",
+      "old": {
+        "english": "put it bluntly",
+        "turkish": "açık konuşmak",
+        "example": "Put it bluntly, the plan failed."
+      },
+      "new": {
+        "english": "put it bluntly",
+        "turkish": "açık konuşmak gerekirse",
+        "example": "To put it bluntly, the plan failed."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "Kalıp 'To put it bluntly, ...' biçiminde kullanılır; örnek dil bilgisi hatalıydı. Türkçe de kalıbın işlevine göre düzeltildi."
+    },
+    {
+      "id": "A1_1_8",
+      "old": {
+        "english": "sleep",
+        "turkish": "uyumak",
+        "example": "I sleep early."
+      },
+      "new": {
+        "english": "sleep",
+        "turkish": "uyumak",
+        "example": "I sleep eight hours a night."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'I sleep early.' doğal değil (doğrusu 'I go to bed early.').",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_1_21",
+      "old": {
+        "english": "take",
+        "turkish": "almak",
+        "example": "Take the bus."
+      },
+      "new": {
+        "english": "take",
+        "turkish": "almak",
+        "example": "Take an umbrella with you."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'Take the bus.' otobüse binmek demek, 'almak' anlamını göstermiyordu.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_1_42",
+      "old": {
+        "english": "cry",
+        "turkish": "ağlamak",
+        "example": "The baby cries."
+      },
+      "new": {
+        "english": "cry",
+        "turkish": "ağlamak",
+        "example": "The baby is crying."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'The baby cries.' bağlamsız geniş zamanla doğal değil; süren eylem.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_1_47",
+      "old": {
+        "english": "try",
+        "turkish": "denemek",
+        "example": "I try again."
+      },
+      "new": {
+        "english": "try",
+        "turkish": "denemek",
+        "example": "Let me try again."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'I try again.' doğal değil.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_1_50",
+      "old": {
+        "english": "meet",
+        "turkish": "tanışmak / buluşmak",
+        "example": "I meet new people."
+      },
+      "new": {
+        "english": "meet",
+        "turkish": "tanışmak",
+        "example": "I meet new people."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "Kartta iki anlam vardı ('tanışmak / buluşmak'); örnek ('I meet new people.') yalnız 'tanışmak' anlamını gösteriyor (karar 3).",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_2_11",
+      "old": {
+        "english": "door",
+        "turkish": "kapı",
+        "example": "The door is open."
+      },
+      "new": {
+        "english": "camera",
+        "turkish": "fotoğraf makinesi",
+        "example": "I take photos with my camera."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'door' A1_4_49'da (ev grubu) kalıyor; bu satıra gündelik eşya olarak yeni kelime kondu."
+    },
+    {
+      "id": "A1_2_12",
+      "old": {
+        "english": "window",
+        "turkish": "pencere",
+        "example": "Close the window, please."
+      },
+      "new": {
+        "english": "glasses",
+        "turkish": "gözlük",
+        "example": "I wear glasses."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'window' A1_4_50'de (ev grubu) kalıyor; bu satıra gündelik eşya olarak yeni kelime kondu."
+    },
+    {
+      "id": "A1_2_20",
+      "old": {
+        "english": "bag",
+        "turkish": "poşet",
+        "example": "I have a shopping bag."
+      },
+      "new": {
+        "english": "shopping bag",
+        "turkish": "alışveriş poşeti",
+        "example": "I put the bread in a shopping bag."
+      },
+      "kind": "bilesik_kelime",
+      "reason": "Ürün sahibi kararı 1: 'bag' tek başına poşet değil; anlam bileşik kelimeyle verildi. 'bag = çanta' A1_2_1'de kalıyor."
+    },
+    {
+      "id": "A1_2_21",
+      "old": {
+        "english": "bed",
+        "turkish": "yatak",
+        "example": "My bed is comfortable."
+      },
+      "new": {
+        "english": "toy",
+        "turkish": "oyuncak",
+        "example": "The baby has a new toy."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'bed' A1_4_31'de (yatak odası bölümü) kalıyor; bu satıra yeni eşya kelimesi kondu."
+    },
+    {
+      "id": "A1_2_23",
+      "old": {
+        "english": "mirror",
+        "turkish": "ayna",
+        "example": "I look in the mirror."
+      },
+      "new": {
+        "english": "comb",
+        "turkish": "tarak",
+        "example": "I need a comb."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'mirror' A1_4_36'da kalıyor; bu satıra kişisel bakım eşyası olarak yeni kelime kondu."
+    },
+    {
+      "id": "A1_2_24",
+      "old": {
+        "english": "clock",
+        "turkish": "saat",
+        "example": "The clock is on the wall."
+      },
+      "new": {
+        "english": "alarm clock",
+        "turkish": "çalar saat",
+        "example": "My alarm clock rings at seven."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'clock' A1_4_39'da kalıyor; bu satıra yeni kelime kondu."
+    },
+    {
+      "id": "A1_2_28",
+      "old": {
+        "english": "mouse",
+        "turkish": "fare",
+        "example": "The mouse is black."
+      },
+      "new": {
+        "english": "mouse",
+        "turkish": "fare (bilgisayar)",
+        "example": "The mouse is next to the keyboard."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "'fare' hayvanla karışabiliyordu; anlam ve örnek bilgisayar faresini açıkça gösteriyor. A1_10_48'deki kopya kaldırıldı."
+    },
+    {
+      "id": "A1_2_31",
+      "old": {
+        "english": "bag",
+        "turkish": "sırt çantası",
+        "example": "My school bag is heavy."
+      },
+      "new": {
+        "english": "school bag",
+        "turkish": "okul çantası",
+        "example": "My school bag is heavy."
+      },
+      "kind": "bilesik_kelime",
+      "reason": "Ürün sahibi kararı 1: 'bag' sırt çantası değil; örnekteki 'school bag' kart kelimesi yapıldı (sırt çantası 'backpack' A2'de var)."
+    },
+    {
+      "id": "A1_2_40",
+      "old": {
+        "english": "bag",
+        "turkish": "el çantası",
+        "example": "Her bag is small."
+      },
+      "new": {
+        "english": "handbag",
+        "turkish": "el çantası",
+        "example": "Her handbag is small."
+      },
+      "kind": "bilesik_kelime",
+      "reason": "Ürün sahibi kararı 1: el çantası anlamı 'handbag' ile verilir. Not: A2_4_39'da da 'handbag' var, sonraki turda ele alınacak."
+    },
+    {
+      "id": "A1_2_45",
+      "old": {
+        "english": "bag",
+        "turkish": "makyaj çantası",
+        "example": "My makeup bag is pink."
+      },
+      "new": {
+        "english": "makeup bag",
+        "turkish": "makyaj çantası",
+        "example": "My makeup bag is pink."
+      },
+      "kind": "bilesik_kelime",
+      "reason": "Ürün sahibi kararı 1: 'bag' tek başına makyaj çantası değil; bileşik kelime yapıldı, örnek zaten bu anlamı gösteriyor."
+    },
+    {
+      "id": "A1_2_48",
+      "old": {
+        "english": "soap",
+        "turkish": "el sabunu",
+        "example": "This soap is blue."
+      },
+      "new": {
+        "english": "hand soap",
+        "turkish": "el sabunu",
+        "example": "The hand soap smells nice."
+      },
+      "kind": "bilesik_kelime",
+      "reason": "Ürün sahibi kararı 1: el sabunu 'hand soap' ile verilir; eski örnek el sabununa özgü değildi. 'soap = sabun' A1_2_41'de kalıyor."
+    },
+    {
+      "id": "A1_3_21",
+      "old": {
+        "english": "friend",
+        "turkish": "arkadaş",
+        "example": "She is my best friend."
+      },
+      "new": {
+        "english": "friend",
+        "turkish": "arkadaş",
+        "example": "I have many friends."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "Örnek ('She is my best friend.') bir sonraki kartın kelimesini (best friend, A1_3_22) kullanıyordu; 'friend' tek başına gösterildi.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_3_29",
+      "old": {
+        "english": "partner",
+        "turkish": "eş / sevgili",
+        "example": "She is my partner."
+      },
+      "new": {
+        "english": "partner",
+        "turkish": "hayat arkadaşı",
+        "example": "She is my partner."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "'eş / sevgili' iki ayrı ilişki türü; ikisini birden karşılayan tek anlam 'hayat arkadaşı' verildi (karar 3).",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_3_38",
+      "old": {
+        "english": "adult",
+        "turkish": "yetişkin",
+        "example": "An adult buys a ticket."
+      },
+      "new": {
+        "english": "adult",
+        "turkish": "yetişkin",
+        "example": "Two adults and one child, please."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'An adult buys a ticket.' doğal değil; bilet alırken kurulan doğal cümle kondu.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_3_43",
+      "old": {
+        "english": "age",
+        "turkish": "yaş",
+        "example": "My age is twenty."
+      },
+      "new": {
+        "english": "age",
+        "turkish": "yaş",
+        "example": "We are the same age."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'My age is twenty.' doğal bir İngilizce cümle değil."
+    },
+    {
+      "id": "A1_3_47",
+      "old": {
+        "english": "group",
+        "turkish": "grup",
+        "example": "We are in a group."
+      },
+      "new": {
+        "english": "group",
+        "turkish": "grup",
+        "example": "We work in a group."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'We are in a group.' anlamsız ve doğal değil.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_3_48",
+      "old": {
+        "english": "team",
+        "turkish": "takım",
+        "example": "Our team wins."
+      },
+      "new": {
+        "english": "team",
+        "turkish": "takım",
+        "example": "Our team always wins."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'Our team wins.' bağlamsız geniş zamanla doğal değil.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_3_49",
+      "old": {
+        "english": "guest",
+        "turkish": "ziyaretçi/misafir",
+        "example": "A guest is at the door."
+      },
+      "new": {
+        "english": "visitor",
+        "turkish": "ziyaretçi",
+        "example": "A visitor is at the door."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "Aynı grupta 'guest' iki kez vardı (A1_3_30 kalıyor); 'ziyaretçi' anlamı kendi kelimesiyle verildi."
+    },
+    {
+      "id": "A1_4_8",
+      "old": {
+        "english": "hall",
+        "turkish": "koridor",
+        "example": "The hall is long."
+      },
+      "new": {
+        "english": "hall",
+        "turkish": "hol",
+        "example": "The hall is long."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "A1_10_24 hallway = 'koridor' ile aynı karşılıktı; evdeki hall Türkçede 'hol'dür.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_4_10",
+      "old": {
+        "english": "garden",
+        "turkish": "bahçe",
+        "example": "The garden has flowers."
+      },
+      "new": {
+        "english": "garden",
+        "turkish": "bahçe",
+        "example": "There are flowers in the garden."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "Editörün A1_4_20'de düzelttiği 'The shelf has books.' ile aynı doğal olmayan yapı ('The garden has flowers.').",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_4_14",
+      "old": {
+        "english": "television",
+        "turkish": "televizyon",
+        "example": "The TV is on."
+      },
+      "new": {
+        "english": "wall",
+        "turkish": "duvar",
+        "example": "The living room walls are yellow."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'television = televizyon' A1_2_26 'TV = televizyon' ile aynı anlamın kopyasıydı (örnek de 'The TV is on.' idi, kelimeyi içermiyordu). TV A1_2'de kalıyor; ev grubuna sözlükte kart olarak hiç olmayan temel A1 kelimesi 'wall' kondu.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_4_18",
+      "old": {
+        "english": "lamp",
+        "turkish": "lamba",
+        "example": "The lamp is bright."
+      },
+      "new": {
+        "english": "radio",
+        "turkish": "radyo",
+        "example": "I listen to the radio every morning."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'lamp' A1_2_22'de kalıyor; oturma odası bölümüne yeni kelime kondu."
+    },
+    {
+      "id": "A1_4_20",
+      "old": {
+        "english": "shelf",
+        "turkish": "raf",
+        "example": "The shelf has books."
+      },
+      "new": {
+        "english": "shelf",
+        "turkish": "raf",
+        "example": "There are books on the shelf."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'The shelf has books.' doğal değil."
+    },
+    {
+      "id": "A1_4_28",
+      "old": {
+        "english": "plate",
+        "turkish": "tabak",
+        "example": "The plate is white."
+      },
+      "new": {
+        "english": "microwave",
+        "turkish": "mikrodalga fırın",
+        "example": "Heat the soup in the microwave."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'plate' A1_2_16'da kalıyor; mutfak bölümüne yeni kelime kondu."
+    },
+    {
+      "id": "A1_4_29",
+      "old": {
+        "english": "fork",
+        "turkish": "çatal",
+        "example": "I need a fork."
+      },
+      "new": {
+        "english": "dishwasher",
+        "turkish": "bulaşık makinesi",
+        "example": "The dishwasher is full."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'fork' A1_2_18'de kalıyor; mutfak bölümüne yeni kelime kondu."
+    },
+    {
+      "id": "A1_4_30",
+      "old": {
+        "english": "spoon",
+        "turkish": "kaşık",
+        "example": "The spoon is silver."
+      },
+      "new": {
+        "english": "toaster",
+        "turkish": "ekmek kızartma makinesi",
+        "example": "The toaster is next to the fridge."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'spoon' A1_2_17'de kalıyor; mutfak bölümüne yeni kelime kondu."
+    },
+    {
+      "id": "A1_4_38",
+      "old": {
+        "english": "chair",
+        "turkish": "sandalye",
+        "example": "The chair is new."
+      },
+      "new": {
+        "english": "stairs",
+        "turkish": "merdiven",
+        "example": "The stairs are in the hall."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'chair' A1_2_3'te kalıyor (A1_4_38 ve A1_10_6 kopyaydı); ev bölümüne yeni kelime kondu."
+    },
+    {
+      "id": "A1_4_40",
+      "old": {
+        "english": "lamp",
+        "turkish": "masa lambası",
+        "example": "The lamp is next to the bed."
+      },
+      "new": {
+        "english": "desk lamp",
+        "turkish": "masa lambası",
+        "example": "Turn on the desk lamp, please."
+      },
+      "kind": "bilesik_kelime",
+      "reason": "Ürün sahibi kararı 1: 'masa lambası' anlamı 'desk lamp' ile verildi; eski örnek yatak başındaki lambayı anlatıyordu. Not: B1_3_51'de de 'desk lamp' var, sonraki turda ele alınacak."
+    },
+    {
+      "id": "A1_4_43",
+      "old": {
+        "english": "towel",
+        "turkish": "havlu",
+        "example": "The towel is soft."
+      },
+      "new": {
+        "english": "bathtub",
+        "turkish": "küvet",
+        "example": "The bathtub is white."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'towel' A1_2_42'de kalıyor; banyo bölümüne yeni kelime kondu."
+    },
+    {
+      "id": "A1_4_44",
+      "old": {
+        "english": "soap",
+        "turkish": "sabun",
+        "example": "I use soap."
+      },
+      "new": {
+        "english": "toilet paper",
+        "turkish": "tuvalet kâğıdı",
+        "example": "We need toilet paper."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'soap' A1_2_41'de kalıyor (üçüncü kopyaydı); banyo bölümüne yeni kelime kondu."
+    },
+    {
+      "id": "A1_5_45",
+      "old": {
+        "english": "milkshake",
+        "turkish": "aromalı süt",
+        "example": "I want a banana milkshake."
+      },
+      "new": {
+        "english": "milkshake",
+        "turkish": "milkshake (dondurmalı süt içeceği)",
+        "example": "I want a banana milkshake."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "'Aromalı süt' flavored milk demektir; milkshake dondurma ve sütle yapılır."
+    },
+    {
+      "id": "A1_5_46",
+      "old": {
+        "english": "soda",
+        "turkish": "soda / gazlı içecek",
+        "example": "I don't drink soda."
+      },
+      "new": {
+        "english": "soda",
+        "turkish": "gazlı içecek",
+        "example": "I don't drink soda."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "Yalancı eş anlamlı: Türkçede 'soda' maden suyudur; Amerikan İngilizcesinde soda gazlı içecektir (kola vb.). 'soda /' kısmı kaldırıldı.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_6_10",
+      "old": {
+        "english": "around",
+        "turkish": "etrafta",
+        "example": "Walk around the park."
+      },
+      "new": {
+        "english": "around",
+        "turkish": "etrafında",
+        "example": "Walk around the park."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "Örnek 'parkın etrafında' anlamını veriyor; 'etrafta' uymuyordu."
+    },
+    {
+      "id": "A1_6_18",
+      "old": {
+        "english": "school",
+        "turkish": "okul",
+        "example": "The school is near."
+      },
+      "new": {
+        "english": "zoo",
+        "turkish": "hayvanat bahçesi",
+        "example": "We see lions at the zoo."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'school' A1_10_1'de (okul grubu) kalıyor; şehirdeki yerler grubuna yeni kelime kondu."
+    },
+    {
+      "id": "A1_6_21",
+      "old": {
+        "english": "market",
+        "turkish": "market",
+        "example": "The market is open."
+      },
+      "new": {
+        "english": "market",
+        "turkish": "pazar yeri",
+        "example": "We buy vegetables at the market."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "Yalancı eş anlamlı: İngilizce 'market' pazar/çarşıdır; Türkçedeki market 'supermarket'tir (A2_2_2'de var).",
+      "review_note": "Editörün 'pazar' karşılığı A1_8_27 Sunday = 'Pazar' ile aynı görünüyordu; kart arkasında karışmasın diye 'pazar yeri' yapıldı."
+    },
+    {
+      "id": "A1_6_41",
+      "old": {
+        "english": "outside",
+        "turkish": "dışarı",
+        "example": "The kids are outside."
+      },
+      "new": {
+        "english": "outside",
+        "turkish": "dışarıda",
+        "example": "The kids are outside."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "Örnek bulunma bildiriyor; 'dışarıda' olmalı (A1_6_42 'içeride' ile tutarlı)."
+    },
+    {
+      "id": "A1_6_45",
+      "old": {
+        "english": "area",
+        "turkish": "alan",
+        "example": "This area is safe."
+      },
+      "new": {
+        "english": "area",
+        "turkish": "bölge",
+        "example": "This area is safe."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "'This area is safe.' Türkçede 'Bu bölge güvenli.' olur; 'alan' bu bağlamda doğal değil.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_6_50",
+      "old": {
+        "english": "direction",
+        "turkish": "yön",
+        "example": "He gives me the direction."
+      },
+      "new": {
+        "english": "direction",
+        "turkish": "yön",
+        "example": "We walk in the same direction."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'He gives me the direction.' doğal değil ve 'yön' anlamını göstermiyordu."
+    },
+    {
+      "id": "A1_7_7",
+      "old": {
+        "english": "thin",
+        "turkish": "zayıf / ince",
+        "example": "The boy is thin."
+      },
+      "new": {
+        "english": "thin",
+        "turkish": "zayıf",
+        "example": "The boy is thin."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "Kartta iki anlam vardı; örnek ('The boy is thin.') yalnızca 'zayıf' anlamını gösteriyor."
+    },
+    {
+      "id": "A1_7_19",
+      "old": {
+        "english": "weak",
+        "turkish": "zayıf",
+        "example": "I feel weak."
+      },
+      "new": {
+        "english": "weak",
+        "turkish": "güçsüz",
+        "example": "I feel weak."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "Aynı grupta 'thin' de 'zayıf'; 'weak' anlamı 'güçsüz' ile ayrıştırıldı, örnek ('I feel weak.') buna uyuyor."
+    },
+    {
+      "id": "A1_7_31",
+      "old": {
+        "english": "red",
+        "turkish": "kırmızı",
+        "example": "The apple is red."
+      },
+      "new": {
+        "english": "poor",
+        "turkish": "fakir",
+        "example": "The family is poor."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "Renkler A1_9 (renkler grubu) içinde kalıyor; A1_7'deki kopya 'red' yerine sıfat kondu ('rich' ile çift oluşturuyor)."
+    },
+    {
+      "id": "A1_7_32",
+      "old": {
+        "english": "blue",
+        "turkish": "mavi",
+        "example": "The sky is blue."
+      },
+      "new": {
+        "english": "beautiful",
+        "turkish": "güzel",
+        "example": "The garden is beautiful."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'blue' A1_9_2'de kalıyor; sıfatlar grubuna yeni kelime kondu."
+    },
+    {
+      "id": "A1_7_33",
+      "old": {
+        "english": "green",
+        "turkish": "yeşil",
+        "example": "The grass is green."
+      },
+      "new": {
+        "english": "ugly",
+        "turkish": "çirkin",
+        "example": "This shirt is ugly."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'green' A1_9_4'te kalıyor; sıfatlar grubuna yeni kelime kondu."
+    },
+    {
+      "id": "A1_7_34",
+      "old": {
+        "english": "yellow",
+        "turkish": "sarı",
+        "example": "The sun is yellow."
+      },
+      "new": {
+        "english": "dangerous",
+        "turkish": "tehlikeli",
+        "example": "This road is dangerous."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'yellow' A1_9_3'te kalıyor; sıfatlar grubuna yeni kelime kondu."
+    },
+    {
+      "id": "A1_7_35",
+      "old": {
+        "english": "black",
+        "turkish": "siyah",
+        "example": "My bag is black."
+      },
+      "new": {
+        "english": "boring",
+        "turkish": "sıkıcı",
+        "example": "The movie is boring."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'black' A1_9_5'te kalıyor; sıfatlar grubuna yeni kelime kondu ('bored' ile karşılaştırma sağlar)."
+    },
+    {
+      "id": "A1_7_36",
+      "old": {
+        "english": "white",
+        "turkish": "beyaz",
+        "example": "The car is white."
+      },
+      "new": {
+        "english": "wet",
+        "turkish": "ıslak",
+        "example": "My hair is wet."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'white' A1_9_6'da kalıyor; sıfatlar grubuna yeni kelime kondu."
+    },
+    {
+      "id": "A1_7_37",
+      "old": {
+        "english": "brown",
+        "turkish": "kahverengi",
+        "example": "The table is brown."
+      },
+      "new": {
+        "english": "sweet",
+        "turkish": "tatlı",
+        "example": "The cake is very sweet."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'brown' A1_9_10'da kalıyor; sıfatlar grubuna yeni kelime kondu."
+    },
+    {
+      "id": "A1_7_38",
+      "old": {
+        "english": "pink",
+        "turkish": "pembe",
+        "example": "Her dress is pink."
+      },
+      "new": {
+        "english": "delicious",
+        "turkish": "lezzetli",
+        "example": "The soup is delicious."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'pink' A1_9_9'da kalıyor; sıfatlar grubuna yeni kelime kondu."
+    },
+    {
+      "id": "A1_7_39",
+      "old": {
+        "english": "purple",
+        "turkish": "mor",
+        "example": "I like purple flowers."
+      },
+      "new": {
+        "english": "famous",
+        "turkish": "ünlü",
+        "example": "She is a famous singer."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'purple' A1_9_8'de kalıyor; sıfatlar grubuna yeni kelime kondu."
+    },
+    {
+      "id": "A1_7_40",
+      "old": {
+        "english": "orange",
+        "turkish": "turuncu",
+        "example": "The orange is orange."
+      },
+      "new": {
+        "english": "careful",
+        "turkish": "dikkatli",
+        "example": "Please be careful."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'orange = turuncu' A1_9_7'de kalıyor (aynı örnekle kopyaydı); sıfatlar grubuna yeni kelime kondu."
+    },
+    {
+      "id": "A1_8_6",
+      "old": {
+        "english": "soon",
+        "turkish": "yakında",
+        "example": "Dinner is ready soon."
+      },
+      "new": {
+        "english": "soon",
+        "turkish": "yakında",
+        "example": "Dinner will be ready soon."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'soon' gelecek bildirir; 'will be' gerekir."
+    },
+    {
+      "id": "A1_8_9",
+      "old": {
+        "english": "tonight",
+        "turkish": "bu gece",
+        "example": "We watch a movie tonight."
+      },
+      "new": {
+        "english": "tonight",
+        "turkish": "bu gece",
+        "example": "We are watching a movie tonight."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "Planlanmış gelecek geniş zamanla anlatılmıştı (A1_8_6 soon ile aynı sorun).",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_8_15",
+      "old": {
+        "english": "midnight",
+        "turkish": "gece yarısı",
+        "example": "I never sleep at midnight."
+      },
+      "new": {
+        "english": "midnight",
+        "turkish": "gece yarısı",
+        "example": "The party ends at midnight."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'I never sleep at midnight.' anlamca tuhaf.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_8_44",
+      "old": {
+        "english": "at night",
+        "turkish": "gece",
+        "example": "I read at night."
+      },
+      "new": {
+        "english": "at night",
+        "turkish": "geceleyin",
+        "example": "I read at night."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "A1_8_14 night = 'gece' ile aynı karşılıktı; A1_8_43 in the morning = 'sabahleyin' ile tutarlı biçimde 'geceleyin' yapıldı.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_8_45",
+      "old": {
+        "english": "in a minute",
+        "turkish": "bir dakika içinde",
+        "example": "I come in a minute."
+      },
+      "new": {
+        "english": "in a minute",
+        "turkish": "birazdan",
+        "example": "I’ll be back in a minute."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "'bir dakika içinde' sözcüğü sözcüğüne çeviri; doğal karşılık 'birazdan'. Örnek de gelecek zaman gerektiriyordu."
+    },
+    {
+      "id": "A1_8_46",
+      "old": {
+        "english": "for a long time",
+        "turkish": "uzun süredir",
+        "example": "I wait for a long time."
+      },
+      "new": {
+        "english": "for a long time",
+        "turkish": "uzun süre",
+        "example": "We talked for a long time."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "'uzun süredir' present perfect ister; A1 için 'uzun süre' anlamı ve geçmiş zamanlı doğal örnek verildi."
+    },
+    {
+      "id": "A1_9_7",
+      "old": {
+        "english": "orange",
+        "turkish": "turuncu",
+        "example": "The orange is orange."
+      },
+      "new": {
+        "english": "orange",
+        "turkish": "turuncu",
+        "example": "My shirt is orange."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'The orange is orange.' iki anlamı aynı cümlede karıştırıyordu (A1_7_40'taki kopya kaldırıldı)."
+    },
+    {
+      "id": "A1_9_12",
+      "old": {
+        "english": "gold",
+        "turkish": "altın rengi",
+        "example": "She has a gold ring."
+      },
+      "new": {
+        "english": "gold",
+        "turkish": "altın rengi",
+        "example": "Her new shoes are gold."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'gold ring' malzeme anlamı (altın yüzük); Türkçe 'altın rengi' olduğu için örnek renk anlamını gösterecek biçimde değişti."
+    },
+    {
+      "id": "A1_9_26",
+      "old": {
+        "english": "weather",
+        "turkish": "hava durumu",
+        "example": "The weather is good."
+      },
+      "new": {
+        "english": "weather",
+        "turkish": "hava",
+        "example": "The weather is good."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "'weather' hava demektir; 'hava durumu' weather forecast'tır."
+    },
+    {
+      "id": "A1_9_33",
+      "old": {
+        "english": "foggy",
+        "turkish": "sisli",
+        "example": "The road is foggy."
+      },
+      "new": {
+        "english": "foggy",
+        "turkish": "sisli",
+        "example": "It is foggy this morning."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'The road is foggy.' doğal değil; hava için 'It is foggy' kalıbı kullanılır.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_9_34",
+      "old": {
+        "english": "hot",
+        "turkish": "sıcak",
+        "example": "The day is hot."
+      },
+      "new": {
+        "english": "summer",
+        "turkish": "yaz",
+        "example": "It is hot in summer."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'hot' A1_7_41'de kalıyor (A1_9_50 'a hot day' de var); hava grubuna mevsim adı kondu."
+    },
+    {
+      "id": "A1_9_35",
+      "old": {
+        "english": "cold",
+        "turkish": "soğuk",
+        "example": "It is very cold."
+      },
+      "new": {
+        "english": "winter",
+        "turkish": "kış",
+        "example": "It snows in winter."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'cold' A1_7_42'de kalıyor; hava grubuna mevsim adı kondu."
+    },
+    {
+      "id": "A1_9_43",
+      "old": {
+        "english": "rain",
+        "turkish": "yağmur",
+        "example": "The rain is strong."
+      },
+      "new": {
+        "english": "rain",
+        "turkish": "yağmur",
+        "example": "The rain is heavy today."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'strong rain' doğal değil; İngilizcede 'heavy rain' denir."
+    },
+    {
+      "id": "A1_9_47",
+      "old": {
+        "english": "It is…",
+        "turkish": "Hava …",
+        "example": "It is sunny."
+      },
+      "new": {
+        "english": "It is…",
+        "turkish": "(hava için) Hava …",
+        "example": "It is sunny."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "'It is' her bağlamda 'Hava …' demek değil; kartta bağlam belirtildi."
+    },
+    {
+      "id": "A1_9_49",
+      "old": {
+        "english": "The temperature",
+        "turkish": "sıcaklık",
+        "example": "The temperature is low."
+      },
+      "new": {
+        "english": "temperature",
+        "turkish": "sıcaklık",
+        "example": "The temperature is low."
+      },
+      "kind": "yazim",
+      "reason": "Kart kelimesi gereksiz büyük harf ve artikel içeriyordu."
+    },
+    {
+      "id": "A1_9_50",
+      "old": {
+        "english": "a hot day / a cold day",
+        "turkish": "sıcak gün / soğuk gün",
+        "example": "It is a hot day."
+      },
+      "new": {
+        "english": "spring",
+        "turkish": "ilkbahar",
+        "example": "It is warm in spring."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "Kart iki ifade taşıyordu ('a hot day / a cold day', örnek yalnız birini gösteriyordu) ve hot/cold kartlarının (A1_7_41, A1_7_42) tekrarıydı. Editörün eklediği summer/winter ile mevsimler tamamlansın diye sözlükte olmayan 'spring' kondu.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_10_3",
+      "old": {
+        "english": "teacher",
+        "turkish": "öğretmen",
+        "example": "The teacher is kind."
+      },
+      "new": {
+        "english": "eraser",
+        "turkish": "silgi",
+        "example": "Can I use your eraser?"
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'teacher' A1_3_24'te kalıyor; okul grubuna okul gereci kondu."
+    },
+    {
+      "id": "A1_10_4",
+      "old": {
+        "english": "student",
+        "turkish": "öğrenci",
+        "example": "I am a student."
+      },
+      "new": {
+        "english": "ruler",
+        "turkish": "cetvel",
+        "example": "I need a ruler for math."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'student' A1_3_25'te kalıyor (örnek de aynıydı); okul grubuna yeni kelime kondu."
+    },
+    {
+      "id": "A1_10_5",
+      "old": {
+        "english": "desk",
+        "turkish": "sıra / masa",
+        "example": "I sit at my desk."
+      },
+      "new": {
+        "english": "pencil case",
+        "turkish": "kalem kutusu",
+        "example": "My pencil case is in my bag."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'desk' A1_4_37'de kalıyor; okul grubuna yeni kelime kondu."
+    },
+    {
+      "id": "A1_10_6",
+      "old": {
+        "english": "chair",
+        "turkish": "sandalye",
+        "example": "The chair is new."
+      },
+      "new": {
+        "english": "scissors",
+        "turkish": "makas",
+        "example": "The scissors are on the table."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'chair' A1_2_3'te kalıyor; okul grubuna yeni kelime kondu."
+    },
+    {
+      "id": "A1_10_8",
+      "old": {
+        "english": "book",
+        "turkish": "kitap",
+        "example": "I read a book."
+      },
+      "new": {
+        "english": "dictionary",
+        "turkish": "sözlük",
+        "example": "I use a dictionary in class."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'book' A1_2_8'de kalıyor (örnek de aynıydı); okul grubuna yeni kelime kondu."
+    },
+    {
+      "id": "A1_10_9",
+      "old": {
+        "english": "notebook",
+        "turkish": "defter",
+        "example": "I write in my notebook."
+      },
+      "new": {
+        "english": "glue",
+        "turkish": "yapıştırıcı",
+        "example": "I need some glue."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'notebook' A1_2_7'de kalıyor (örnek de aynıydı); okul grubuna yeni kelime kondu."
+    },
+    {
+      "id": "A1_10_10",
+      "old": {
+        "english": "pen",
+        "turkish": "kalem",
+        "example": "I need a pen."
+      },
+      "new": {
+        "english": "geography",
+        "turkish": "coğrafya",
+        "example": "We have geography on Monday."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'pen' A1_2_5'te kalıyor (örnek de aynıydı); grubun ders adlarına (math, English, science) yeni ders kondu."
+    },
+    {
+      "id": "A1_10_15",
+      "old": {
+        "english": "class",
+        "turkish": "sınıf / ders",
+        "example": "My class starts at 9."
+      },
+      "new": {
+        "english": "class",
+        "turkish": "sınıf (öğrenciler)",
+        "example": "There are twenty students in my class."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "Kartta iki anlam vardı ('sınıf / ders'); 'ders' A1_10_11 lesson ile, 'sınıf' A1_10_2 classroom ile çakışıyordu. Öğrenci topluluğu anlamı bırakıldı, örnek bunu gösteriyor.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_10_17",
+      "old": {
+        "english": "subject",
+        "turkish": "ders konusu",
+        "example": "Math is my favorite subject."
+      },
+      "new": {
+        "english": "subject",
+        "turkish": "ders (matematik, fen gibi)",
+        "example": "Math is my favorite subject."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "Okul bağlamında 'subject' derstir (matematik bir ders); 'ders konusu' topic'tir. Aynı gruptaki 'lesson = ders' ile karışmasın diye açıklama eklendi."
+    },
+    {
+      "id": "A1_10_21",
+      "old": {
+        "english": "library",
+        "turkish": "kütüphane",
+        "example": "The library is quiet."
+      },
+      "new": {
+        "english": "school bus",
+        "turkish": "okul servisi",
+        "example": "The school bus is yellow."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'library' A1_6_27'de kalıyor (örnek de aynıydı); okul grubuna yeni kelime kondu."
+    },
+    {
+      "id": "A1_10_25",
+      "old": {
+        "english": "office",
+        "turkish": "ofis / müdür odası",
+        "example": "Go to the office, please."
+      },
+      "new": {
+        "english": "principal's office",
+        "turkish": "müdür odası",
+        "example": "Go to the principal's office, please."
+      },
+      "kind": "bilesik_kelime",
+      "reason": "Ürün sahibi kararı 1: daralmış anlam ('müdür odası') bileşik kelimeyle verildi; 'office = ofis' A1_10_33'te kalıyor."
+    },
+    {
+      "id": "A1_10_27",
+      "old": {
+        "english": "work",
+        "turkish": "iş / çalışmak",
+        "example": "I work in an office."
+      },
+      "new": {
+        "english": "page",
+        "turkish": "sayfa",
+        "example": "Open your book to page ten."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'work' A1_1_26'da kalıyor (örnek de aynıydı); okul grubuna yeni kelime kondu."
+    },
+    {
+      "id": "A1_10_29",
+      "old": {
+        "english": "boss",
+        "turkish": "patron",
+        "example": "My boss is nice."
+      },
+      "new": {
+        "english": "secretary",
+        "turkish": "sekreter",
+        "example": "The secretary answers the phone."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'boss' A1_3_28'de kalıyor; iş bölümüne yeni meslek kondu."
+    },
+    {
+      "id": "A1_10_31",
+      "old": {
+        "english": "team",
+        "turkish": "ekip",
+        "example": "Our team is small."
+      },
+      "new": {
+        "english": "timetable",
+        "turkish": "ders programı",
+        "example": "Our timetable is on the wall."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'team' A1_3_48'de kalıyor; okul grubuna yeni kelime kondu."
+    },
+    {
+      "id": "A1_10_36",
+      "old": {
+        "english": "start",
+        "turkish": "başlamak",
+        "example": "We start at 8."
+      },
+      "new": {
+        "english": "teach",
+        "turkish": "öğretmek",
+        "example": "She teaches English."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'start' A1_1_36'da kalıyor; okul/iş fiillerine yeni fiil kondu."
+    },
+    {
+      "id": "A1_10_37",
+      "old": {
+        "english": "finish",
+        "turkish": "bitirmek",
+        "example": "We finish at 5."
+      },
+      "new": {
+        "english": "spell",
+        "turkish": "harf harf söylemek",
+        "example": "Can you spell your name?"
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'finish' A1_1_37'de kalıyor; yeni fiil kondu.",
+      "review_note": "'hecelemek' kelimeyi hecelerine ayırmaktır; spell harflerini tek tek söylemek demektir ('Can you spell your name?')."
+    },
+    {
+      "id": "A1_10_38",
+      "old": {
+        "english": "send",
+        "turkish": "göndermek",
+        "example": "I send an email."
+      },
+      "new": {
+        "english": "print",
+        "turkish": "yazdırmak",
+        "example": "Please print this page."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'send' A1_1_45'te kalıyor (örnek de aynıydı); grubun yazıcı/ofis bağlamına uygun fiil kondu."
+    },
+    {
+      "id": "A1_10_39",
+      "old": {
+        "english": "call",
+        "turkish": "aramak",
+        "example": "I call my boss."
+      },
+      "new": {
+        "english": "remember",
+        "turkish": "hatırlamak",
+        "example": "I remember your name."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'call' A1_1_35'te kalıyor; yeni fiil kondu."
+    },
+    {
+      "id": "A1_10_41",
+      "old": {
+        "english": "write",
+        "turkish": "yazmak",
+        "example": "I write a report."
+      },
+      "new": {
+        "english": "forget",
+        "turkish": "unutmak",
+        "example": "Don’t forget your homework."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'write' A1_1_15'te kalıyor; yeni fiil kondu."
+    },
+    {
+      "id": "A1_10_42",
+      "old": {
+        "english": "read",
+        "turkish": "okumak",
+        "example": "I read emails."
+      },
+      "new": {
+        "english": "tell",
+        "turkish": "söylemek",
+        "example": "Please tell me your name."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'read' A1_1_14'te kalıyor; yeni fiil kondu."
+    },
+    {
+      "id": "A1_10_43",
+      "old": {
+        "english": "help",
+        "turkish": "yardım etmek",
+        "example": "I help my team."
+      },
+      "new": {
+        "english": "think",
+        "turkish": "düşünmek",
+        "example": "Think before you answer."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'help' A1_1_23'te kalıyor; yeni fiil kondu."
+    },
+    {
+      "id": "A1_10_44",
+      "old": {
+        "english": "ask",
+        "turkish": "sormak",
+        "example": "I ask a question."
+      },
+      "new": {
+        "english": "draw",
+        "turkish": "çizmek",
+        "example": "I draw a picture of my house."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'ask' A1_1_48'de kalıyor (örnek de aynıydı); yeni fiil kondu."
+    },
+    {
+      "id": "A1_10_45",
+      "old": {
+        "english": "answer",
+        "turkish": "cevaplamak",
+        "example": "I answer the phone."
+      },
+      "new": {
+        "english": "count",
+        "turkish": "saymak",
+        "example": "Count from one to ten."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'answer' A1_1_49'da kalıyor (örnek de aynıydı); yeni fiil kondu."
+    },
+    {
+      "id": "A1_10_46",
+      "old": {
+        "english": "computer",
+        "turkish": "bilgisayar",
+        "example": "I use a computer."
+      },
+      "new": {
+        "english": "internet",
+        "turkish": "internet",
+        "example": "I use the internet every day."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'computer' A1_2_27'de kalıyor (örnek de aynıydı); yeni kelime kondu."
+    },
+    {
+      "id": "A1_10_47",
+      "old": {
+        "english": "keyboard",
+        "turkish": "klavye",
+        "example": "The keyboard is black."
+      },
+      "new": {
+        "english": "email",
+        "turkish": "e-posta",
+        "example": "Send me an email, please."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'keyboard' A1_2_29'da kalıyor; yeni kelime kondu."
+    },
+    {
+      "id": "A1_10_48",
+      "old": {
+        "english": "mouse",
+        "turkish": "mouse",
+        "example": "The mouse is small."
+      },
+      "new": {
+        "english": "phone number",
+        "turkish": "telefon numarası",
+        "example": "What is your phone number?"
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'mouse' A1_2_28'de kalıyor (Türkçesi de 'mouse' yazılmıştı); yeni kelime kondu."
+    },
+    {
+      "id": "A1_11_10",
+      "old": {
+        "english": "what time",
+        "turkish": "saat kaçta",
+        "example": "What time is it?"
+      },
+      "new": {
+        "english": "what time",
+        "turkish": "saat kaçta",
+        "example": "What time do you get up?"
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'What time is it?' 'saat kaç' demek; 'saat kaçta' anlamını gösteren örnek kondu."
+    },
+    {
+      "id": "A1_11_22",
+      "old": {
+        "english": "where to",
+        "turkish": "nereye",
+        "example": "Where are you going to?"
+      },
+      "new": {
+        "english": "where to",
+        "turkish": "nereye",
+        "example": "I don’t know where to go."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'Where are you going to?' sonundaki 'to' gereksiz ve aynı soru A1_11_36'da var."
+    },
+    {
+      "id": "A1_11_30",
+      "old": {
+        "english": "which way",
+        "turkish": "hangi yol",
+        "example": "Which way is the bank?"
+      },
+      "new": {
+        "english": "which way",
+        "turkish": "hangi taraf",
+        "example": "Which way is the bank?"
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "'Which way is the bank?' = 'Banka hangi tarafta?'; 'hangi yol' kelimesi kelimesine çeviri.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_12_1",
+      "old": {
+        "english": "wake up",
+        "turkish": "uyanmak",
+        "example": "I wake up at 7."
+      },
+      "new": {
+        "english": "grow up",
+        "turkish": "büyümek",
+        "example": "Children grow up fast."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "'wake up' A1_1_9'da kalıyor (örnek de aynıydı); deyimsel fiil grubuna yeni fiil kondu."
+    },
+    {
+      "id": "A1_12_3",
+      "old": {
+        "english": "get in",
+        "turkish": "içeri girmek (araç/oda)",
+        "example": "Get in the car."
+      },
+      "new": {
+        "english": "get in",
+        "turkish": "binmek (araba, taksi)",
+        "example": "Get in the car."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "'içeri girmek (araç/oda)' iki anlam taşıyordu ve örnek ('Get in the car.') arabaya binmektir. get in (araba) / get on (otobüs) ayrımı Türkçede gösterildi.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_12_8",
+      "old": {
+        "english": "turn off",
+        "turkish": "kapatmak",
+        "example": "Turn off the TV."
+      },
+      "new": {
+        "english": "turn off",
+        "turkish": "kapatmak (ışık, cihaz)",
+        "example": "Turn off the TV."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "A1_1_19 close = 'kapatmak' ile aynı karşılıktı; A1_12_7 turn on 'açmak (ışık, cihaz)' ile tutarlı biçimde bağlam eklendi.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_12_11",
+      "old": {
+        "english": "pick up",
+        "turkish": "almak / yerden kaldırmak",
+        "example": "Pick up your bag."
+      },
+      "new": {
+        "english": "pick up",
+        "turkish": "yerden almak",
+        "example": "Pick up your bag."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "Kartta iki anlam vardı; örnek ('Pick up your bag.') yerden alma anlamını gösteriyor."
+    },
+    {
+      "id": "A1_12_12",
+      "old": {
+        "english": "put down",
+        "turkish": "bir şeyi koymak",
+        "example": "Put down the book."
+      },
+      "new": {
+        "english": "put down",
+        "turkish": "elinden bırakmak",
+        "example": "Put down the book."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "'bir şeyi koymak' doğal bir sözlük karşılığı değil; 'Put down the book.' = 'Kitabı elinden bırak.'",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_12_13",
+      "old": {
+        "english": "look for",
+        "turkish": "aramak",
+        "example": "I look for my keys."
+      },
+      "new": {
+        "english": "look for",
+        "turkish": "aramak (kayıp bir şeyi)",
+        "example": "I am looking for my keys."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "Süren eylem geniş zamanla anlatılmıştı; şimdiki zaman doğal.",
+      "review_note": "A1_1_35 call = 'aramak' ile aynı karşılık kalıyordu; telefonla aramadan ayrılsın diye bağlam eklendi."
+    },
+    {
+      "id": "A1_12_16",
+      "old": {
+        "english": "check out",
+        "turkish": "göz atmak / kontrol etmek",
+        "example": "Check out this photo."
+      },
+      "new": {
+        "english": "check out",
+        "turkish": "göz atmak",
+        "example": "Check out this photo."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "Tek anlam bırakıldı; örnek ('Check out this photo.') göz atma anlamında."
+    },
+    {
+      "id": "A1_12_18",
+      "old": {
+        "english": "go out",
+        "turkish": "dışarı çıkmak",
+        "example": "We go out at night."
+      },
+      "new": {
+        "english": "go out",
+        "turkish": "dışarı çıkmak (eğlenmek için)",
+        "example": "We go out at night."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "A1_12_4 get out ile aynı karşılıktı ('dışarı çıkmak'); go out'un örnekteki anlamı ('We go out at night.') eğlenmek/gezmek için çıkmak.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_12_24",
+      "old": {
+        "english": "turn around",
+        "turkish": "arkanı dönmek",
+        "example": "Turn around slowly."
+      },
+      "new": {
+        "english": "turn around",
+        "turkish": "arkaya dönmek",
+        "example": "Turn around slowly."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "Türkçe karşılık mastar biçiminde ve kişi ekinden arındırıldı ('arkanı' → 'arkaya')."
+    },
+    {
+      "id": "A1_12_25",
+      "old": {
+        "english": "come up",
+        "turkish": "yaklaşmak",
+        "example": "Come up here."
+      },
+      "new": {
+        "english": "come up",
+        "turkish": "yukarı gelmek",
+        "example": "Come up to my room."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "'yaklaşmak' sınırlı bir kullanım; örnek 'yukarı gelmek/çıkmak' anlamındaydı.",
+      "review_note": "'come' gelmek demek; örnekte konuşan yukarıda ('Come up to my room.'), doğal karşılık 'yukarı gelmek'."
+    },
+    {
+      "id": "A1_12_28",
+      "old": {
+        "english": "get on",
+        "turkish": "araca binmek",
+        "example": "Get on the bus."
+      },
+      "new": {
+        "english": "get on",
+        "turkish": "binmek (otobüs, tren)",
+        "example": "Get on the bus."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "'araca binmek' fazla genel; arabaya 'get in' ile binilir (A1_12_3). get on toplu taşıma için kullanılır.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_12_29",
+      "old": {
+        "english": "get off",
+        "turkish": "araçtan inmek",
+        "example": "Get off at the next stop."
+      },
+      "new": {
+        "english": "get off",
+        "turkish": "inmek (otobüs, tren)",
+        "example": "Get off at the next stop."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "get on ile tutarlı olsun diye; arabadan inmek 'get out of the car' olur.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_12_30",
+      "old": {
+        "english": "write down",
+        "turkish": "not almak",
+        "example": "Write down your name."
+      },
+      "new": {
+        "english": "write down",
+        "turkish": "not etmek",
+        "example": "Write down your name."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "'not almak' take notes demektir; 'Write down your name.' bir şeyi kâğıda yazıp not etmektir.",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_12_31",
+      "old": {
+        "english": "call back",
+        "turkish": "geri aramak",
+        "example": "I call you back later."
+      },
+      "new": {
+        "english": "call back",
+        "turkish": "geri aramak",
+        "example": "I’ll call you back later."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'later' gelecek bildirir; 'will' gerekir."
+    },
+    {
+      "id": "A1_12_32",
+      "old": {
+        "english": "find out",
+        "turkish": "öğrenmek",
+        "example": "I find out the answer."
+      },
+      "new": {
+        "english": "find out",
+        "turkish": "öğrenmek (bir bilgiyi)",
+        "example": "I want to find out the answer."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'I find out the answer.' doğal değil.",
+      "review_note": "A1_1_34 learn = 'öğrenmek' ile aynı karşılık kalıyordu; find out bir bilgiyi öğrenmek, ortaya çıkarmaktır."
+    },
+    {
+      "id": "A1_12_34",
+      "old": {
+        "english": "hold on",
+        "turkish": "hatta kalmak",
+        "example": "Hold on, please."
+      },
+      "new": {
+        "english": "hold on",
+        "turkish": "sıkı tutunmak",
+        "example": "Hold on tight!"
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "'hatta kalmak' yalnız telefon bağlamında geçerliydi ve örnek bunu göstermiyordu; aynı grupta 'hang on = beklemek' olduğu için 'sıkı tutunmak' anlamı verildi."
+    },
+    {
+      "id": "A1_12_35",
+      "old": {
+        "english": "come over",
+        "turkish": "uğramak, gelmek",
+        "example": "Come over to my house."
+      },
+      "new": {
+        "english": "come over",
+        "turkish": "uğramak",
+        "example": "Come over to my house."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "Tek anlam bırakıldı."
+    },
+    {
+      "id": "A1_12_38",
+      "old": {
+        "english": "check out",
+        "turkish": "çıkış yapmak",
+        "example": "We check out at 12."
+      },
+      "new": {
+        "english": "lie down",
+        "turkish": "uzanmak",
+        "example": "I lie down on the sofa."
+      },
+      "kind": "tekrar_yerine_yeni",
+      "reason": "Aynı grupta 'check out' iki kez vardı (A1_12_16 kalıyor; 'çıkış yapmak' anlamı B1_2_54'te var); yeni deyimsel fiil kondu."
+    },
+    {
+      "id": "A1_12_41",
+      "old": {
+        "english": "clean up",
+        "turkish": "temizlemek",
+        "example": "Clean up your room."
+      },
+      "new": {
+        "english": "clean up",
+        "turkish": "toparlamak",
+        "example": "Clean up your room."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "A1_1_39 clean = 'temizlemek' ile aynı karşılıktı; 'Clean up your room.' = 'Odanı toparla.'",
+      "review_note": "İnceleme turunda eklendi: editörün kaçırdığı A1 sorunu."
+    },
+    {
+      "id": "A1_12_43",
+      "old": {
+        "english": "set up",
+        "turkish": "kurmak",
+        "example": "We set up the table."
+      },
+      "new": {
+        "english": "set up",
+        "turkish": "kurmak",
+        "example": "We set up the tent."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "'set up the table' doğal değil ('set the table' sofra kurmaktır); 'kurmak' anlamını net gösteren örnek kondu."
+    },
+    {
+      "id": "A1_12_48",
+      "old": {
+        "english": "break down",
+        "turkish": "bozulmak (cihaz)",
+        "example": "My car breaks down."
+      },
+      "new": {
+        "english": "break down",
+        "turkish": "bozulmak (araç, makine)",
+        "example": "My car broke down."
+      },
+      "kind": "anlam_duzeltme",
+      "reason": "Tek seferlik olay geniş zamanla anlatılmıştı; araba 'cihaz' sayılmadığı için açıklama düzeltildi."
+    },
+    {
+      "id": "A1_12_49",
+      "old": {
+        "english": "run out",
+        "turkish": "bitmek (su, yiyecek)",
+        "example": "We run out of water."
+      },
+      "new": {
+        "english": "run out",
+        "turkish": "bitmek (su, yiyecek)",
+        "example": "We often run out of milk."
+      },
+      "kind": "ornek_duzeltme",
+      "reason": "Tek seferlik olay geniş zamanla anlatılmıştı; alışkanlık bildiren doğal bir cümle kondu."
+    }
+  ]
+}

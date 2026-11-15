@@ -41,6 +41,15 @@ type SetCurrentGroupRequest struct {
 	TotalWords  *int    `json:"totalWords"`
 }
 
+// AdvanceGroupRequest, advance-group ucunun isteğe bağlı gövdesidir:
+// istemcinin tamamladığı ya da bütün kelimelerini gördüğü grup. Gövde
+// verilmezse (eski istemciler) işaretçi yalnızca işaretçideki grup
+// tamamlanmışsa bir ileri gider.
+type AdvanceGroupRequest struct {
+	Level string `json:"level"`
+	Group int    `json:"group"`
+}
+
 // UnlockGroupRequest, group-started ve group-unlocked-by-ad uçlarının isteğe
 // bağlı gövdesidir. Gövde verilmezse uç yalnızca sayacı artırır.
 type UnlockGroupRequest struct {
@@ -78,6 +87,9 @@ type CurrentGroupDTO struct {
 
 // --- Map ---
 
+// LevelGroupDTO, haritadaki bir grubun durumudur. isSeen, seenWords ve
+// lockReason sonradan eklendi; eski alanların anlamı değişmedi. Yeni
+// alanlarda omitempty yoktur: false, 0 ve "" de gönderilir.
 type LevelGroupDTO struct {
 	GroupNumber     int  `json:"groupNumber"`
 	TotalWords      int  `json:"totalWords"`
@@ -85,4 +97,35 @@ type LevelGroupDTO struct {
 	IsCompleted     bool `json:"isCompleted"`
 	IsUnlocked      bool `json:"isUnlocked"`
 	HasStarted      bool `json:"hasStarted"`
+	// Grubun bütün kelimeleri en az bir kez cevaplandı (bilindi ya da
+	// bilinmedi). Tamamlanan grup görülmüştür de.
+	IsSeen bool `json:"isSeen"`
+	// İlerleme kaydı olan (en az bir kez cevaplanmış) kelime sayısı.
+	SeenWords int `json:"seenWords"`
+	// Kilitliyse nedeni: "previous_level", "previous_not_seen" ya da
+	// "open_group_limit"; açıksa "".
+	LockReason string `json:"lockReason"`
+}
+
+// OpenGroupDTO, sınıra sayılan açık bir gruptur: başlanmış ama tamamlanmamış,
+// önceki seviyesi tamamlanmış (kendisi previous_level ile kilitli değil).
+type OpenGroupDTO struct {
+	Level           string `json:"level"`
+	Group           int    `json:"group"`
+	TotalWords      int    `json:"totalWords"`
+	RemainingInBox1 int    `json:"remainingInBox1"`
+}
+
+// OpenGroupsDTO, GET /map/open-groups yanıtıdır. openGroups seviye ve grup
+// sırasındadır; boşsa [] döner.
+type OpenGroupsDTO struct {
+	OpenGroupCount int            `json:"openGroupCount"`
+	MaxOpenGroups  int            `json:"maxOpenGroups"`
+	OpenGroups     []OpenGroupDTO `json:"openGroups"`
+}
+
+// UnknownWordRequest, POST /progress/unknown gövdesidir: öğrenme ekranında
+// kaydı olmayan kelimeye "Bilmiyorum" denendi.
+type UnknownWordRequest struct {
+	WordID string `json:"wordId"`
 }

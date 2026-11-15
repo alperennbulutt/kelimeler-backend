@@ -16,6 +16,12 @@ type User struct {
 	CurrentGroupTotalWords  int     `gorm:"not null;default:50" json:"currentGroupTotalWords"`
 	TotalLearned            int     `gorm:"not null;default:0" json:"totalLearned"`
 
+	// IsGuest, POST /auth/guest ile açılan e-postasız misafir hesabıdır: hiçbir
+	// giriş kimliği (auth_identities) yoktur, e-postası sentetiktir
+	// (guest_<uuid>@users.kelimeler.local) ve hesaba yalnızca refresh token'la
+	// ulaşılır. Google/Apple ya da e-posta/parola bağlanınca false olur.
+	IsGuest bool `gorm:"not null;default:false" json:"isGuest"`
+
 	// Günlük kullanım sayaçları. Gün, services.UsageDayStart'a göre döner
 	// (varsayılan Europe/Istanbul gece yarısı); sıfırlama zamanlanmış bir iş
 	// değildir, gün dönümünden sonraki ilk kullanım isteğinde yapılır.
@@ -36,6 +42,16 @@ type User struct {
 	NoFillPassesToday int `gorm:"not null;default:0" json:"noFillPassesToday"`
 
 	LastResetDate int64 `gorm:"not null;default:0" json:"lastResetDate"` // unix millis
+
+	// TokenVersion, hesabın oturum sürümüdür; access token'lar verildikleri
+	// andaki değeri taşır (auth.AccessClaims.TokenVersion). Hesap başka birine
+	// geçtiğinde ya da adresi geri alındığında artar: refresh token'lar zaten
+	// iptal edilir, ama önceden verilmiş access token'lar süreleri dolana kadar
+	// (ACCESS_TOKEN_TTL) geçerlidir. Giriş yolu ekleme/kaldırma ve hesap silme
+	// gibi hesabı denetleyen uçlar eski sürümlü token'ı reddeder (bkz.
+	// handlers.requireCurrentSession). Var olan hesaplar 0'la başlar; bu
+	// claim'den önce üretilmiş token'lar da 0 sayılır.
+	TokenVersion int `gorm:"not null;default:0" json:"-"`
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`

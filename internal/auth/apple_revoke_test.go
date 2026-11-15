@@ -6,6 +6,9 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -152,5 +155,57 @@ func TestRevoke_BosTokenIcinIstekYapmaz(t *testing.T) {
 	// Ağa çıkmadan hata dönmeli; aksi halde her silmede boşuna istek atardık.
 	if err := r.Revoke(t.Context(), ""); err == nil {
 		t.Error("boş token için hata beklenir")
+	}
+}
+
+// Uçlar sahte sunucuya yönlendirildiğinde exchange ve revoke Apple'ın beklediği
+// formu gönderir ve yanıtı doğru çözer.
+func TestExchangeCodeVeRevoke_SahteSunucu(t *testing.T) {
+	var gelen []url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		gelen = append(gelen, r.PostForm)
+		switch r.URL.Path {
+		case "/token":
+			if r.PostForm.Get("code") == "gecersiz" {
+				w.WriteHeader(http.StatusBadRequest)
+				w.Write([]byte(`{"error":"invalid_grant"}`))
+				return
+			}
+			w.Write([]byte(`{"refresh_token":"rt-1"}`))
+		case "/revoke":
+			if r.PostForm.Get("token") == "bozuk" {
+				w.WriteHeader(http.StatusBadRequest)
+			}
+		}
+	}))
+	defer srv.Close()
+
+	r, err := NewAppleRevoker("com.example.app", "TEAM123456", "KEY123", testPrivateKeyPEM(t))
+	if err != nil {
+		t.Fatalf("revoker kurulamadı: %v", err)
+	}
+	r.WithEndpoints(srv.URL+"/token", srv.URL+"/revoke")
+
+	rt, err := r.ExchangeCode(t.Context(), "kod")
+	if err != nil || rt != "rt-1" {
+		t.Fatalf("ExchangeCode = (%q, %v), beklenen rt-1", rt, err)
+	}
+	if got := gelen[0].Get("grant_type"); got != "authorization_code" {
+		t.Errorf("grant_type = %q", got)
+	}
+	if _, err := r.ExchangeCode(t.Context(), "gecersiz"); err == nil {
+		t.Error("geçersiz kod için hata beklenir")
+	}
+
+	if err := r.Revoke(t.Context(), rt); err != nil {
+		t.Errorf("Revoke: %v", err)
+	}
+	if got := gelen[len(gelen)-1]; got.Get("token") != "rt-1" || got.Get("token_type_hint") != "refresh_token" ||
+		got.Get("client_id") != "com.example.app" || got.Get("client_secret") == "" {
+		t.Errorf("revoke formu eksik: %v", got)
+	}
+	if err := r.Revoke(t.Context(), "bozuk"); err == nil {
+		t.Error("Apple 400 dönünce Revoke hata vermeli")
 	}
 }

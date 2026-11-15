@@ -34,6 +34,10 @@ type AppleRevoker struct {
 	keyID      string
 	privateKey *ecdsa.PrivateKey
 	http       *http.Client
+
+	// Apple uçları; testler sahte bir sunucuya yönlendirir (bkz. WithEndpoints).
+	tokenURL  string
+	revokeURL string
 }
 
 // NewAppleRevoker, gerekli kimlik bilgilerinin tamamı verildiyse bir revoker
@@ -53,7 +57,17 @@ func NewAppleRevoker(clientID, teamID, keyID, privateKeyPEM string) (*AppleRevok
 		keyID:      keyID,
 		privateKey: key,
 		http:       &http.Client{Timeout: 10 * time.Second},
+		tokenURL:   appleTokenURL,
+		revokeURL:  appleRevokeURL,
 	}, nil
+}
+
+// WithEndpoints, token ve revoke isteklerini verilen adreslere yönlendirir.
+// Yalnızca testlerde Apple yerine sahte bir sunucuyu göstermek içindir.
+func (r *AppleRevoker) WithEndpoints(tokenURL, revokeURL string) *AppleRevoker {
+	r.tokenURL = tokenURL
+	r.revokeURL = revokeURL
+	return r
 }
 
 // parseApplePrivateKey, Apple'ın verdiği .p8 (PKCS#8, EC P-256) anahtarını okur.
@@ -106,7 +120,7 @@ func (r *AppleRevoker) ExchangeCode(ctx context.Context, code string) (string, e
 		"grant_type":    {"authorization_code"},
 	}
 
-	body, err := r.postForm(ctx, appleTokenURL, form)
+	body, err := r.postForm(ctx, r.tokenURL, form)
 	if err != nil {
 		return "", err
 	}
@@ -147,7 +161,7 @@ func (r *AppleRevoker) Revoke(ctx context.Context, refreshToken string) error {
 	}
 
 	// Apple başarıda boş gövdeyle 200 döner.
-	_, err = r.postForm(ctx, appleRevokeURL, form)
+	_, err = r.postForm(ctx, r.revokeURL, form)
 	return err
 }
 

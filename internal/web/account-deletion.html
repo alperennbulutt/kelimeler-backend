@@ -38,7 +38,7 @@
 <body>
 
 <h1>Hesap ve Veri Silme</h1>
-<p class="updated">Kutularla İngilizce &middot; Son Güncelleme: 23 Ağustos 2026</p>
+<p class="updated">Kutularla İngilizce &middot; Son Güncelleme: 23 Ekim 2026</p>
 
 <p>Bu sayfa, <span class="app-name">Kutularla İngilizce</span> (paket adı: <code>com.kaipra.kutularlaIngilizce</code>) uygulamasındaki hesabınızı ve verilerinizi nasıl sildireceğinizi açıklar. Silme talebinde bulunmak için uygulamayı yüklü tutmanız gerekmez.</p>
 
@@ -55,7 +55,7 @@
 
 <p>Aynı seçeneğe <strong>Profil &gt; Hesap Yönetimi</strong> bölümünden de ulaşabilirsiniz.</p>
 
-<p>Onayladığınız anda hesabınız ve tüm öğrenme verileriniz sunucularımızdan kalıcı olarak silinir. Bu işlem geri alınamaz.</p>
+<p>Onayladığınız anda hesabınız ve tüm öğrenme verileriniz sunucularımızdan kalıcı olarak silinir. Bu işlem geri alınamaz. Silmeden önce alınmış veritabanı yedeklerindeki kopyalar ise en fazla <strong>14 gün</strong> içinde silinir (bkz. <a href="#saklanan-veri">Saklanan veri var mı?</a>).</p>
 
 <h2>Yöntem 2 — E-posta ile talep</h2>
 
@@ -80,7 +80,7 @@
   </thead>
   <tbody>
     <tr><td>Ad / takma ad ve e-posta adresi</td><td>Silinir</td></tr>
-    <tr><td>Hesap kimliği ve giriş yöntemi kayıtları (Google / Apple)</td><td>Silinir</td></tr>
+    <tr><td>Hesap kimliği ve giriş yöntemi kayıtları (Google / Apple / e-posta ve parola)</td><td>Silinir</td></tr>
     <tr><td>Öğrenilen kelimeler ve Leitner kutu ilerlemesi</td><td>Silinir</td></tr>
     <tr><td>Seviye ve grup ilerlemesi</td><td>Silinir</td></tr>
     <tr><td>Günlük giriş kayıtları (seri / streak)</td><td>Silinir</td></tr>
@@ -90,11 +90,12 @@
   </tbody>
 </table>
 
-<h2>Saklanan veri var mı?</h2>
+<h2 id="saklanan-veri">Saklanan veri var mı?</h2>
 
 <p>Hesap silindikten sonra kişisel verileriniz saklanmaz. Yalnızca aşağıdakiler istisnadır:</p>
 
 <ul>
+  <li><strong>Veritabanı yedekleri:</strong> Veri kaybına karşı sunucu veritabanının düzenli yedeklerini alırız. Hesabınızı silmeden önce alınmış yedekler verilerinizin bir kopyasını içerir; her yedek en fazla <strong>14 gün</strong> saklanır ve bu sürenin sonunda otomatik olarak silinir. Yedekler yalnızca bir arıza ya da veri kaybından sonra sistemi geri yüklemek için kullanılır.</li>
   <li><strong>Sunucu günlükleri (log):</strong> Güvenlik ve hata ayıklama amacıyla tutulan teknik kayıtlar en fazla <strong>30 gün</strong> içinde otomatik olarak silinir. Bu kayıtlar öğrenme verilerinizi içermez.</li>
   <li><strong>Yasal yükümlülükler:</strong> Yürürlükteki mevzuat belirli kayıtların saklanmasını zorunlu kılarsa, yalnızca zorunlu olan asgari veri ve yalnızca yasal süre boyunca saklanır.</li>
 </ul>
@@ -105,7 +106,7 @@
 
 <h2>Apple ile giriş yaptıysanız</h2>
 
-<p>Hesabınızı sildiğimizde, uygulamanın Apple hesabınıza erişim yetkisini de iptal ederiz. Dilerseniz ayrıca iOS cihazınızdan kontrol edebilirsiniz:</p>
+<p>Hesabınızı sildiğimizde, uygulamanın Apple hesabınıza erişim yetkisini de iptal ederiz. iPhone'da hesabınızı silerken bunun için Apple bir kez daha onay ister; onayı vermezseniz hesabınız yine silinir, ancak yetki iptal edilemeyebilir. Dilerseniz ayrıca iOS cihazınızdan kontrol edebilirsiniz:</p>
 
 <p><strong>Ayarlar &gt; Apple Kimliği &gt; Oturum Açma ve Güvenlik &gt; Apple ile Oturum Açma</strong> bölümünden <em>Kutularla İngilizce</em> uygulamasını seçip <em>Apple Kimliği Kullanımını Durdur</em> diyebilirsiniz.</p>
 

@@ -1,4 +1,4 @@
-.PHONY: run build import-dictionary db-up up down logs test test-integration vet check tidy fmt sync-web backup backup-verify
+.PHONY: run build import-dictionary cleanup-guests db-up up down logs test test-integration vet check ci fmt-check tidy fmt sync-web backup backup-verify
 
 # Lokal geliştirme: sadece Postgres'i docker'da çalıştır, server'ı go run ile çalıştır.
 db-up:
@@ -10,9 +10,17 @@ run:
 build:
 	go build -o bin/server ./cmd/server
 	go build -o bin/import ./cmd/import-dictionary
+	go build -o bin/cleanup-guests ./cmd/cleanup-guests
 
 import-dictionary:
 	go run ./cmd/import-dictionary
+
+# Terk edilmiş misafir hesapları (bkz. DEPLOYMENT.md, "Terk edilmiş misafir
+# temizliği"). Varsayılan yalnızca rapordur; silmek için:
+#   make cleanup-guests ARGS="--apply"
+#   make cleanup-guests ARGS="--inactive-days 365 --apply"
+cleanup-guests:
+	go run ./cmd/cleanup-guests $(ARGS)
 
 # Tüm yığını (postgres + app) docker'da çalıştır.
 up:
@@ -25,7 +33,8 @@ logs:
 	docker compose logs -f
 
 # Birim testleri: harici bağımlılık yok, her yerde çalışır.
-# Entegrasyon testleri TEST_DATABASE_URL tanımlı değilse atlanır.
+# Entegrasyon testleri TEST_DATABASE_URL tanımlı değilse atlanır; CI=true iken
+# atlanmaz, başarısız olur (bkz. internal/db/dbtest).
 test:
 	go test ./...
 
@@ -40,6 +49,15 @@ vet:
 
 # Yayın öncesi tek komut: derleme + statik analiz + testler.
 check: build vet test
+
+fmt-check:
+	@test -z "$$(gofmt -l .)" || { echo "gofmt uygulanmamış dosyalar:"; gofmt -l .; exit 1; }
+
+# GitHub Actions'taki (.github/workflows/ci.yml) adımların lokal karşılığı;
+# entegrasyon testleri dahil. Önce `make db-up`.
+ci: fmt-check vet
+	go build ./...
+	CI=true TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -race -count=1 ./...
 
 tidy:
 	go mod tidy

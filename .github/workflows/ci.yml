@@ -1,0 +1,74 @@
+# Her push (main) ve pull request'te: biçim, statik analiz, derleme, testler
+# (entegrasyon testleri dahil, gerçek PostgreSQL 16 ile) ve Docker imajı.
+#
+# CI=true iken TEST_DATABASE_URL boşsa entegrasyon testleri atlanmaz, başarısız
+# olur (bkz. internal/db/dbtest); böylece veritabanı servisi bozulursa sonuç
+# sessizce "yeşil" görünmez.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: kelimeler_itest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d kelimeler_itest"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/kelimeler_itest?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt uygulanmamış dosyalar:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # internal/web/*.html go:embed hedefidir; commit'e girmezse derleme burada kırılır.
+      - name: go build
+        run: go build ./...
+
+      - name: go test
+        run: go test -race -count=1 ./...
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: docker build
+        run: docker build --build-arg SOURCE_COMMIT=${{ github.sha }} -t kelimeler-backend:ci .

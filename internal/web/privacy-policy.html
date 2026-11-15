@@ -28,23 +28,30 @@
 <body>
 
 <h1>Kutularla İngilizce</h1>
-<p class="updated">Son Güncelleme: 23 Ağustos 2026</p>
+<p class="updated">Son Güncelleme: 29 Ekim 2026</p>
 
 <p>Kutularla İngilizce (“Uygulama”), kullanıcıların İngilizce kelime öğrenmesine yardımcı olmak amacıyla geliştirilmiş bir eğitim uygulamasıdır. Bu gizlilik politikası, uygulamayı kullandığınızda hangi verilerin toplandığını, nasıl kullanıldığını, kimlerle paylaşıldığını ve nasıl korunduğunu açıklamaktadır.</p>
 
 <hr>
 
 <h2>1. Toplanan Bilgiler</h2>
-<p>Uygulamayı kullanabilmeniz için Google veya Apple hesabınız ile giriş yapmanız gerekmektedir. Bu kapsamda aşağıdaki bilgiler toplanır:</p>
+<p>Uygulamayı Google veya Apple hesabınızla, e-posta adresiniz ve parolanızla oluşturduğunuz bir hesapla ya da hesap oluşturmadan misafir olarak kullanabilirsiniz. Bu kapsamda aşağıdaki bilgiler toplanır:</p>
 
 <h3>a) Kimlik Bilgileri</h3>
-<p>Google veya Apple tarafından sağlanan:</p>
+<p>Google veya Apple ile giriş yaparsanız, bu sağlayıcıların verdiği:</p>
 <ul>
   <li>Ad / takma ad</li>
   <li>E-posta adresi</li>
   <li>Sağlayıcının verdiği benzersiz hesap kimliği</li>
 </ul>
-<p>Ayrıca uygulama tarafından oluşturulan benzersiz kullanıcı kimliği (UUID).</p>
+<p>E-posta ile kayıt olursanız:</p>
+<ul>
+  <li>E-posta adresi</li>
+  <li>Parola (parolanızın kendisi saklanmaz; yalnızca geri çevrilemeyen bcrypt özeti saklanır)</li>
+  <li>İsteğe bağlı olarak yazdığınız ad</li>
+</ul>
+<p>Misafir olarak devam ederseniz ad ya da e-posta gibi kimlik bilgisi toplanmaz.</p>
+<p>Her durumda uygulama tarafından oluşturulan benzersiz kullanıcı kimliği (UUID) de kullanılır.</p>
 <p>Bu bilgiler, kullanıcı hesabınızı oluşturmak ve oturum yönetimini sağlamak amacıyla kullanılır. Apple ile giriş yaparken e-posta adresinizi gizleme seçeneğini kullanırsanız, bize yalnızca Apple’ın oluşturduğu yönlendirme adresi iletilir.</p>
 
 <h3>b) Öğrenme ve Kullanım Verileri</h3>
@@ -60,7 +67,7 @@
 <p>Bu veriler öğrenme deneyimini sağlamak, ilerlemenizi korumak ve günlük kullanım limitlerini uygulamak amacıyla kullanılır.</p>
 
 <h3>c) Reklamlarla İlgili Veriler</h3>
-<p>Uygulama, ücretsiz sunulabilmesi için Google AdMob aracılığıyla reklam gösterir. AdMob, reklamları sunmak, ölçmek ve dolandırıcılığı önlemek amacıyla cihazınızdan veri toplayabilir:</p>
+<p>Uygulama reklamlarla desteklenerek sunulur; reklamlar Google AdMob aracılığıyla gösterilir. AdMob, reklamları sunmak, ölçmek ve dolandırıcılığı önlemek amacıyla cihazınızdan veri toplayabilir:</p>
 <ul>
   <li>Reklam kimliği ve diğer cihaz tanımlayıcıları</li>
   <li>Cihaz ve uygulama bilgileri (model, işletim sistemi, uygulama sürümü)</li>
@@ -68,6 +75,15 @@
   <li>Reklam görüntüleme ve etkileşim bilgileri</li>
 </ul>
 <p>Bu veriler doğrudan Google tarafından toplanır ve Google’ın kendi gizlilik politikasına tabidir. Kişiselleştirilmiş reklam gösterilip gösterilmeyeceği, aşağıdaki 5. bölümde açıklanan rızanıza bağlıdır.</p>
+
+<h3>d) Hata Raporları</h3>
+<p>Uygulama çöktüğünde ya da beklenmeyen bir hata oluştuğunda, sorunu giderebilmemiz için Sentry hizmetine bir hata raporu gönderilir:</p>
+<ul>
+  <li>Hata kaydı ve hatanın oluştuğu kod konumu</li>
+  <li>Cihaz ve uygulama bilgileri (model, işletim sistemi, uygulama sürümü)</li>
+  <li>Uygulamanın performansına ilişkin ölçümler</li>
+</ul>
+<p>Hata raporlarına adınız, e-posta adresiniz gibi kişisel veriler eklenmez; ekran görüntüsü alınmaz. Raporlar yalnızca uygulamadaki teknik sorunları bulmak ve gidermek için kullanılır.</p>
 
 <hr>
 
@@ -78,7 +94,7 @@
   <li>Kelime öğrenme ilerlemesinin saklanması</li>
   <li>Tekrar zamanlarının hesaplanması</li>
   <li>Uygulama içi istatistiklerin ve rozetlerin gösterilmesi</li>
-  <li>Günlük ücretsiz kullanım limitlerinin uygulanması</li>
+  <li>Günlük reklamsız kullanım sınırlarının uygulanması</li>
   <li>Uygulama içinde reklam gösterilmesi</li>
   <li>Teknik sorunların giderilmesi ve uygulamanın geliştirilmesi</li>
 </ul>
@@ -94,6 +110,10 @@
   <li>Oturum bilgileriniz (erişim ve yenileme anahtarları) cihazınızda işletim sisteminin güvenli deposunda (iOS Keychain / Android Keystore) tutulur.</li>
   <li>Verilerinize yalnızca ilgili kullanıcı, kendi oturumu üzerinden erişebilir.</li>
   <li>Verileriniz, hesabınız açık kaldığı sürece saklanır; hesabınızı sildiğinizde kalıcı olarak silinir.</li>
+  <li>Misafir hesabındaki ilerlemeniz de sunucularımızda saklanır; ancak bu hesaba yalnızca cihazınızdaki oturum anahtarıyla ulaşılabilir. Misafir hesabından çıkış yaparsanız ya da uygulamayı silerseniz bu hesaba yeniden ulaşılamaz. Hesabınızı Profil bölümünden Google, Apple ya da e-postayla kaydederseniz ilerlemeniz korunur.</li>
+  <li>180 gün boyunca hiç kullanılmayan misafir hesapları ve bunlara bağlı veriler silinebilir.</li>
+  <li>E-postayla kayıtta adresin size ait olduğu ayrıca doğrulanmaz. Aynı adresle Google veya Apple üzerinden, adresi bu sağlayıcılarca doğrulanmış olarak giriş yapılırsa adres doğrulanmış hesaba geçer; o adresle yalnızca parolayla açılmış hesabın parolası geçersiz olur.</li>
+  <li>Veri kaybına karşı sunucu veritabanının düzenli yedekleri alınır. Hesabınızı silmeden önce alınmış yedeklerdeki kopyalar en fazla <strong>14 gün</strong> saklanır ve bu sürenin sonunda otomatik olarak silinir; yedekler yalnızca bir arıza ya da veri kaybından sonra sistemi geri yüklemek için kullanılır.</li>
 </ul>
 
 <hr>
@@ -105,8 +125,9 @@
   <li>Google User Messaging Platform (reklam rızası yönetimi)</li>
   <li>Google Sign-In (kimlik doğrulama)</li>
   <li>Apple ile Giriş Yap (kimlik doğrulama)</li>
+  <li>Sentry (uygulama hata raporlaması; kişisel veri içermeyen hata ve cihaz bilgisi)</li>
 </ul>
-<p>Bu hizmetler kendi gizlilik politikalarına tabidir. Google’ın uygulama geliştiricilerinin hizmetlerini kullanırken verileri nasıl işlediği hakkında bilgiye <a href="https://policies.google.com/technologies/partner-sites">policies.google.com/technologies/partner-sites</a> adresinden, Apple’ın gizlilik politikasına <a href="https://www.apple.com/legal/privacy/">apple.com/legal/privacy</a> adresinden ulaşabilirsiniz.</p>
+<p>Bu hizmetler kendi gizlilik politikalarına tabidir. Google’ın uygulama geliştiricilerinin hizmetlerini kullanırken verileri nasıl işlediği hakkında bilgiye <a href="https://policies.google.com/technologies/partner-sites">policies.google.com/technologies/partner-sites</a> adresinden, Apple’ın gizlilik politikasına <a href="https://www.apple.com/legal/privacy/">apple.com/legal/privacy</a> adresinden, Sentry’nin gizlilik politikasına <a href="https://sentry.io/privacy/">sentry.io/privacy</a> adresinden ulaşabilirsiniz.</p>
 
 <hr>
 
@@ -129,7 +150,7 @@
   <li>Kendileri hakkında saklanan verilere erişme ve düzeltilmesini isteme</li>
 </ul>
 <p>haklarına sahiptir.</p>
-<p>Hesabınızı uygulama içindeki <strong>Profil &gt; Hesabımı Sil</strong> seçeneğinden silebilirsiniz. Uygulamaya erişiminiz yoksa <a href="account-deletion.html">Hesap ve Veri Silme</a> sayfasındaki adımları izleyerek e-posta ile talepte bulunabilirsiniz. Hesap silindiğinde kimlik bilgileriniz, öğrenme ilerlemeniz, giriş kayıtlarınız ve rozetleriniz sunucularımızdan kalıcı olarak silinir; bu işlem geri alınamaz. Silme talebinizi aşağıdaki iletişim adresinden de iletebilirsiniz.</p>
+<p>Hesabınızı uygulama içindeki <strong>Profil &gt; Hesabımı Sil</strong> seçeneğinden silebilirsiniz. Uygulamaya erişiminiz yoksa <a href="account-deletion.html">Hesap ve Veri Silme</a> sayfasındaki adımları izleyerek e-posta ile talepte bulunabilirsiniz. Hesap silindiğinde kimlik bilgileriniz, öğrenme ilerlemeniz, giriş kayıtlarınız ve rozetleriniz sunucularımızdan kalıcı olarak silinir; bu işlem geri alınamaz. Silmeden önce alınmış veritabanı yedeklerindeki kopyalar ise en fazla 14 gün içinde silinir. Silme talebinizi aşağıdaki iletişim adresinden de iletebilirsiniz. Misafir hesabından çıkarken <strong>Çık ve sil</strong> seçeneği misafir hesabını ve verilerini siler.</p>
 
 <hr>
 

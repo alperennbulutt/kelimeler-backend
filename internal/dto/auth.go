@@ -8,10 +8,39 @@ type RegisterRequest struct {
 	DisplayName string `json:"displayName"`
 }
 
+// GuestRequest, POST /auth/guest'in isteğe bağlı gövdesidir.
+type GuestRequest struct {
+	DisplayName string `json:"displayName"`
+}
+
+// LinkPasswordRequest, POST /auth/link/password gövdesidir (misafir hesabına
+// e-posta/parola bağlar).
+type LinkPasswordRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
 type LoginRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
 }
+
+// EmailLookupRequest, POST /auth/email/lookup gövdesidir: e-posta önce giriş
+// ekranı adresin hangi sayfaya (giriş, kayıt, sosyal giriş) gideceğini sorar.
+type EmailLookupRequest struct {
+	Email string `json:"email"`
+}
+
+// POST /auth/email/lookup yanıtındaki "next" değerleri.
+const (
+	// LookupNextLogin: adres parola kimliği olan bir hesaba ait, parola sorulur.
+	LookupNextLogin = "login"
+	// LookupNextRegister: adres kayıtlı değil, kayıt sayfası açılır.
+	LookupNextRegister = "register"
+	// LookupNextSocial: adres yalnızca Google/Apple ile açılmış bir hesaba ait;
+	// kayıt 409 email_in_use alacağından istemci o sağlayıcıyı önerir.
+	LookupNextSocial = "social"
+)
 
 type GoogleAuthRequest struct {
 	IDToken     string `json:"idToken"`
@@ -35,6 +64,13 @@ type LogoutRequest struct {
 	RefreshToken string `json:"refreshToken"`
 }
 
+// DeleteAccountRequest, DELETE /auth/account'un isteğe bağlı gövdesidir.
+type DeleteAccountRequest struct {
+	// Saklı Apple refresh token yoksa (ya da iptali başarısız olursa) bu kod
+	// token'a çevrilip iptal edilir. Gövdesiz istek de geçerlidir.
+	AppleAuthorizationCode string `json:"appleAuthorizationCode"`
+}
+
 // AuthResponse, login/register/social uçlarının dönüşü.
 type AuthResponse struct {
 	AccessToken  string   `json:"accessToken"`
@@ -44,9 +80,13 @@ type AuthResponse struct {
 
 // UserDTO, istemciye dönen kullanıcı temsili. linkedProviders, Firebase
 // providerData'nın yerini alır (isGoogleLinked/isAppleLinked buradan türetilir).
+//
+// email, yer tutucu adreslerde (misafir ve e-postasız sosyal hesaplar, bkz.
+// SyntheticEmailDomain) boş döner: istemci bunu "e-posta yok" diye gösterir.
 type UserDTO struct {
 	ID                      string   `json:"id"`
 	Email                   string   `json:"email"`
+	IsGuest                 bool     `json:"isGuest"`
 	DisplayName             string   `json:"displayName"`
 	CurrentLevel            string   `json:"currentLevel"`
 	CurrentGroup            int      `json:"currentGroup"`
@@ -61,9 +101,14 @@ func NewUserDTO(u *models.User, providers []string) *UserDTO {
 	if providers == nil {
 		providers = []string{}
 	}
+	email := u.Email
+	if IsSyntheticEmail(email) {
+		email = ""
+	}
 	return &UserDTO{
 		ID:                      u.ID,
-		Email:                   u.Email,
+		Email:                   email,
+		IsGuest:                 u.IsGuest,
 		DisplayName:             u.DisplayName,
 		CurrentLevel:            u.CurrentLevel,
 		CurrentGroup:            u.CurrentGroup,

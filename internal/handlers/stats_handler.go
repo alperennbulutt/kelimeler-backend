@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"kelimeler-backend/internal/dto"
@@ -10,50 +12,64 @@ import (
 	"kelimeler-backend/internal/services"
 
 	"github.com/gofiber/fiber/v2"
-	"gorm.io/gorm/clause"
+	"gorm.io/gorm"
 )
 
+// statsNow, istatistik uçlarının saatidir; testler gün sınırını sınamak için değiştirir.
+var statsNow = time.Now
+
 // LogDailyLogin: POST /stats/daily-login — bugünün girişini idempotent kaydeder, streak döner.
+//
+// "Bugün", kullanım konumundaki (UsageLocation) gündür ve "YYYY-MM-DD" metni
+// olarak yazılır (bkz. services.UsageDate: date kolonu + PreferSimpleProtocol).
 func (h *Handlers) LogDailyLogin(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
-	dl := models.DailyLogin{UserID: userID, LoginDate: startOfDay(time.Now())}
-	h.DB.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "user_id"}, {Name: "login_date"}},
-		DoNothing: true,
-	}).Create(&dl)
-	return c.JSON(fiber.Map{"currentStreak": h.calculateStreak(userID)})
-}
-
-// calculateStreak, son 365 günün giriş kayıtlarından streak hesaplar.
-func (h *Handlers) calculateStreak(userID string) int {
-	now := time.Now()
-	from := startOfDay(now).AddDate(0, 0, -365)
-	var dates []time.Time
-	h.DB.Model(&models.DailyLogin{}).
-		Where("user_id = ? AND login_date >= ?", userID, from).
-		Pluck("login_date", &dates)
-
-	set := make(map[string]bool, len(dates))
-	for _, d := range dates {
-		set[services.FormatDate(d)] = true
+	now := statsNow()
+	if err := h.DB.Exec(`INSERT INTO daily_logins (user_id, login_date, created_at)
+		VALUES (?, CAST(? AS date), ?)
+		ON CONFLICT (user_id, login_date) DO NOTHING`,
+		userID, services.UsageDate(now), now.UTC()).Error; err != nil {
+		return err
 	}
-	return services.CalculateStreak(set, now)
+	days, err := h.loginDays(userID, now)
+	if err != nil {
+		return err
+	}
+	return c.JSON(fiber.Map{"currentStreak": services.CalculateStreak(days, now)})
 }
 
-// LoginDates: GET /stats/login-dates — son 365 günün giriş tarihleri (takvim için).
+// loginDays, son 365 günün giriş günlerini kullanım günü kümesi olarak döndürür.
+// Bir gün fazlası okunur: eski (UTC günlü) bir kaydın created_at'i pencerenin
+// ilk gününe düşebilir (bkz. services.LoginDays).
+func (h *Handlers) loginDays(userID string, now time.Time) (map[string]bool, error) {
+	var rows []services.LoginRecord
+	if err := h.DB.Raw(`SELECT to_char(login_date, 'YYYY-MM-DD') AS login_date, created_at
+		FROM daily_logins
+		WHERE user_id = ? AND login_date >= CAST(? AS date)`,
+		userID, services.UsageDateDaysAgo(now, 366)).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	return services.LoginDays(rows), nil
+}
+
+// LoginDates: GET /stats/login-dates — son 365 günün giriş tarihleri (takvim için, yeniden eskiye).
 func (h *Handlers) LoginDates(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
-	from := startOfDay(time.Now()).AddDate(0, 0, -365)
-	var dates []time.Time
-	h.DB.Model(&models.DailyLogin{}).
-		Where("user_id = ? AND login_date >= ?", userID, from).
-		Order("login_date DESC").
-		Pluck("login_date", &dates)
-
-	out := make([]string, 0, len(dates))
-	for _, d := range dates {
-		out = append(out, services.FormatDate(d))
+	now := statsNow()
+	days, err := h.loginDays(userID, now)
+	if err != nil {
+		return err
 	}
+
+	from, today := services.UsageDateDaysAgo(now, 365), services.UsageDateDaysAgo(now, 0)
+	out := make([]string, 0, len(days))
+	for d := range days {
+		// "YYYY-MM-DD" metinleri sözlük sırasıyla tarih sırasıdır.
+		if d >= from && d <= today {
+			out = append(out, d)
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(out)))
 	return c.JSON(fiber.Map{"dates": out})
 }
 
@@ -61,92 +77,107 @@ func (h *Handlers) LoginDates(c *fiber.Ctx) error {
 func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 
-	// 1) box==6 öğrenilen kelimeler (lastReviewDate desc)
-	var learned []models.WordProgress
-	h.DB.Where("user_id = ? AND box = 6", userID).
-		Order("last_review_date DESC NULLS LAST").Find(&learned)
-	totalLearned := len(learned)
+	// 1) Kutu sayıları: satırları belleğe almadan seviye × kutu kırılımı.
+	var counts []struct {
+		Level string
+		Box   int
+		N     int
+	}
+	if err := h.DB.Raw(`SELECT level, box, COUNT(*) AS n
+		FROM word_progresses
+		WHERE user_id = ? AND box >= 2
+		GROUP BY level, box`, userID).Scan(&counts).Error; err != nil {
+		return err
+	}
+	activeByLevel := map[string]int{} // box>=2
 	box6ByLevel := map[string]int{}
-	for _, w := range learned {
-		box6ByLevel[w.Level]++
-	}
-	lastFive := learned
-	if len(lastFive) > 5 {
-		lastFive = lastFive[:5]
-	}
-
-	// 2) box>=2 aktif kelimeler
-	var active []models.WordProgress
-	h.DB.Where("user_id = ? AND box >= 2", userID).Find(&active)
-	activeByLevel := map[string]int{}
-	var box2, box3, box4, box5 int
-	for _, w := range active {
-		activeByLevel[w.Level]++
-		switch w.Box {
+	var totalActive, totalLearned, box2, box3, box4, box5 int
+	for _, r := range counts {
+		activeByLevel[r.Level] += r.N
+		totalActive += r.N
+		switch r.Box {
 		case 2:
-			box2++
+			box2 += r.N
 		case 3:
-			box3++
+			box3 += r.N
 		case 4:
-			box4++
+			box4 += r.N
 		case 5:
-			box5++
+			box5 += r.N
+		case 6:
+			box6ByLevel[r.Level] += r.N
+			totalLearned += r.N
 		}
 	}
 
-	// 3) Son 10 gün giriş verisi
-	now := time.Now()
-	tenDaysAgo := startOfDay(now).AddDate(0, 0, -10)
-	var loginDates []time.Time
-	h.DB.Model(&models.DailyLogin{}).
-		Where("user_id = ? AND login_date >= ?", userID, tenDaysAgo).
-		Pluck("login_date", &loginDates)
-	loggedSet := map[string]bool{}
-	for _, d := range loginDates {
-		loggedSet[services.FormatDate(d)] = true
+	// 2) Son öğrenilen 5 kelime (box==6, lastReviewDate desc)
+	var lastFive []models.WordProgress
+	if err := h.DB.Where("user_id = ? AND box = 6", userID).
+		Order("last_review_date DESC NULLS LAST, id DESC").Limit(5).
+		Find(&lastFive).Error; err != nil {
+		return err
+	}
+
+	// 3) Son 10 gün giriş verisi + streak (aynı küme, kullanım günüyle)
+	now := statsNow()
+	loggedSet, err := h.loginDays(userID, now)
+	if err != nil {
+		return err
 	}
 	weeklyLoginData := map[string]bool{}
 	for i := 0; i < 10; i++ {
-		dStr := services.FormatDate(now.AddDate(0, 0, -i))
+		dStr := services.UsageDateDaysAgo(now, i)
 		weeklyLoginData[dStr] = loggedSet[dStr]
 	}
 
 	// 4) Streak + rozetler
-	streak := h.calculateStreak(userID)
+	streak := services.CalculateStreak(loggedSet, now)
 
 	earnedBefore := map[string]bool{}
 	var earnedIDs []string
-	h.DB.Model(&models.EarnedBadge{}).Where("user_id = ?", userID).Pluck("badge_id", &earnedIDs)
+	if err := h.DB.Model(&models.EarnedBadge{}).Where("user_id = ?", userID).Pluck("badge_id", &earnedIDs).Error; err != nil {
+		return err
+	}
 	for _, id := range earnedIDs {
 		earnedBefore[id] = true
 	}
 
+	levelTotals, err := h.levelTotals()
+	if err != nil {
+		return err
+	}
+	levelProgress, err := h.levelProgress(userID)
+	if err != nil {
+		return err
+	}
+
 	allBadges, newlyEarned := services.ComputeBadges(services.BadgeInput{
-		ActiveByLevel:    activeByLevel,
-		TotalActiveCount: len(active),
+		ActiveByLevel:    levelProgress,
+		LevelTotals:      levelTotals,
+		TotalActiveCount: totalActive,
 		LearnedCount:     totalLearned,
 		CurrentStreak:    streak,
 	}, earnedBefore)
 
-	// Yeni kazanılan rozetleri kalıcılaştır.
-	if len(newlyEarned) > 0 {
-		rows := make([]models.EarnedBadge, 0, len(newlyEarned))
-		for _, id := range newlyEarned {
-			rows = append(rows, models.EarnedBadge{UserID: userID, BadgeID: id, EarnedAt: now})
-		}
-		h.DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&rows)
+	// Yeni kazanılan rozetleri kalıcılaştır. Yalnızca bu istekte gerçekten
+	// eklenen satırlar "yeni" sayılır: eşzamanlı iki özet isteği aynı rozeti
+	// yeni görse de popup bir kez çıkar.
+	inserted, err := h.insertEarnedBadges(userID, newlyEarned, now)
+	if err != nil {
+		return err
 	}
 
 	badgeDTOs := toBadgeDTOs(allBadges)
-	newlySet := map[string]bool{}
-	for _, id := range newlyEarned {
-		newlySet[id] = true
-	}
 	newlyDTOs := []dto.BadgeDTO{}
 	for _, b := range badgeDTOs {
-		if newlySet[b.ID] {
+		if inserted[b.ID] {
 			newlyDTOs = append(newlyDTOs, b)
 		}
+	}
+
+	lastLearned, err := h.toLearnedWordDTOs(lastFive)
+	if err != nil {
+		return err
 	}
 
 	return c.JSON(dto.StatsSummaryDTO{
@@ -160,41 +191,137 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 		Box5Count:         box5,
 		WeeklyLoginData:   weeklyLoginData,
 		Badges:            badgeDTOs,
-		LastLearnedWords:  h.toLearnedWordDTOs(lastFive),
-		TotalWordsByLevel: services.LevelTargets,
+		LastLearnedWords:  lastLearned,
+		TotalWordsByLevel: services.TotalWordsByLevel(levelTotals),
+		LevelTotals:       levelTotals,
 		NewlyEarnedBadges: newlyDTOs,
 	})
 }
 
+// levelTotals, sözlükteki seviye başına kelime sayısıdır (önbellekli; sözlük
+// yalnızca seed/import ile değişir). Yalnızca kelimesi olan seviyeler döner.
+func (h *Handlers) levelTotals() (map[string]int, error) {
+	return services.CachedLevelTotals(time.Now(), func() (map[string]int, error) {
+		var rows []struct {
+			Level string
+			N     int
+		}
+		if err := h.DB.Model(&models.DictionaryWord{}).
+			Select("level, COUNT(*) AS n").Group("level").
+			Scan(&rows).Error; err != nil {
+			return nil, err
+		}
+		totals := map[string]int{}
+		for _, r := range rows {
+			if services.IndexOfLevel(r.Level) >= 0 && r.N > 0 {
+				totals[r.Level] = r.N
+			}
+		}
+		return totals, nil
+	})
+}
+
+// levelProgress, kullanıcının box>=2 kelimelerini sözlükteki seviyesine göre
+// sayar. Seviye rozeti bununla levelTotals'ı karşılaştırır; haritanın grup
+// tamamlama ölçütüyle (her kelime ilerlemeli ve kutu 1'de değil) aynıdır.
+func (h *Handlers) levelProgress(userID string) (map[string]int, error) {
+	var rows []struct {
+		Level string
+		N     int
+	}
+	if err := h.DB.Raw(`SELECT dw.level, COUNT(*) AS n
+		FROM word_progresses wp
+		JOIN dictionary_words dw ON dw.id = wp.word_id
+		WHERE wp.user_id = ? AND wp.box >= 2
+		GROUP BY dw.level`, userID).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]int, len(rows))
+	for _, r := range rows {
+		out[r.Level] = r.N
+	}
+	return out, nil
+}
+
+// insertEarnedBadges, rozetleri earned_badges'e ekler (zaten varsa dokunmaz) ve
+// yalnızca bu çağrıda gerçekten eklenenlerin kümesini döner.
+func (h *Handlers) insertEarnedBadges(userID string, badgeIDs []string, at time.Time) (map[string]bool, error) {
+	inserted := map[string]bool{}
+	if len(badgeIDs) == 0 {
+		return inserted, nil
+	}
+	values := make([]string, 0, len(badgeIDs))
+	args := make([]any, 0, 3*len(badgeIDs))
+	for _, id := range badgeIDs {
+		values = append(values, "(?, ?, ?)")
+		args = append(args, userID, id, at.UTC())
+	}
+	var ids []string
+	if err := h.DB.Raw(`INSERT INTO earned_badges (user_id, badge_id, earned_at) VALUES `+
+		strings.Join(values, ", ")+
+		` ON CONFLICT (user_id, badge_id) DO NOTHING RETURNING badge_id`, args...).
+		Scan(&ids).Error; err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		inserted[id] = true
+	}
+	return inserted, nil
+}
+
+// Öğrenilmiş kelimeler sayfasının boyutu: varsayılan ve üst sınır.
+const (
+	defaultLearnedWordsLimit = 25
+	maxLearnedWordsLimit     = 200
+)
+
 // LearnedWords: GET /stats/learned-words?level=&limit=&offset= — sayfalı öğrenilmiş kelimeler.
+// limit 1..200 aralığına çekilir (verilmezse 25); sıralama sabittir, sayfalar
+// eşit tarihli kelimelerde kaymaz.
 func (h *Handlers) LearnedWords(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	level := c.Query("level")
-	limit, _ := strconv.Atoi(c.Query("limit", "25"))
-	offset, _ := strconv.Atoi(c.Query("offset", "0"))
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	offset, _ := strconv.Atoi(c.Query("offset"))
 	if limit <= 0 {
-		limit = 25
+		limit = defaultLearnedWordsLimit
 	}
+	limit = min(limit, maxLearnedWordsLimit)
+	offset = max(offset, 0)
 
-	base := h.DB.Model(&models.WordProgress{}).Where("user_id = ? AND box = 6", userID)
-	if level != "" {
-		base = base.Where("level = ?", level)
+	// Her sorgu kendi zincirini kurar: gorm zincirini Count'tan sonra yeniden
+	// kullanmak koşulları/seçimi bir sonraki sorguya taşıyabilir.
+	learned := func() *gorm.DB {
+		q := h.DB.Model(&models.WordProgress{}).Where("user_id = ? AND box = 6", userID)
+		if level != "" {
+			q = q.Where("level = ?", level)
+		}
+		return q
 	}
 
 	var total int64
-	base.Count(&total)
+	if err := learned().Count(&total).Error; err != nil {
+		return err
+	}
 
 	var words []models.WordProgress
-	base.Order("last_review_date DESC NULLS LAST").Limit(limit).Offset(offset).Find(&words)
+	if err := learned().Order("last_review_date DESC NULLS LAST, id DESC").
+		Limit(limit).Offset(offset).Find(&words).Error; err != nil {
+		return err
+	}
 
+	items, err := h.toLearnedWordDTOs(words)
+	if err != nil {
+		return err
+	}
 	return c.JSON(dto.LearnedWordsPageDTO{
-		Items: h.toLearnedWordDTOs(words),
+		Items: items,
 		Total: int(total),
 	})
 }
 
 // toLearnedWordDTOs, eksik english/turkish'i dictionary'den doldurarak DTO'ya çevirir.
-func (h *Handlers) toLearnedWordDTOs(words []models.WordProgress) []dto.LearnedWordDTO {
+func (h *Handlers) toLearnedWordDTOs(words []models.WordProgress) ([]dto.LearnedWordDTO, error) {
 	var missingIDs []string
 	for _, w := range words {
 		if w.English == "" {
@@ -204,7 +331,9 @@ func (h *Handlers) toLearnedWordDTOs(words []models.WordProgress) []dto.LearnedW
 	dictMap := map[string]models.DictionaryWord{}
 	if len(missingIDs) > 0 {
 		var dws []models.DictionaryWord
-		h.DB.Where("id IN ?", missingIDs).Find(&dws)
+		if err := h.DB.Where("id IN ?", missingIDs).Find(&dws).Error; err != nil {
+			return nil, err
+		}
 		for _, d := range dws {
 			dictMap[d.ID] = d
 		}
@@ -229,7 +358,7 @@ func (h *Handlers) toLearnedWordDTOs(words []models.WordProgress) []dto.LearnedW
 			LastReviewDate: w.LastReviewDate,
 		})
 	}
-	return out
+	return out, nil
 }
 
 func toBadgeDTOs(badges []services.ComputedBadge) []dto.BadgeDTO {

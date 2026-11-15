@@ -2,11 +2,20 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
+	"net"
+	"net/http"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"runtime/debug"
 	"strings"
+	"syscall"
+	"time"
 
+	"kelimeler-backend/internal/appversion"
 	"kelimeler-backend/internal/auth"
 	"kelimeler-backend/internal/config"
 	"kelimeler-backend/internal/db"
@@ -23,14 +32,100 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
+	"gorm.io/gorm"
 )
 
+// version, derleme sırasında -ldflags "-X main.version=<commit>" ile gömülür
+// (bkz. Dockerfile). Boşsa sürüm bilinmiyordur.
+var version string
+
 func main() {
+	// Çalışma imajı distroless'tır (kabuk, curl, wget yok); container sağlık
+	// kontrolü binary'nin kendisiyle yapılır: HEALTHCHECK ["/server", "-healthcheck"].
+	if len(os.Args) > 1 && os.Args[1] == "-healthcheck" {
+		port := os.Getenv("PORT")
+		if port == "" {
+			port = "8080"
+		}
+		os.Exit(healthcheck("http://127.0.0.1:" + port + "/api/v1/health"))
+	}
+
+	// log.Fatalf defer'ları atlar; hatalar run'dan döner ki Sentry kuyruğu
+	// boşaltılsın ve veritabanı bağlantıları kapatılsın.
+	if err := run(); err != nil {
+		log.Printf("kelimeler-backend durdu: %v", err)
+		os.Exit(1)
+	}
+}
+
+func orDefault(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
+}
+
+// healthcheck, çalışan sunucunun sağlık ucuna istek atar; 200 dönerse 0, aksi
+// halde 1 döner (Docker HEALTHCHECK çıkış kodu sözleşmesi). Ucun kendisi
+// veritabanını 2 sn'lik zaman aşımıyla sınar.
+func healthcheck(url string) int {
+	client := http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "healthcheck: %s yanıtı %d\n", url, resp.StatusCode)
+		return 1
+	}
+	return 0
+}
+
+// applyDictionaryPatches, seed'den sonra henüz uygulanmamış sözlük yamalarını
+// uygular (bkz. db.ApplyDictionaryPatches).
+//
+// Başarısız yama açılışı durdurmaz: yama geri alınır ve sözlük son tutarlı
+// hâliyle (yalnızca bu düzeltmeler eksik) hizmet vermeye devam eder. Açılışı
+// durdurmak, bir içerik hatası yüzünden acil kod düzeltmeleri dahil her
+// deploy'u da durdururdu. Hata loglanır ve Sentry'ye gider; yamalar CI'da
+// gerçek seed'e karşı ayrıca sınanır (TestGercekSeedVeYamalar).
+func applyDictionaryPatches(database *gorm.DB, dir string) {
+	rep, err := db.ApplyDictionaryPatches(database, dir)
+	for _, w := range rep.Warnings {
+		log.Printf("uyarı: %s", w)
+		observability.CaptureWarning(w)
+	}
+	if err != nil {
+		log.Printf("hata: %v", err)
+		observability.CaptureError(err)
+	}
+}
+
+// run, sunucuyu kurar ve SIGTERM/SIGINT gelene kadar çalıştırır.
+func run() (err error) {
 	cfg := config.Load()
+	if cfg.SentryRelease == "" {
+		cfg.SentryRelease = version
+	}
+	log.Printf("kelimeler-backend sürüm: %s", orDefault(version, "bilinmiyor"))
 
 	// Hata raporlamayı en başta kur ki başlangıç hataları da yakalansın.
+	// Defer'lar ters sırayla çalışır: önce hata bildirilir, sonra kuyruk boşaltılır.
 	flushSentry := observability.InitSentry(cfg.SentryDSN, cfg.AppEnv, cfg.SentryRelease)
 	defer flushSentry()
+	defer func() {
+		if err != nil {
+			observability.CaptureError(err)
+		}
+	}()
+
+	log.Printf("ortam: APP_ENV=%s GATE_ENFORCEMENT=%s", cfg.AppEnv, cfg.GateEnforcement)
+	for _, w := range cfg.Warnings() {
+		log.Printf("config: uyarı: %s", w)
+		observability.CaptureWarning("config: " + w)
+	}
 
 	// Günlük kullanım sayaçlarının gün sınırı. Ad çözülemezse varsayılan konum
 	// korunur; hangi konumun geçerli olduğu her durumda loglanır.
@@ -39,17 +134,39 @@ func main() {
 	}
 	log.Printf("kullanım günü saat dilimi: %s", services.UsageLocation())
 
-	database, err := db.Connect(cfg.DatabaseURL)
+	database, err := db.ConnectWithOptions(cfg.DatabaseURL, db.Options{
+		MaxOpenConns:     cfg.DBMaxOpenConns,
+		MaxIdleConns:     cfg.DBMaxIdleConns,
+		ConnMaxLifetime:  cfg.DBConnMaxLifetime,
+		StatementTimeout: cfg.DBStatementTimeout,
+	})
 	if err != nil {
-		log.Fatalf("db bağlantısı başarısız: %v", err)
+		return fmt.Errorf("db bağlantısı başarısız: %w", err)
 	}
-	if err := db.Migrate(database); err != nil {
-		log.Fatalf("db migrate başarısız: %v", err)
+	sqlDB, err := database.DB()
+	if err != nil {
+		return fmt.Errorf("db havuzu alınamadı: %w", err)
 	}
-	// İlk açılışta (boş DB) imaja gömülü kelime sözlüğünü yükle.
-	db.SeedDictionaryIfEmpty(database, "/seed/dictionary_words.sql")
+	// Sunucu kapandıktan sonra çalışır: süren istekler bağlantılarını bitirmiş olur.
+	defer sqlDB.Close()
 
-	tokens := auth.NewTokenService(cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
+	if err := db.Migrate(database); err != nil {
+		return fmt.Errorf("db migrate başarısız: %w", err)
+	}
+	// İlk açılışta (boş DB) imaja gömülü kelime sözlüğünü yükle. Production'da
+	// sözlüksüz açılmak yerine durulur: deploy başarısız görünür, Coolify eski
+	// container'ı çalıştırmaya devam eder.
+	// Seed ve yamalar imajın /seed klasöründedir (SEED_DIR, bkz. Dockerfile).
+	if _, err := db.SeedDictionaryIfEmpty(database, filepath.Join(cfg.SeedDir, "dictionary_words.sql")); err != nil {
+		if cfg.IsProduction() {
+			return fmt.Errorf("sözlük yüklenemedi: %w", err)
+		}
+		log.Printf("uyarı: sözlük yüklenemedi, kelimeler gösterilemeyecek: %v", err)
+	}
+	applyDictionaryPatches(database, filepath.Join(cfg.SeedDir, "dictionary_patches"))
+
+	tokens := auth.NewTokenService(cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL).
+		WithGuestRefreshTTL(cfg.GuestRefreshTokenTTL)
 
 	// Apple JWKS'i yüklemeye çalış; başarısız olursa Apple girişi devre dışı kalır.
 	appleVerifier, err := auth.NewAppleVerifier(context.Background(), cfg.AppleClientID, cfg.AppleIssuer)
@@ -63,14 +180,21 @@ func main() {
 	appleRevoker, err := auth.NewAppleRevoker(
 		cfg.AppleClientID, cfg.AppleTeamID, cfg.AppleKeyID, cfg.ApplePrivateKey)
 	if err != nil {
-		log.Printf("uyarı: Apple revoker başlatılamadı, hesap silmede token iptali yapılmayacak: %v", err)
+		msg := fmt.Sprintf("Apple revoker başlatılamadı, hesap silmede token iptali yapılmayacak: %v", err)
+		log.Printf("uyarı: %s", msg)
+		if cfg.IsProduction() {
+			observability.CaptureWarning(msg)
+		}
 		appleRevoker = nil
-	} else if appleRevoker == nil && cfg.AppleClientID != "" {
+	} else if appleRevoker == nil && cfg.AppleClientID != "" && !cfg.IsProduction() {
+		// Production'da aynı uyarı cfg.Warnings() ile Sentry'ye de gider.
 		log.Printf("uyarı: APPLE_TEAM_ID/APPLE_KEY_ID/APPLE_PRIVATE_KEY eksik — " +
 			"Apple hesap silmede token iptali YAPILMAYACAK (Apple bunu şart koşar)")
 	}
 
 	h := handlers.New(database, cfg, tokens, appleVerifier).WithAppleRevoker(appleRevoker)
+	// Production'da Apple girişi açık ama revoke kapalıysa yüksek sesle uyarır.
+	h.WarnIfAppleRevokeDisabled()
 
 	app := newApp(cfg, os.Stdout)
 
@@ -79,25 +203,93 @@ func main() {
 	// statik site kaynağına gerek yok.
 	web.Register(app)
 
-	api := app.Group("/api/v1")
-
-	// Genel hız sınırı: tüm API uçları için IP başına.
-	api.Use(limiter.New(limiter.Config{
-		Max:        cfg.APIRateLimit,
-		Expiration: cfg.APIRateLimitWindow,
-		LimitReached: func(c *fiber.Ctx) error {
-			return middleware.NewAPIError(fiber.StatusTooManyRequests,
-				"rate_limited", "çok fazla istek gönderdiniz, lütfen biraz bekleyin")
-		},
-	}))
-
-	handlers.RegisterRoutes(api, h, tokens, authLimiter(cfg))
+	logAppVersions(cfg)
+	registerAPI(app, cfg, h, tokens)
 
 	addr := ":" + cfg.Port
-	log.Printf("kelimeler-backend %s adresinde dinliyor", addr)
-	if err := app.Listen(addr); err != nil {
-		log.Fatalf("server hatası: %v", err)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("%s dinlenemedi: %w", addr, err)
 	}
+	log.Printf("kelimeler-backend %s adresinde dinliyor", addr)
+
+	// Coolify her redeploy'da eski container'a SIGTERM gönderir.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Süresi dolmuş/iptal edilmiş refresh token satırlarının saatlik temizliği.
+	// Sunucu durunca (sinyal ya da hata) döngü durdurulur ve süren tur
+	// beklenir; defer sırası gereği bu, veritabanı havuzu kapanmadan önce olur.
+	stopCleanup := startPeriodicCleanup(ctx, "refresh token temizliği",
+		refreshTokenCleanupInterval, refreshTokenCleanupTimeout,
+		refreshTokenCleanup(database, refreshTokenCleanupRetention))
+	defer stopCleanup()
+
+	return serve(ctx, app, ln, cfg.ShutdownTimeout)
+}
+
+// apiPrefix, bütün API uçlarının ortak yoludur.
+const apiPrefix = "/api/v1"
+
+// registerAPI, API grubunu ara katmanlarıyla birlikte kurar. Sıra:
+//
+//	genel hız sınırı → zorunlu güncelleme (426) → rota (auth, sıkı sınır, handler)
+//
+// Sürüm denetimi kimlik doğrulamadan önce çalışır ki eski istemci giriş
+// uçlarında da 426 alsın. Sağlık kontrolü ve sürüm kontrolü ondan muaftır.
+func registerAPI(app *fiber.App, cfg *config.Config, h *handlers.Handlers, tokens *auth.TokenService) {
+	api := app.Group(apiPrefix)
+
+	// Genel hız sınırı: tüm API uçları için kullanıcı ya da IP başına.
+	api.Use(apiLimiter(cfg, tokens))
+
+	api.Use(middleware.RequireAppVersion(cfg.AppVersions, handlers.AppVersionExempt(apiPrefix)...))
+
+	handlers.RegisterRoutes(api, h, tokens, authLimiter(cfg))
+}
+
+// logAppVersions, geçerli zorunlu güncelleme ayarlarını açılış loguna yazar:
+// bir redeploy'dan sonra sınırın gerçekten uygulandığı buradan görülür.
+func logAppVersions(cfg *config.Config) {
+	for _, p := range []struct {
+		ad   string
+		rule appversion.Rule
+	}{{"ios", cfg.AppVersions.IOS}, {"android", cfg.AppVersions.Android}} {
+		log.Printf("sürüm denetimi %s: en düşük=%s en güncel=%s mağaza=%s", p.ad,
+			orDefault(p.rule.Min.Raw, "yok"), orDefault(p.rule.Latest.Raw, "yok"),
+			orDefault(p.rule.StoreURL, "yok"))
+	}
+}
+
+// serve, uygulamayı ln üzerinde ctx iptal edilene kadar çalıştırır; sonra yeni
+// bağlantı kabul etmeyi bırakır ve süren isteklerin bitmesini en fazla timeout
+// kadar bekler.
+//
+// Kapanma beklenmeden süreç bitseydi o anda işlenen istekler (ör. reklam
+// sonrası grup açma) yanıtsız kalır, istemci bunları ağ hatası olarak görüp
+// yeniden denerdi.
+func serve(ctx context.Context, app *fiber.App, ln net.Listener, timeout time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- app.Listener(ln) }()
+
+	select {
+	case err := <-done:
+		// Sinyal gelmeden dinleme bitti: gerçek bir sunucu hatasıdır.
+		return fmt.Errorf("server hatası: %w", err)
+	case <-ctx.Done():
+	}
+
+	log.Printf("kapanma sinyali alındı; süren istekler en fazla %s bekleniyor", timeout)
+	if err := app.ShutdownWithTimeout(timeout); err != nil {
+		return fmt.Errorf("düzgün kapanma %s içinde tamamlanamadı: %w", timeout, err)
+	}
+	// Listener kapanınca döner; sinyal dinleme başlamadan geldiyse dönmeyebilir.
+	select {
+	case <-done:
+	case <-time.After(timeout):
+	}
+	log.Println("sunucu düzgün kapandı")
+	return nil
 }
 
 // newApp, Fiber uygulamasını ve her isteğe uygulanan middleware zincirini kurar.
@@ -115,9 +307,17 @@ func newApp(cfg *config.Config, accessLog io.Writer) *fiber.App {
 		// Devasa gövdelerle bellek şişirmeyi engeller (en büyük istek birkaç KB'dır).
 		BodyLimit: cfg.BodyLimit,
 
-		// Coolify/nginx arkasında gerçek istemci IP'si için; rate limit
+		// Coolify/Traefik arkasında gerçek istemci IP'si için; rate limit
 		// doğru IP'yi görmezse tüm trafiği tek proxy IP'sine sayar.
-		ProxyHeader: fiber.HeaderXForwardedFor,
+		//
+		// Başlık yalnızca bağlantı güvenilen bir proxy'den geliyorsa okunur:
+		// doğrudan bağlanan biri her isteğe farklı X-Forwarded-For yazıp hız
+		// sınırını atlatamaz. IP doğrulaması, "a, b" gibi zincirlerde ham
+		// metin yerine ilk geçerli adresin anahtar olmasını sağlar.
+		ProxyHeader:             cfg.ProxyHeader,
+		EnableTrustedProxyCheck: true,
+		TrustedProxies:          cfg.TrustedProxies,
+		EnableIPValidation:      true,
 	})
 
 	// Fiber'da ilk kaydedilen middleware en dışta çalışır; bir panic ise en içten
@@ -130,13 +330,18 @@ func newApp(cfg *config.Config, accessLog io.Writer) *fiber.App {
 	//   sentry  (en iç) panic'i recover'dan önce görür, olayı gönderir ve yeniden
 	//           fırlatır (Repanic). recover'ın dışında olsaydı panic ona hiç
 	//           ulaşmazdı.
-	app.Use(logger.New(logger.Config{Output: accessLog}))
-	app.Use(recover.New(recover.Config{EnableStackTrace: true}))
+	//
+	// İstek kimliği hepsinden önce atanır ki erişim logu, hata işleyici ve
+	// Sentry olayı aynı kimliği taşısın.
+	app.Use(observability.RequestID())
+	app.Use(logger.New(logger.Config{Output: accessLog, Format: accessLogFormat}))
+	app.Use(recover.New(recover.Config{EnableStackTrace: true, StackTraceHandler: stackTrace}))
 	if cfg.SentryDSN != "" {
 		app.Use(sentryfiber.New(sentryfiber.Options{
 			Repanic:         true, // yanıtı recover üretsin
 			WaitForDelivery: false,
 		}))
+		app.Use(observability.TagSentryScope)
 		// Hata yanıta en dışta (logger) çevrilir; Sentry transaction'ı ondan önce
 		// kapanır. Durum kodu burada yazılmazsa hatalı istekler Sentry'de 200 görünür.
 		app.Use(middleware.WriteErrorStatus)
@@ -147,6 +352,18 @@ func newApp(cfg *config.Config, accessLog io.Writer) *fiber.App {
 	}
 
 	return app
+}
+
+// accessLogFormat, Fiber'ın varsayılan erişim logu biçimine istek kimliğini ekler.
+const accessLogFormat = "${time} | ${status} | ${latency} | ${ip} | ${method} | ${path} | ${locals:requestid} | ${error}\n"
+
+// stackTrace, panic'in stack'ini stderr'e yazar (Fiber'ın varsayılanıyla aynı)
+// ve isteği panic'li olarak işaretler: panic Sentry'ye middleware'de zaten
+// gitmiştir, ErrorHandler tekrar göndermez.
+func stackTrace(c *fiber.Ctx, e any) {
+	middleware.MarkPanic(c)
+	_, _ = fmt.Fprintf(os.Stderr, "panic: %v (request_id=%s)\n\n%s\n",
+		e, observability.RequestIDFrom(c), debug.Stack())
 }
 
 // corsConfig, izin verilen origin'leri yapılandırır; ok=false ise CORS
@@ -164,12 +381,13 @@ func corsConfig(cfg *config.Config) (corsCfg cors.Config, ok bool) {
 	if len(cfg.CORSAllowedOrigins) > 0 {
 		return cors.Config{
 			AllowOrigins: strings.Join(cfg.CORSAllowedOrigins, ","),
-			AllowHeaders: "Origin, Content-Type, Accept, Authorization",
+			AllowHeaders: "Origin, Content-Type, Accept, Authorization, " +
+				observability.AppVersionHeader + ", " + observability.AppPlatformHeader,
 			AllowMethods: "GET, POST, PUT, PATCH, DELETE, OPTIONS",
 		}, true
 	}
 
-	if cfg.AppEnv == "production" {
+	if cfg.IsProduction() {
 		log.Println("cors: CORS_ALLOWED_ORIGINS tanımlı değil — hiçbir origin'e CORS izni verilmeyecek")
 		return cors.Config{}, false
 	}
@@ -179,9 +397,41 @@ func corsConfig(cfg *config.Config) (corsCfg cors.Config, ok bool) {
 	return cors.Config{AllowOrigins: "*"}, true
 }
 
-// authLimiter, kimlik üreten uçlar (Google/Apple girişi; production dışında
-// parola ile kayıt/giriş) için sıkı hız sınırı üretir. Deneme saldırılarını
-// yavaşlatır.
+// apiLimiter, tüm API uçlarına uygulanan genel hız sınırıdır (API_RATE_LIMIT).
+func apiLimiter(cfg *config.Config, tokens *auth.TokenService) fiber.Handler {
+	return limiter.New(limiter.Config{
+		Max:          cfg.APIRateLimit,
+		Expiration:   cfg.APIRateLimitWindow,
+		KeyGenerator: rateLimitKey(tokens),
+		LimitReached: func(c *fiber.Ctx) error {
+			return middleware.NewAPIError(fiber.StatusTooManyRequests,
+				"rate_limited", "çok fazla istek gönderdiniz, lütfen biraz bekleyin")
+		},
+	})
+}
+
+// rateLimitKey, geçerli bir access token taşıyan isteği kullanıcısına, diğerlerini
+// istemci IP'sine sayar.
+//
+// Kimliği doğrulanmış uçlarda IP anahtarı, aynı operatör IP'sini paylaşan (CGNAT)
+// kullanıcıların sınırı birlikte doldurması demekti. Token imzası doğrulandığı
+// için uydurma bir token yeni bir kova açamaz; geçersiz ya da süresi dolmuş token
+// IP kovasına düşer.
+func rateLimitKey(tokens *auth.TokenService) func(*fiber.Ctx) string {
+	return func(c *fiber.Ctx) string {
+		if raw, ok := strings.CutPrefix(c.Get(fiber.HeaderAuthorization), "Bearer "); ok {
+			if claims, err := tokens.ParseAccessToken(raw); err == nil && claims.Subject != "" {
+				return "user:" + claims.Subject
+			}
+		}
+		return "ip:" + c.IP()
+	}
+}
+
+// authLimiter, kimlik üreten uçlar (Google/Apple ve e-posta/parola ile
+// giriş/kayıt, e-posta sorgusu, misafir hesabı, parola bağlama) için sıkı hız
+// sınırı üretir. Deneme saldırılarını ve adres taramasını yavaşlatır; tek
+// örnek bütün bu uçlara verildiği için hepsi aynı IP kovasını paylaşır.
 func authLimiter(cfg *config.Config) fiber.Handler {
 	return limiter.New(limiter.Config{
 		Max:        cfg.AuthRateLimit,

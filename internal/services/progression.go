@@ -15,13 +15,22 @@ func IndexOfLevel(level string) int {
 // AdvanceGroup, mevcut seviye/grup ve seviyedeki max grup verildiğinde
 // bir sonraki seviye/grup'u hesaplar (user_profile_repository.advanceToNextGroup portu).
 // C2'nin son grubu bitince group=0 döner (tüm seviyeler tamamlandı işareti).
+//
+// Konum değişmeyecekse girdiyi aynen döndürür: C2 tamamlanmışsa (group<=0)
+// başa sarılmaz, tanınmayan seviyede de işaretçiye dokunulmaz.
 func AdvanceGroup(currentLevel string, currentGroup, maxGroupInCurrentLevel int) (nextLevel string, nextGroup int, levelChanged bool) {
+	idx := IndexOfLevel(currentLevel)
+	if idx < 0 || IsAllLevelsCompleted(currentLevel, currentGroup) {
+		return currentLevel, currentGroup, false
+	}
 	nextLevel = currentLevel
 	nextGroup = currentGroup + 1
+	if nextGroup < 1 {
+		nextGroup = 1
+	}
 
 	if nextGroup > maxGroupInCurrentLevel {
-		idx := IndexOfLevel(currentLevel)
-		if idx >= 0 && idx < len(Levels)-1 {
+		if idx < len(Levels)-1 {
 			nextLevel = Levels[idx+1]
 			nextGroup = 1
 			levelChanged = true
@@ -32,4 +41,91 @@ func AdvanceGroup(currentLevel string, currentGroup, maxGroupInCurrentLevel int)
 		}
 	}
 	return nextLevel, nextGroup, levelChanged
+}
+
+// IsAllLevelsCompleted, işaretçinin "tüm seviyeler bitti" (son seviye, grup 0)
+// durumunda olup olmadığını söyler.
+func IsAllLevelsCompleted(level string, group int) bool {
+	return level == Levels[len(Levels)-1] && group <= 0
+}
+
+// CompareGroupPositions, iki işaretçiyi seviye sırasına, sonra gruba göre
+// karşılaştırır: a gerideyse -1, aynıysa 0, ilerideyse 1.
+//
+// "Tüm seviyeler bitti" her konumun ötesindedir. Tanınmayan seviye her
+// konumun gerisindedir (eski, doğrulamasız yazımlardan kalmış olabilir).
+func CompareGroupPositions(aLevel string, aGroup int, bLevel string, bGroup int) int {
+	al, ag := groupPosition(aLevel, aGroup)
+	bl, bg := groupPosition(bLevel, bGroup)
+	switch {
+	case al != bl:
+		return sign(al - bl)
+	default:
+		return sign(ag - bg)
+	}
+}
+
+func groupPosition(level string, group int) (levelRank, groupRank int) {
+	if IsAllLevelsCompleted(level, group) {
+		return len(Levels), 0
+	}
+	return IndexOfLevel(level), group
+}
+
+func sign(n int) int {
+	switch {
+	case n < 0:
+		return -1
+	case n > 0:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// MaxOpenGroups, aynı anda açık kalabilecek grup sayısıdır. Açık grup:
+// başlanmış (en az bir kelimesinin ilerleme kaydı var) ama tamamlanmamış
+// (kaydı olmayan ya da kutu 1'de kelimesi kalan) grup; bütün seviyeler
+// birlikte sayılır. Önceki seviyesi tamamlanmamış (LockReasonPreviousLevel
+// ile kilitli) seviyenin grupları sayılmaz. Sınır doluyken başlanmamış bir
+// grup açılamaz, açık gruplardan biri tamamlanınca yer açılır.
+const MaxOpenGroups = 3
+
+// Haritada kilitli bir grubun kilit nedeni (LevelGroupDTO.lockReason). Açık
+// grubun nedeni boştur.
+const (
+	// LockReasonPreviousLevel: önceki seviyenin bütün grupları tamamlanmadı.
+	LockReasonPreviousLevel = "previous_level"
+	// LockReasonPreviousNotSeen: seviyedeki önceki grubun bütün kelimeleri en
+	// az bir kez cevaplanmadı (bkz. GroupLockReason).
+	LockReasonPreviousNotSeen = "previous_not_seen"
+	// LockReasonOpenGroupLimit: MaxOpenGroups kadar açık grup var.
+	LockReasonOpenGroupLimit = "open_group_limit"
+)
+
+// GroupLockReason, haritadaki bir grubun kilit nedenini döndürür; grup açıksa
+// boş döner.
+//
+//   - Önceki seviye tamamlanmadıysa seviyenin bütün grupları (başlanmış olsa
+//     da) kilitlidir.
+//   - Başlanmış grup her zaman açıktır: limit, açık bir grubu kapatmaz.
+//   - Başlanmamış grup, seviyedeki önceki grup "görüldüyse" (bütün
+//     kelimelerinin ilerleme kaydı var: bilindi ya da bilinmedi) ve açık grup
+//     sayısı MaxOpenGroups'tan azsa açılır. Seviyenin ilk grubunda
+//     previousSeen true verilir.
+//
+// Birden çok neden varsa sıradaki ilki döner: önceki seviye, önceki grup,
+// açık grup sınırı.
+func GroupLockReason(previousLevelCompleted, started, previousSeen bool, openGroups int) string {
+	switch {
+	case !previousLevelCompleted:
+		return LockReasonPreviousLevel
+	case started:
+		return ""
+	case !previousSeen:
+		return LockReasonPreviousNotSeen
+	case openGroups >= MaxOpenGroups:
+		return LockReasonOpenGroupLimit
+	}
+	return ""
 }
