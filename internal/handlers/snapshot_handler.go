@@ -73,6 +73,9 @@ func (h *Handlers) SyncSnapshot(c *fiber.Ctx) error {
 	if snap.LearnedCount, err = learnedCount(h.DB, userID); err != nil {
 		return err
 	}
+	if snap.LearnedWordIDs, err = learnedWordIDs(h.DB, userID); err != nil {
+		return err
+	}
 	for _, level := range services.Levels {
 		groups, err := h.computeLevelGroups(userID, level)
 		if err != nil {
@@ -98,6 +101,15 @@ func (h *Handlers) SyncSnapshot(c *fiber.Ctx) error {
 		return err
 	}
 	return c.JSON(snap)
+}
+
+// learnedWordIDs, kullanıcının kutu 6'daki kelimelerinin kimlikleridir
+// (wordId sırasıyla; yoksa boş liste).
+func learnedWordIDs(gdb *gorm.DB, userID string) ([]string, error) {
+	ids := []string{}
+	err := gdb.Model(&models.WordProgress{}).Where("user_id = ? AND box = 6", userID).
+		Order("word_id").Pluck("word_id", &ids).Error
+	return ids, err
 }
 
 // clientHasDictionary, istemcinin bildirdiği sözlük sürümünün güncel olup

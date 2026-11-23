@@ -89,6 +89,7 @@ const (
 	opKindGroupStarted = "group_started"
 	opKindAdvanceGroup = "advance_group"
 	opKindDailyLogin   = "daily_login"
+	opKindSetGroup     = "set_current_group"
 )
 
 // opRef, istemcinin kimlikli bir işlemidir. nil ise işlem kimliksizdir ve

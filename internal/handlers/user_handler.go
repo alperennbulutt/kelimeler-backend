@@ -134,51 +134,63 @@ func (h *Handlers) SetCurrentGroup(c *fiber.Ctx) error {
 
 	var user models.User
 	u, err := h.txWithUserResponse(userID, &user, func(tx *gorm.DB) error {
-		maxGroup, err := maxGroupForLevel(tx, req.Level)
-		if err != nil {
-			return err
-		}
-		if req.Group > maxGroup {
-			return errInvalidGroup
-		}
-		if err := lockUser(tx, userID, &user); err != nil {
-			return err
-		}
-		switch services.CompareGroupPositions(req.Level, req.Group, user.CurrentLevel, user.CurrentGroup) {
-		case -1:
-			return nil
-		case 1:
-			limited, err := h.openGroupLimitReached(tx, userID, req.Level, req.Group)
-			if err != nil {
-				return err
-			}
-			if limited {
-				return errOpenGroupLimit
-			}
-		}
-
-		updates := map[string]any{
-			"current_level": req.Level,
-			"current_group": req.Group,
-		}
-		if req.Title != nil {
-			updates["current_group_title"] = *req.Title
-		}
-		if req.Description != nil {
-			updates["current_group_description"] = *req.Description
-		}
-		if req.TotalWords != nil {
-			updates["current_group_total_words"] = *req.TotalWords
-		}
-		if err := tx.Model(&models.User{}).Where("id = ?", userID).Updates(updates).Error; err != nil {
-			return err
-		}
-		return tx.First(&user, "id = ?", userID).Error
+		_, err := h.setCurrentGroupTx(tx, userID, &req, &user)
+		return err
 	})
 	if err != nil {
 		return err
 	}
 	return c.JSON(fiber.Map{"user": u})
+}
+
+// setCurrentGroupTx, PUT /users/me/current-group'un kararını tx içinde verir
+// ve yazar (kurallar için bkz. SetCurrentGroup; seviye ve grup numarasının
+// biçimi çağıranda denetlenmiştir). user kilitli okunur ve yazıldıysa yeniden
+// okunur. moved, işaretçinin ileri taşındığını söyler: hedef işaretçinin
+// gerisindeyse hiçbir şey yazılmaz; hedef işaretçinin kendisiyse yalnızca
+// gövdedeki başlık/açıklama/kelime sayısı yazılır (moved false).
+func (h *Handlers) setCurrentGroupTx(tx *gorm.DB, userID string, req *dto.SetCurrentGroupRequest, user *models.User) (moved bool, err error) {
+	maxGroup, err := maxGroupForLevel(tx, req.Level)
+	if err != nil {
+		return false, err
+	}
+	if req.Group > maxGroup {
+		return false, errInvalidGroup
+	}
+	if err := lockUser(tx, userID, user); err != nil {
+		return false, err
+	}
+	pos := services.CompareGroupPositions(req.Level, req.Group, user.CurrentLevel, user.CurrentGroup)
+	switch pos {
+	case -1:
+		return false, nil
+	case 1:
+		limited, err := h.openGroupLimitReached(tx, userID, req.Level, req.Group)
+		if err != nil {
+			return false, err
+		}
+		if limited {
+			return false, errOpenGroupLimit
+		}
+	}
+
+	updates := map[string]any{
+		"current_level": req.Level,
+		"current_group": req.Group,
+	}
+	if req.Title != nil {
+		updates["current_group_title"] = *req.Title
+	}
+	if req.Description != nil {
+		updates["current_group_description"] = *req.Description
+	}
+	if req.TotalWords != nil {
+		updates["current_group_total_words"] = *req.TotalWords
+	}
+	if err := tx.Model(&models.User{}).Where("id = ?", userID).Updates(updates).Error; err != nil {
+		return false, err
+	}
+	return pos == 1, tx.First(user, "id = ?", userID).Error
 }
 
 // AdvanceGroup: POST /users/me/advance-group — sonraki level/grup'u sunucu hesaplar.

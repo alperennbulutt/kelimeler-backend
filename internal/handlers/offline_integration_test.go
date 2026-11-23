@@ -694,3 +694,119 @@ func jsonEsit(t *testing.T, a, b []byte) bool {
 	}
 	return reflect.DeepEqual(x, y)
 }
+
+// Aynı istekte grubun cevaplarından sonra gelen advance_group, o cevapların
+// yazdığı kayıtları görür: her işlem kendi transaction'ında commit edilir,
+// işaretçi ilerler (mobil kuyruk advance_group'u cevaplardan sonra ekler).
+func TestSync_AdvanceGroupAyniIstekteCevaplardanSonra(t *testing.T) {
+	gdb, u, app := newOfflineTest(t, config.GateEnforce)
+	groups := testLevel(t, gdb, "A1", 3, 2)
+	setPointer(t, gdb, u.ID, "A1", 1)
+	now := time.Now()
+	gun := services.UsageDate(now)
+
+	ops := []fiber.Map{
+		{"opId": uuid.NewString(), "kind": "group_started", "level": "A1", "group": 1, "usageDate": gun, "answeredAt": rfc(now)},
+		learnOp(groups[0][0].ID, now),
+		{"opId": uuid.NewString(), "kind": "unknown", "wordId": groups[0][1].ID, "answeredAt": rfc(now)},
+		learnOp(groups[0][2].ID, now),
+		{"opId": uuid.NewString(), "kind": "advance_group", "level": "A1", "group": 1, "answeredAt": rfc(now)},
+	}
+	r := syncOK(t, app, ops...)
+	for _, s := range r {
+		sonucBekle(t, s, "applied", "")
+	}
+	if after := loadUser(t, gdb, u.ID); after.CurrentLevel != "A1" || after.CurrentGroup != 2 {
+		t.Errorf("işaretçi = %s:%d, beklenen A1:2 (grup aynı istekte görülmüş sayılmalı)", after.CurrentLevel, after.CurrentGroup)
+	}
+
+	// Bütün parça yeniden gönderilirse (yanıt kayboldu) hiçbir şey ikinci kez
+	// uygulanmaz: işaretçi A1:2'de kalır, sonuçlar ilk sonuçlardır.
+	r = syncOK(t, app, ops...)
+	for _, s := range r {
+		sonucBekle(t, s, "applied", "")
+	}
+	if after := loadUser(t, gdb, u.ID); after.CurrentGroup != 2 {
+		t.Errorf("yeniden gönderimde işaretçi = %d, beklenen 2", after.CurrentGroup)
+	}
+	if after := loadUser(t, gdb, u.ID); after.GroupsStartedTodayCount != 1 {
+		t.Errorf("groups_started_today_count = %d, beklenen 1", after.GroupsStartedTodayCount)
+	}
+
+	// Cevapları eksik grup (son kelime cevaplanmadı) aynı istekte
+	// ilerletilemez.
+	ops = []fiber.Map{
+		learnOp(groups[1][0].ID, now),
+		{"opId": uuid.NewString(), "kind": "advance_group", "level": "A1", "group": 2, "answeredAt": rfc(now)},
+	}
+	setUsage(t, gdb, u.ID, map[string]any{"groups_started_today_count": 2, "unlocked_groups_today": "A1:1,A1:2"})
+	r = syncOK(t, app, ops...)
+	sonucBekle(t, r[0], "applied", "")
+	sonucBekle(t, r[1], "noop", "previous_not_seen")
+}
+
+func TestSync_SetCurrentGroup(t *testing.T) {
+	gdb, u, app := newOfflineTest(t, config.GateEnforce)
+	a1 := testLevel(t, gdb, "A1", 1, 1, 1, 1, 1)
+	setPointer(t, gdb, u.ID, "A1", 1)
+	set := func(level string, group int) fiber.Map {
+		return fiber.Map{"opId": uuid.NewString(), "kind": "set_current_group", "level": level, "group": group, "answeredAt": rfc(time.Now())}
+	}
+
+	ileri := set("A1", 3)
+	r := syncOK(t, app,
+		ileri,
+		set("A1", 3), // aynı konum: noop
+		set("A1", 2), // geri: noop (PUT gibi yalnızca ileri)
+		set("Z9", 1),
+		set("A1", 0),
+		set("A1", 99), // seviyedeki grup sayısından büyük
+	)
+	sonucBekle(t, r[0], "applied", "")
+	sonucBekle(t, r[1], "noop", "")
+	sonucBekle(t, r[2], "noop", "")
+	sonucBekle(t, r[3], "rejected", "invalid_group")
+	sonucBekle(t, r[4], "rejected", "invalid_group")
+	sonucBekle(t, r[5], "rejected", "invalid_group")
+	if after := loadUser(t, gdb, u.ID); after.CurrentLevel != "A1" || after.CurrentGroup != 3 {
+		t.Fatalf("işaretçi = %s:%d, beklenen A1:3", after.CurrentLevel, after.CurrentGroup)
+	}
+
+	// Aynı opId yeniden gelince (işaretçi bu arada geri alınmış olsa da)
+	// ikinci kez uygulanmaz, ilk sonuç döner.
+	setPointer(t, gdb, u.ID, "A1", 1)
+	r = syncOK(t, app, ileri)
+	sonucBekle(t, r[0], "applied", "")
+	if after := loadUser(t, gdb, u.ID); after.CurrentGroup != 1 {
+		t.Errorf("yeniden gönderimde işaretçi = %d, beklenen 1 (uygulanmamalı)", after.CurrentGroup)
+	}
+
+	// Açık grup sınırı: üç grup başlanmış ve bitmemişken başlanmamış gruba
+	// taşınmaz; reddedilen işlem kaydedilmez, sınır açılınca aynı opId
+	// uygulanır.
+	for g := 0; g < 3; g++ {
+		setProgress(t, gdb, u.ID, a1[g][0], 1, nil)
+	}
+	setPointer(t, gdb, u.ID, "A1", 3)
+	sinir := set("A1", 5)
+	r = syncOK(t, app, sinir)
+	sonucBekle(t, r[0], "rejected", "open_group_limit")
+	if after := loadUser(t, gdb, u.ID); after.CurrentGroup != 3 {
+		t.Errorf("sınırda işaretçi = %d, beklenen 3", after.CurrentGroup)
+	}
+	// Grup 1 tamamlandı.
+	if err := gdb.Model(&models.WordProgress{}).Where("user_id = ? AND word_id = ?", u.ID, a1[0][0].ID).
+		Update("box", 2).Error; err != nil {
+		t.Fatal(err)
+	}
+	r = syncOK(t, app, sinir)
+	sonucBekle(t, r[0], "applied", "")
+	if after := loadUser(t, gdb, u.ID); after.CurrentGroup != 5 {
+		t.Errorf("sınır açılınca işaretçi = %d, beklenen 5", after.CurrentGroup)
+	}
+	var n int64
+	gdb.Model(&models.AppliedOp{}).Where("user_id = ? AND kind = ?", u.ID, "set_current_group").Count(&n)
+	if n != 4 {
+		t.Errorf("set_current_group applied_ops = %d, beklenen 4 (applied/noop kaydedilir, ret kaydedilmez)", n)
+	}
+}

@@ -61,6 +61,8 @@ const codeFreeGroupConflict = "free_group_conflict"
 //   - advance_group: gövdeli advance-group ile aynı; ilerlemediyse noop ve
 //     kod blockedReason.
 //   - daily_login: date en çok 7 gün önce olabilir.
+//   - set_current_group: PUT /users/me/current-group ile aynı (yalnızca
+//     ileri; açık grup sınırı doluyken başlanmamış gruba open_group_limit).
 //
 // Kapı kararları GATE_ENFORCEMENT kipine tek tek uçlardaki gibi uyar: log'da
 // ihlal raporlanıp uygulanır, enforce'ta reddedilir.
@@ -156,6 +158,7 @@ func (h *Handlers) syncOp(c *fiber.Ctx, userID string, raw json.RawMessage) (dto
 var syncKinds = map[string]bool{
 	opKindLearn: true, opKindUnknown: true, opKindSwipe: true,
 	opKindGroupStarted: true, opKindAdvanceGroup: true, opKindDailyLogin: true,
+	opKindSetGroup: true,
 }
 
 func isWordOp(kind string) bool {
@@ -190,6 +193,8 @@ func (h *Handlers) applySyncOp(c *fiber.Ctx, userID string, op *dto.SyncOp, ref 
 		return h.syncAdvanceGroup(userID, op, ref, t)
 	case opKindDailyLogin:
 		return h.syncDailyLogin(userID, op, ref, t)
+	case opKindSetGroup:
+		return h.syncSetCurrentGroup(userID, op, ref, t)
 	}
 	return dto.SyncOpResult{}, errInvalidOp
 }
@@ -342,6 +347,34 @@ func (h *Handlers) syncAdvanceGroup(userID string, op *dto.SyncOp, ref *opRef, t
 		}
 		res = dto.SyncOpResult{Status: opNoop, Code: adv.blockedReason}
 		if adv.moved {
+			res.Status = opApplied
+		}
+		return claimOp(tx, userID, ref, res, "", t.now)
+	})
+	return res, err
+}
+
+// syncSetCurrentGroup, PUT /users/me/current-group ile aynıdır: işaretçi
+// yalnızca ileri yazılır. İleri taşındıysa applied; hedef işaretçinin kendisi
+// ya da gerisindeyse noop. Geçersiz seviye/grup invalid_group, açık grup sınırı
+// doluyken başlanmamış gruba open_group_limit ile reddedilir (reddedilen
+// işlem kaydedilmez; sınır açılınca aynı opId yeniden gönderilirse
+// uygulanabilir). İşlem başlık, açıklama ve kelime sayısı taşımaz: onlar
+// grubun bilgisidir, işaretçi taşınırken sunucudaki değerleri kalır.
+func (h *Handlers) syncSetCurrentGroup(userID string, op *dto.SyncOp, ref *opRef, t answerTime) (dto.SyncOpResult, error) {
+	if services.IndexOfLevel(op.Level) < 0 || op.Group < 1 {
+		return dto.SyncOpResult{}, errInvalidGroup
+	}
+	req := &dto.SetCurrentGroupRequest{Level: op.Level, Group: op.Group}
+	var res dto.SyncOpResult
+	err := h.DB.Transaction(func(tx *gorm.DB) error {
+		var user models.User
+		moved, err := h.setCurrentGroupTx(tx, userID, req, &user)
+		if err != nil {
+			return err
+		}
+		res = dto.SyncOpResult{Status: opNoop}
+		if moved {
 			res.Status = opApplied
 		}
 		return claimOp(tx, userID, ref, res, "", t.now)

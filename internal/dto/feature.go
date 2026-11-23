@@ -47,7 +47,8 @@ type SyncRequest struct {
 
 // SyncOp, kuyruktaki tek bir işlemdir; hangi alanların kullanıldığı Kind'a
 // bağlıdır (learn/unknown: wordId; swipe: wordId, direction; group_started:
-// level, group, usageDate; advance_group: level, group; daily_login: date).
+// level, group, usageDate; advance_group, set_current_group: level, group;
+// daily_login: date).
 type SyncOp struct {
 	OpID       string     `json:"opId"`
 	Kind       string     `json:"kind"`
@@ -215,6 +216,13 @@ type SnapshotDTO struct {
 	Progress []models.WordProgress `json:"progress"`
 	// LearnedCount, GET /home/learned-count'taki learnedCount'tur (kutu 6).
 	LearnedCount int64 `json:"learnedCount"`
+	// LearnedWordIDs, kutu 6'daki (öğrenilmiş) bütün kelimelerin kimlikleridir,
+	// sırayla. İlerlemesi olan her grubun kartları gerektiği için kartları
+	// gönderilen (ya da haveGroups ile atlanan) her grubun öğrenilmiş
+	// kelimelerini kapsar: istemci kaydı görünmeyen kartın yeni mi öğrenilmiş
+	// mi olduğunu buradan bilir. Liste boşsa [] gelir; alanı göndermeyen eski
+	// sunucuda istemci haritanın seenWords farkına düşer.
+	LearnedWordIDs []string `json:"learnedWordIds"`
 	// Levels, her seviye için GET /map/levels/:level/groups yanıtıdır.
 	Levels map[string][]LevelGroupDTO `json:"levels"`
 	// OpenGroups, GET /map/open-groups yanıtıdır.

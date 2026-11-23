@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -249,4 +250,50 @@ func mapOf(t *testing.T, raw []byte) map[string]any {
 		t.Fatal(err)
 	}
 	return m
+}
+
+// learnedWordIds, kutu 6'daki bütün kelimelerin kimlikleridir; kartları
+// haveGroups ile atlanan grubunkiler de gelir (cihaz kaydı görünmeyen kartın
+// öğrenilmiş mi yeni mi olduğunu buradan bilir).
+func TestSnapshot_LearnedWordIds(t *testing.T) {
+	s := newSnapshotTest(t)
+	groups := testLevel(t, s.gdb, "A1", 3, 2)
+	setPointer(t, s.gdb, s.u.ID, "A1", 1)
+
+	var snap struct {
+		DictionaryVersion int64    `json:"dictionaryVersion"`
+		LearnedWordIDs    []string `json:"learnedWordIds"`
+		Cards             []struct {
+			ID string `json:"id"`
+		} `json:"cards"`
+	}
+	raw := s.get("/sync/snapshot")
+	if string(field(t, raw, "learnedWordIds")) != "[]" {
+		t.Errorf("learnedWordIds = %s, beklenen [] (kutu 6 boş)", field(t, raw, "learnedWordIds"))
+	}
+
+	setProgress(t, s.gdb, s.u.ID, groups[0][2], 6, nil)
+	setProgress(t, s.gdb, s.u.ID, groups[0][0], 6, nil)
+	setProgress(t, s.gdb, s.u.ID, groups[0][1], 1, nil)
+	setProgress(t, s.gdb, s.u.ID, groups[1][0], 6, nil)
+	if err := json.Unmarshal(s.get("/sync/snapshot"), &snap); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{groups[0][0].ID, groups[0][2].ID, groups[1][0].ID}
+	if !reflect.DeepEqual(snap.LearnedWordIDs, want) {
+		t.Errorf("learnedWordIds = %v, beklenen %v", snap.LearnedWordIDs, want)
+	}
+
+	// Kartları atlanan gruplarda da liste aynı.
+	q := "/sync/snapshot?dictionaryVersion=" + strconv.FormatInt(snap.DictionaryVersion, 10) + "&haveGroups=A1:1,A1:2"
+	snap.LearnedWordIDs = nil
+	if err := json.Unmarshal(s.get(q), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Cards) != 0 {
+		t.Errorf("cards = %v, beklenen boş (iki grup da cihazda)", snap.Cards)
+	}
+	if !reflect.DeepEqual(snap.LearnedWordIDs, want) {
+		t.Errorf("atlanan gruplarda learnedWordIds = %v, beklenen %v", snap.LearnedWordIDs, want)
+	}
 }
