@@ -160,12 +160,23 @@ func TestSnapshot_BolumlerTekTekUclarlaAyni(t *testing.T) {
 		t.Errorf("dictionaryVersion = %d, beklenen %d", head.DictionaryVersion, version)
 	}
 
-	// İstemcinin sözlüğü güncelse kartlar gönderilmez; değilse gönderilir.
-	if got := string(field(t, s.get("/sync/snapshot?dictionaryVersion="+strconv.FormatInt(version, 10)), "cards")); got != "[]" {
-		t.Errorf("güncel sürümde cards = %s, beklenen []", got)
-	}
-	if got := field(t, s.get("/sync/snapshot?dictionaryVersion="+strconv.FormatInt(version+1, 10)), "cards"); string(got) == "[]" {
-		t.Error("eski sürümde cards boş döndü")
+	// haveGroups: sürüm güncelse yalnızca istemcinin elindeki gruplar atlanır,
+	// gereken diğer grupların kartları her zaman gelir; sürüm farklıysa ya da
+	// verilmemişse haveGroups yok sayılır.
+	g2Only, _ := json.Marshal(g2Cards)
+	v := strconv.FormatInt(version, 10)
+	for _, c := range []struct {
+		query string
+		want  []byte
+	}{
+		{"?dictionaryVersion=" + v, want},
+		{"?dictionaryVersion=" + v + "&haveGroups=A1:1", g2Only},
+		{"?dictionaryVersion=" + v + "&haveGroups=A1:1,A1:2,B1:7", []byte("[]")},
+		{"?dictionaryVersion=" + v + "&haveGroups=bozuk,A1:x", want},
+		{"?dictionaryVersion=" + strconv.FormatInt(version+1, 10) + "&haveGroups=A1:1,A1:2", want},
+		{"?haveGroups=A1:1,A1:2", want},
+	} {
+		esit("cards"+c.query, field(t, s.get("/sync/snapshot"+c.query), "cards"), c.want)
 	}
 }
 

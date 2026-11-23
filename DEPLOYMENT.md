@@ -739,7 +739,7 @@ Karar ve sözleşme: mobil depodaki `docs/CEVRIMDISI_MOD.md` ("API sözleşmesi"
 |---|---|
 | `POST /progress/learn`, `/progress/unknown`, `/progress/swipe` | Gövdeye isteğe bağlı `opId` (UUID) ve `answeredAt` (RFC3339). İkisi de yoksa davranış aynı. `opId` geçersizse `400 invalid_request`; aynı `opId` daha önce uygulanmışsa hiçbir şey yapılmaz ve **ilk yanıt** döner (aynı `opId` başka türde bir işlem için kullanılmışsa `409 op_id_conflict`). `answeredAt` `[şimdi − 7 gün, şimdi + 5 dk]` aralığına kırpılır (ileri kayma ertesi güne taşıyorsa şimdi sayılır); Leitner tarihleri ve vade cevabın anına göre hesaplanır. `answeredAt` geçmiş bir güne (Europe/Istanbul) düşüyorsa cevap bugünkü sayaçlara (`reviewAnswersToday`) ve tekrar kapısına girmez; öğrenme ve kutu 1'deki doğru cevap **o günün** grup açılışlarına (`daily_group_unlocks`) göre denetlenir |
 | `POST /progress/sync` | Yeni. Gövde `{"ops":[...]}`, en çok 200 işlem (fazlası `400 too_many_ops`). Her işlemde `opId` (UUID) zorunlu, `kind`: `learn`, `unknown` (`wordId`), `swipe` (`wordId`, `direction`), `group_started` (`level`, `group`, `usageDate`), `advance_group` (`level`, `group`), `daily_login` (`date`); hepsinde isteğe bağlı `answeredAt` (yoksa şimdi). İşlemler sırayla, her biri kendi transaction'ında uygulanır; yanıt `200 {"results":[{"opId","status","code"?,"progress"?}],"user":{...},"usage":{...}}`. Ayrıntılar aşağıda |
-| `GET /sync/snapshot?dictionaryVersion=N` | Yeni. Çevrimdışı modun anlık görüntüsü; bölümler aşağıda |
+| `GET /sync/snapshot?dictionaryVersion=N&haveGroups=A1:1,A1:2` | Yeni. Çevrimdışı modun anlık görüntüsü; bölümler aşağıda |
 | `POST /auth/refresh` | Yanıtı kaybolan yenileme 60 sn içinde aynı (artık iptal edilmiş) token'la yeniden denenirse **aynı refresh token** döner (eskiden her denemede yeni bir token). Access token yeniden imzalanır. Yeniden kullanım tespiti değişmedi |
 | `POST /users/me/usage/group-started`, `/group-unlocked-by-ad` (gövdeli) | Yanıt aynı; açılış ayrıca `daily_group_unlocks`'a (`via` = `free` / `ad`) yazılır |
 
@@ -771,7 +771,7 @@ Her bölüm, adı geçen ucun yanıtını kuran kodla üretilir; tek alanlı sar
 | `learnedCount` | `GET /home/learned-count` → `learnedCount` (kutu 6) |
 | `levels` | `{"A1": GET /map/levels/A1/groups, ..., "C2": ...}`, altı seviye |
 | `openGroups` | `GET /map/open-groups` |
-| `cards` | İlerlemesi olan her grubun (kelimenin sözlükteki grubu) ve işaretçideki grupla sonraki grubun kartları, `GET /dictionary/words` biçiminde, seviye/grup/sıra sırasıyla. `dictionaryVersion` sorgusu sunucununkiyle aynıysa `[]` |
+| `cards` | Gereken grupların kartları: ilerlemesi olan her grup (kelimenin sözlükteki grubu), işaretçideki grup ve sonraki grup; `GET /dictionary/words` biçiminde, seviye/grup/sıra sırasıyla. İstemci elindeki grupları `haveGroups` (virgülle ayrılmış `SEVIYE:GRUP`) ile bildirir: `dictionaryVersion` sunucununkiyle aynıysa yalnızca bu gruplar atlanır, gereken diğer grupların kartları her zaman gelir. Sürüm verilmemiş ya da farklıysa `haveGroups` yok sayılır, gereken bütün gruplar gelir. Tanınmayan parçalar yok sayılır |
 | `stats` | `GET /stats/summary`; tek fark: anlık görüntü yeni rozetleri yazmaz, `newlyEarnedBadges` her zaman `[]` (bildirim bir sonraki `/stats/summary`'de çıkar) |
 | `loginDates` | `GET /stats/login-dates` → `dates` |
 
@@ -795,6 +795,8 @@ Yeni rapor nedenleri (`gate_violation ...` satırları ve `log` kipinde Sentry u
 - `kind=learn reason=offline_free_group_conflict`: çevrimdışı geçmiş günde ücretsiz açılan grup, o günün ücretsiz hakkı başka gruba kullanılmışken geldi. Yalnızca raporlanır.
 
 Kabul edilen taviz (sözleşme): saatini geri alan bir istemci geçmiş gün kuralıyla tekrar kapısını atlatabilir (en çok 7 gün geriye); bu durum `past_day_review_overshoot` ile görünür.
+
+**Yeniden bağlanma yoklaması:** mobil istemci bağlantının geri geldiğini `GET /api/v1/health` ile anlar. Uç kimliksizdir, zorunlu güncelleme denetiminden muaftır ve tek bir `COUNT(*)` (sözlük) sorgusu yapar (2 sn zaman aşımı, veritabanı yoksa `503`). Genel hız sınırına (`API_RATE_LIMIT`, varsayılan 600/dk, token yoksa IP başına) tabidir: yoklama geri çekilmeli (backoff) olmalıdır.
 
 **Refresh token:** rotasyonda yeni refresh token eskisinden türetilir (JWT gizli anahtarıyla HMAC). `JWT_SECRET` değişirse tolerans içindeki yeniden deneme aynı token'ı üretemez ve eski davranışa (yeni çift) düşer; oturumlar düşmez.
 

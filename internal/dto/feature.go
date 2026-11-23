@@ -221,7 +221,8 @@ type SnapshotDTO struct {
 	OpenGroups OpenGroupsDTO `json:"openGroups"`
 	// Cards, ilerlemesi olan her grubun ve işaretçideki grupla ondan sonraki
 	// grubun kartlarıdır (GET /dictionary/words biçimi; seviye, grup ve sıra
-	// sırasıyla). İstemcinin dictionaryVersion'ı güncelse boştur.
+	// sırasıyla). İstemcinin dictionaryVersion'ı güncelse haveGroups'ta
+	// bildirdiği gruplar atlanır.
 	Cards []models.DictionaryWord `json:"cards"`
 	// Stats, GET /stats/summary yanıtıdır (newlyEarnedBadges her zaman boş:
 	// anlık görüntü rozet bildirimini tüketmez).

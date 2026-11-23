@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"strconv"
+	"strings"
 	"time"
 
 	"kelimeler-backend/internal/db"
@@ -23,9 +24,12 @@ import (
 // uygular. İstatistik bölümü yeni kazanılan rozetleri yazmaz (bkz.
 // statsSummary).
 //
-// dictionaryVersion verilmişse ve sözlüğün sürümüyle (db.DictionaryVersion)
-// aynıysa cards boş döner; verilmemiş, sayı olmayan ya da farklı sürümde
-// kartlar gönderilir.
+// cards, gereken grupların (ilerlemesi olan her grup, işaretçideki grup ve
+// sonraki grup) kartlarıdır. İstemci elindeki grupları haveGroups'ta
+// ("A1:1,A1:2,B1:7") bildirir: dictionaryVersion sözlüğün sürümüyle
+// (db.DictionaryVersion) aynıysa yalnızca o gruplar atlanır, diğer gereken
+// grupların kartları her zaman gelir. Sürüm verilmemiş, sayı olmayan ya da
+// farklıysa haveGroups yok sayılır ve gereken bütün gruplar gönderilir.
 //
 // Bölümler tek bir transaction'da okunmaz: anlık görüntü indirilirken başka
 // bir cihazdan yazım gelirse bölümler birbirinden bir cevap farklı olabilir.
@@ -79,10 +83,12 @@ func (h *Handlers) SyncSnapshot(c *fiber.Ctx) error {
 	if snap.OpenGroups, err = h.openGroupsDTO(h.DB, userID); err != nil {
 		return err
 	}
-	if !clientHasDictionary(c.Query("dictionaryVersion"), version) {
-		if snap.Cards, err = snapshotCards(h.DB, &user); err != nil {
-			return err
-		}
+	skip := map[string]bool{}
+	if clientHasDictionary(c.Query("dictionaryVersion"), version) {
+		skip = parseHaveGroups(c.Query("haveGroups"))
+	}
+	if snap.Cards, err = snapshotCards(h.DB, &user, skip); err != nil {
+		return err
 	}
 	statsAt := statsNow()
 	if snap.Stats, err = h.statsSummary(userID, statsAt, false); err != nil {
@@ -104,41 +110,72 @@ func clientHasDictionary(param string, version int64) bool {
 	return err == nil && n == version
 }
 
-// snapshotCards, kullanıcının ilerlemesi olan her grubun (grup, kelimenin
-// sözlükteki grubudur) ve işaretçideki grupla ondan sonraki grubun bütün
-// kartlarını seviye, grup ve sıra sırasıyla döner. İşaretçi "tümü
-// tamamlandı"daysa (C2, 0) yalnızca ilerlemeli gruplar gelir.
-func snapshotCards(gdb *gorm.DB, user *models.User) ([]models.DictionaryWord, error) {
-	type group struct {
-		level string
-		grp   int
+// parseHaveGroups, "A1:1,A1:2" biçimindeki grup listesini küme olarak döner;
+// tanınmayan parçalar yok sayılır.
+func parseHaveGroups(raw string) map[string]bool {
+	out := map[string]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		level, grp, ok := strings.Cut(strings.TrimSpace(part), ":")
+		if !ok {
+			continue
+		}
+		n, err := strconv.Atoi(grp)
+		if err != nil {
+			continue
+		}
+		if key, ok := services.UnlockedGroupKey(level, n); ok {
+			out[key] = true
+		}
 	}
-	var extra []group
+	return out
+}
+
+// cardGroup, kartları gönderilecek bir gruptur.
+type cardGroup struct {
+	Level string
+	Grp   int
+}
+
+// snapshotCards, gereken grupların kartlarını seviye, grup ve sıra sırasıyla
+// döner: kullanıcının ilerlemesi olan her grup (grup, kelimenin sözlükteki
+// grubudur), işaretçideki grup ve sonraki grup. skip'teki gruplar ("A1:3")
+// atlanır. İşaretçi "tümü tamamlandı"daysa (C2, 0) yalnızca ilerlemeli
+// gruplar gerekir.
+func snapshotCards(gdb *gorm.DB, user *models.User, skip map[string]bool) ([]models.DictionaryWord, error) {
+	var groups []cardGroup
+	if err := gdb.Raw(`SELECT DISTINCT dw.level AS level, dw.grp AS grp
+		FROM word_progresses wp
+		JOIN dictionary_words dw ON dw.id = wp.word_id
+		WHERE wp.user_id = ?`, user.ID).Scan(&groups).Error; err != nil {
+		return nil, err
+	}
 	if services.IndexOfLevel(user.CurrentLevel) >= 0 && user.CurrentGroup >= 1 {
-		extra = append(extra, group{user.CurrentLevel, user.CurrentGroup})
+		groups = append(groups, cardGroup{user.CurrentLevel, user.CurrentGroup})
 		maxGroup, err := maxGroupForLevel(gdb, user.CurrentLevel)
 		if err != nil {
 			return nil, err
 		}
 		if nl, ng, _ := services.AdvanceGroup(user.CurrentLevel, user.CurrentGroup, maxGroup); ng >= 1 {
-			extra = append(extra, group{nl, ng})
+			groups = append(groups, cardGroup{nl, ng})
 		}
 	}
-	for len(extra) < 2 {
-		// Sorgu her zaman iki çift alır; olmayan grup hiçbir satırla eşleşmez.
-		extra = append(extra, group{"", 0})
-	}
 
+	seen := map[cardGroup]bool{}
+	var conds []string
+	var args []any
+	for _, g := range groups {
+		if seen[g] || skip[g.Level+":"+strconv.Itoa(g.Grp)] {
+			continue
+		}
+		seen[g] = true
+		conds = append(conds, "(d.level = ? AND d.grp = ?)")
+		args = append(args, g.Level, g.Grp)
+	}
 	cards := []models.DictionaryWord{}
-	err := gdb.Raw(`SELECT d.* FROM dictionary_words d
-		WHERE (d.level, d.grp) IN (
-			SELECT DISTINCT dw.level, dw.grp
-			FROM word_progresses wp
-			JOIN dictionary_words dw ON dw.id = wp.word_id
-			WHERE wp.user_id = ?)
-		   OR (d.level = ? AND d.grp = ?)
-		   OR (d.level = ? AND d.grp = ?)
-		ORDER BY d.level, d.grp, d.word_order, d.id`,
-		user.ID, extra[0].level, extra[0].grp, extra[1].level, extra[1].grp).Scan(&cards).Error
+	if len(conds) == 0 {
+		return cards, nil
+	}
+	err := gdb.Raw(`SELECT d.* FROM dictionary_words d WHERE `+strings.Join(conds, " OR ")+`
+		ORDER BY d.level, d.grp, d.word_order, d.id`, args...).Scan(&cards).Error
 	return cards, err
 }
