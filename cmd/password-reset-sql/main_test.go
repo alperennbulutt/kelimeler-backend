@@ -52,6 +52,7 @@ func TestResetSQL(t *testing.T) {
 		"UPDATE auth_identities SET password_hash = '" + hash + "'",
 		"provider = 'password'",
 		"DELETE FROM refresh_tokens",
+		"user_id = refresh_tokens.user_id",
 		"token_version = token_version + 1",
 		"COMMIT;",
 	} {

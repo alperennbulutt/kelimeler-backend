@@ -53,7 +53,7 @@ func main() {
 
 	fmt.Println("1) Coolify > kelimeler-db > Terminal'e aşağıdaki bloğun TAMAMINI yapıştırın.")
 	fmt.Println("   Çıktıda üç satırın da 'UPDATE 1' / 'DELETE n' / 'UPDATE 1' olduğunu ve en sonda COMMIT yazdığını görün.")
-	fmt.Println("   'UPDATE 0' görürseniz hesap yok ya da hesabın parola girişi yok (Google/Apple ile açılmış): hiçbir şey değişmez.")
+	fmt.Println("   'UPDATE 0' / 'DELETE 0' / 'UPDATE 0' görürseniz hesap yok ya da hesabın parola girişi yok (Google/Apple ile açılmış): hiçbir şey değişmez, oturumlar da kapanmaz.")
 	fmt.Println()
 	fmt.Print(resetSQL(email, hash))
 	fmt.Println()
@@ -100,7 +100,8 @@ func resetSQL(email, hash string) string {
 BEGIN;
 UPDATE auth_identities SET password_hash = %s
   WHERE provider = 'password' AND user_id = (SELECT id FROM users WHERE email = %s);
-DELETE FROM refresh_tokens WHERE user_id = (SELECT id FROM users WHERE email = %s);
+DELETE FROM refresh_tokens WHERE user_id = (SELECT id FROM users WHERE email = %s)
+  AND EXISTS (SELECT 1 FROM auth_identities WHERE provider = 'password' AND user_id = refresh_tokens.user_id);
 UPDATE users SET token_version = token_version + 1, updated_at = now()
   WHERE email = %s AND EXISTS (
     SELECT 1 FROM auth_identities WHERE provider = 'password' AND user_id = users.id);
