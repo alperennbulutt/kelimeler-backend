@@ -494,72 +494,114 @@ const freeGroupColumn = "groups_started_today_count"
 // istemci haritada kilitli gruba girmez.
 //
 // Gövde göndermeyen (ya da geçersiz gönderen) istemcilerde uç yalnızca sayacı
-// artırır.
+// artırır; hangi grubun açıldığı bilinmediği için günlük geçmişe
+// (daily_group_unlocks) de bir şey yazılmaz.
 func (h *Handlers) UnlockGroup(column string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		var req dto.UnlockGroupRequest
 		if err := c.BodyParser(&req); err != nil {
 			return h.incrementUsage(c, column)
 		}
-		key, ok := services.UnlockedGroupKey(req.Level, req.Group)
-		if !ok {
+		if _, ok := services.UnlockedGroupKey(req.Level, req.Group); !ok {
 			return h.incrementUsage(c, column)
 		}
 
 		userID := middleware.UserID(c)
 		now := time.Now()
 		err := h.DB.Transaction(func(tx *gorm.DB) error {
-			if err := resetUsageIfStale(tx, userID, now); err != nil {
-				return err
-			}
-			var user models.User
-			if err := lockUser(tx, userID, &user); err != nil {
-				return err
-			}
-			if slices.Contains(services.SplitUnlockedGroups(user.UnlockedGroupsToday), key) {
-				return nil
-			}
-			limited, err := h.openGroupLimitReached(tx, userID, req.Level, req.Group)
-			if err != nil {
-				return err
-			}
-			if limited {
-				if err := h.applyGate(c, services.GateViolation{
-					Kind:   services.GateKindLearn,
-					Reason: services.GateReasonOpenGroupLimit,
-					UserID: userID,
-					Level:  req.Level,
-					Group:  req.Group,
-				}, false, now, errOpenGroupLimit); err != nil {
-					return err
-				}
-			} else if column == freeGroupColumn && user.GroupsStartedTodayCount >= 1 {
-				if err := h.applyGate(c, services.GateViolation{
-					Kind:   services.GateKindLearn,
-					Reason: services.GateReasonFreeGroupReused,
-					UserID: userID,
-					Level:  req.Level,
-					Group:  req.Group,
-				}, false, now, errGateRequired); err != nil {
-					return err
-				}
-			}
-
-			// concat_ws değişken sayıda ve her tipte argüman alır; parametrenin
-			// tipi açıkça verilmezse PostgreSQL onu yalnızca değer sorgu
-			// metnine gömülü gittiğinde (basit protokol) çözebilir, hazırlanan
-			// sorguda çözemez.
-			return tx.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
-				column:                  gorm.Expr(column + " + 1"),
-				"unlocked_groups_today": gorm.Expr("concat_ws(',', NULLIF(unlocked_groups_today, ''), ?::text)", key),
-				"last_reset_date":       usageTouchedAt(now),
-			}).Error
+			_, err := h.unlockGroupTx(c, tx, userID, req.Level, req.Group, column, now)
+			return err
 		})
 		if err != nil {
 			return err
 		}
 		return h.respondUsage(c, userID)
 	}
+}
+
+// unlockGroupTx, (level, grp) grubunun bugünkü açılışını tx içinde yazar
+// (bkz. UnlockGroup; column, artırılacak sayaçtır). Grup bugün zaten
+// açıksa sayaçlar değişmez ve added false döner. Kapı reddi (enforce kipinde
+// 403 gate_required ya da open_group_limit) hata olarak döner; çağıranın
+// transaction'ı geri alınır. Grubun seviyesi ve numarası geçerli olmalıdır
+// (services.UnlockedGroupKey).
+//
+// Açılış, günlük geçmişe (daily_group_unlocks) de aynı transaction'da yazılır:
+// çevrimdışı verilmiş geçmiş günün cevapları o günün kayıtlarına göre
+// denetlenir. Grup bugün zaten açıksa da satır yoksa yazılır (bu tablodan
+// önce açılmış gruplar).
+func (h *Handlers) unlockGroupTx(c *fiber.Ctx, tx *gorm.DB, userID, level string, grp int, column string, now time.Time) (added bool, err error) {
+	key, ok := services.UnlockedGroupKey(level, grp)
+	if !ok {
+		return false, errInvalidGroup
+	}
+	via := models.UnlockViaAd
+	if column == freeGroupColumn {
+		via = models.UnlockViaFree
+	}
+	if err := resetUsageIfStale(tx, userID, now); err != nil {
+		return false, err
+	}
+	var user models.User
+	if err := lockUser(tx, userID, &user); err != nil {
+		return false, err
+	}
+	if slices.Contains(services.SplitUnlockedGroups(user.UnlockedGroupsToday), key) {
+		_, err := recordGroupUnlock(tx, userID, services.UsageDate(now), level, grp, via, now)
+		return false, err
+	}
+	limited, err := h.openGroupLimitReached(tx, userID, level, grp)
+	if err != nil {
+		return false, err
+	}
+	if limited {
+		if err := h.applyGate(c, services.GateViolation{
+			Kind:   services.GateKindLearn,
+			Reason: services.GateReasonOpenGroupLimit,
+			UserID: userID,
+			Level:  level,
+			Group:  grp,
+		}, false, now, errOpenGroupLimit); err != nil {
+			return false, err
+		}
+	} else if column == freeGroupColumn && user.GroupsStartedTodayCount >= 1 {
+		if err := h.applyGate(c, services.GateViolation{
+			Kind:   services.GateKindLearn,
+			Reason: services.GateReasonFreeGroupReused,
+			UserID: userID,
+			Level:  level,
+			Group:  grp,
+		}, false, now, errGateRequired); err != nil {
+			return false, err
+		}
+	}
+
+	// concat_ws değişken sayıda ve her tipte argüman alır; parametrenin
+	// tipi açıkça verilmezse PostgreSQL onu yalnızca değer sorgu
+	// metnine gömülü gittiğinde (basit protokol) çözebilir, hazırlanan
+	// sorguda çözemez.
+	if err := tx.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
+		column:                  gorm.Expr(column + " + 1"),
+		"unlocked_groups_today": gorm.Expr("concat_ws(',', NULLIF(unlocked_groups_today, ''), ?::text)", key),
+		"last_reset_date":       usageTouchedAt(now),
+	}).Error; err != nil {
+		return false, err
+	}
+	if _, err := recordGroupUnlock(tx, userID, services.UsageDate(now), level, grp, via, now); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// recordGroupUnlock, (level, grp) grubunun day ("YYYY-MM-DD", kullanım günü)
+// gününde via yoluyla açıldığını daily_group_unlocks'a yazar. Satır zaten
+// varsa (aynı gün aynı grup) dokunulmaz ve inserted false döner.
+func recordGroupUnlock(tx *gorm.DB, userID, day, level string, grp int, via string, now time.Time) (inserted bool, err error) {
+	res := tx.Exec(`INSERT INTO daily_group_unlocks (user_id, usage_date, level, grp, via, created_at)
+		VALUES (?, CAST(? AS date), ?, ?, ?, ?)
+		ON CONFLICT (user_id, usage_date, level, grp) DO NOTHING`,
+		userID, day, level, grp, via, now.UTC())
+	return res.RowsAffected > 0, res.Error
 }
 
 // RecordReviewAdPass: POST /users/me/usage/review-ad-pass
