@@ -3,6 +3,8 @@ package dto
 import (
 	"encoding/json"
 	"time"
+
+	"kelimeler-backend/internal/models"
 )
 
 // --- Progress ---
@@ -194,4 +196,36 @@ type OpenGroupsDTO struct {
 type UnknownWordRequest struct {
 	WordID string `json:"wordId"`
 	OpFields
+}
+
+// SnapshotDTO, GET /sync/snapshot yanıtıdır: çevrimdışı mod istemcisinin
+// sakladığı anlık görüntü. Her bölüm, adı geçen ucun yanıtıyla aynı
+// biçimdedir; tek alanlı sarmalayıcılar ({"user": …}, {"learnedCount": n},
+// {"dates": […]}) açılmıştır.
+type SnapshotDTO struct {
+	ServerNow         time.Time `json:"serverNow"`
+	UsageDate         string    `json:"usageDate"` // YYYY-MM-DD (Europe/Istanbul)
+	DictionaryVersion int64     `json:"dictionaryVersion"`
+	// User, GET /auth/me yanıtındaki "user" nesnesidir.
+	User *UserDTO `json:"user"`
+	// Usage, GET /users/me/usage yanıtıdır.
+	Usage DailyUsageDTO `json:"usage"`
+	// Progress, kutu 1–5'teki bütün kelime kayıtlarıdır (GET
+	// /progress/word/:id biçimi), wordId sırasıyla.
+	Progress []models.WordProgress `json:"progress"`
+	// LearnedCount, GET /home/learned-count'taki learnedCount'tur (kutu 6).
+	LearnedCount int64 `json:"learnedCount"`
+	// Levels, her seviye için GET /map/levels/:level/groups yanıtıdır.
+	Levels map[string][]LevelGroupDTO `json:"levels"`
+	// OpenGroups, GET /map/open-groups yanıtıdır.
+	OpenGroups OpenGroupsDTO `json:"openGroups"`
+	// Cards, ilerlemesi olan her grubun ve işaretçideki grupla ondan sonraki
+	// grubun kartlarıdır (GET /dictionary/words biçimi; seviye, grup ve sıra
+	// sırasıyla). İstemcinin dictionaryVersion'ı güncelse boştur.
+	Cards []models.DictionaryWord `json:"cards"`
+	// Stats, GET /stats/summary yanıtıdır (newlyEarnedBadges her zaman boş:
+	// anlık görüntü rozet bildirimini tüketmez).
+	Stats StatsSummaryDTO `json:"stats"`
+	// LoginDates, GET /stats/login-dates yanıtındaki "dates" listesidir.
+	LoginDates []string `json:"loginDates"`
 }

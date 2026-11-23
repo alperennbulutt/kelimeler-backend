@@ -374,3 +374,20 @@ func syncProgressText(tx *gorm.DB, changes []PatchChange) (int64, error) {
 	}
 	return r.RowsAffected, nil
 }
+
+// DictionaryVersion, yayındaki sözlüğün içerik sürümüdür: uygulanmış sözlük
+// yaması sayısı (dictionary_patches_applied). Çevrimdışı mod istemcisi kart
+// önbelleğini bu sayıyla eşler (GET /sync/snapshot?dictionaryVersion=N).
+//
+// Yamalar bir kez ve sırayla uygulanır, kayıtları silinmez; sözlüğün içeriği
+// yayında yalnızca yamayla değiştiği için her içerik değişikliği sürümü bir
+// artırır. Seed boş veritabanında yamalardan önce yüklenir ve yamalar seed'in
+// üstüne yine uygulanır (değişiklik olmasa da kaydedilir): aynı yama
+// kümesindeki iki kurulumun sürümü aynıdır. Sözlüğü yama dışında değiştirmek
+// (elle SQL, import-dictionary) sürümü artırmaz; o durumda istemcinin
+// önbelleği yenilenmez (bkz. DEPLOYMENT.md).
+func DictionaryVersion(gdb *gorm.DB) (int64, error) {
+	var n int64
+	err := gdb.Model(&models.DictionaryPatchApplied{}).Count(&n).Error
+	return n, err
+}

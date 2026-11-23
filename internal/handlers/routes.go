@@ -138,6 +138,10 @@ func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService, authLi
 	prog.Get("/review/box/:box", h.ReviewWordsForBox)
 	prog.Get("/review/box/:box/counts", h.UpcomingCountsForBox)
 
+	// --- Çevrimdışı mod: anlık görüntü ---
+	snap := api.Group("/sync", guard)
+	snap.Get("/snapshot", h.SyncSnapshot)
+
 	// --- Users & günlük kullanım ---
 	users := api.Group("/users", guard)
 	users.Get("/me", h.Me)
