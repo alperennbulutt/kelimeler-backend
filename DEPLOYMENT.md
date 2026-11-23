@@ -728,3 +728,82 @@ yönlendirir. Böyle bir e-posta gelince:
    değişmez, oturumlar da kapanmaz.
 4. Geçici parolayı yalnızca kullanıcının e-postasına yanıt olarak ilet. Sıfırlama
    kullanıcının bütün cihazlardaki oturumlarını kapatır.
+
+## Çevrimdışı mod, aşama 0 (backend): sürüm notları
+
+Karar ve sözleşme: mobil depodaki `docs/CEVRIMDISI_MOD.md` ("API sözleşmesi"). Bu aşama yalnızca sunucu hazırlığıdır; yayındaki mobil istemci hiçbir yeni alan göndermez ve davranışı **değişmez**: mevcut uçların yanıtları aynıdır, yeni istek alanları isteğe bağlıdır. Backend, çevrimdışı modlu mobil sürümden **önce** yayına çıkar.
+
+### Yeni ve değişen uçlar
+
+| Uç | Ne değişti |
+|---|---|
+| `POST /progress/learn`, `/progress/unknown`, `/progress/swipe` | Gövdeye isteğe bağlı `opId` (UUID) ve `answeredAt` (RFC3339). İkisi de yoksa davranış aynı. `opId` geçersizse `400 invalid_request`; aynı `opId` daha önce uygulanmışsa hiçbir şey yapılmaz ve **ilk yanıt** döner (aynı `opId` başka türde bir işlem için kullanılmışsa `409 op_id_conflict`). `answeredAt` `[şimdi − 7 gün, şimdi + 5 dk]` aralığına kırpılır (ileri kayma ertesi güne taşıyorsa şimdi sayılır); Leitner tarihleri ve vade cevabın anına göre hesaplanır. `answeredAt` geçmiş bir güne (Europe/Istanbul) düşüyorsa cevap bugünkü sayaçlara (`reviewAnswersToday`) ve tekrar kapısına girmez; öğrenme ve kutu 1'deki doğru cevap **o günün** grup açılışlarına (`daily_group_unlocks`) göre denetlenir |
+| `POST /progress/sync` | Yeni. Gövde `{"ops":[...]}`, en çok 200 işlem (fazlası `400 too_many_ops`). Her işlemde `opId` (UUID) zorunlu, `kind`: `learn`, `unknown` (`wordId`), `swipe` (`wordId`, `direction`), `group_started` (`level`, `group`, `usageDate`), `advance_group` (`level`, `group`), `daily_login` (`date`); hepsinde isteğe bağlı `answeredAt` (yoksa şimdi). İşlemler sırayla, her biri kendi transaction'ında uygulanır; yanıt `200 {"results":[{"opId","status","code"?,"progress"?}],"user":{...},"usage":{...}}`. Ayrıntılar aşağıda |
+| `GET /sync/snapshot?dictionaryVersion=N` | Yeni. Çevrimdışı modun anlık görüntüsü; bölümler aşağıda |
+| `POST /auth/refresh` | Yanıtı kaybolan yenileme 60 sn içinde aynı (artık iptal edilmiş) token'la yeniden denenirse **aynı refresh token** döner (eskiden her denemede yeni bir token). Access token yeniden imzalanır. Yeniden kullanım tespiti değişmedi |
+| `POST /users/me/usage/group-started`, `/group-unlocked-by-ad` (gövdeli) | Yanıt aynı; açılış ayrıca `daily_group_unlocks`'a (`via` = `free` / `ad`) yazılır |
+
+#### `POST /progress/sync` sonuçları
+
+- `status`: `applied` (uygulandı), `noop` (geçerli ama hiçbir şey değişmedi: vadesi gelmemiş kelime, zaten ilerlemiş kelimeye learn, kaydı olan kelimeye unknown, bugün zaten açık grup, zaten kayıtlı giriş, ilerlemeyen işaretçi), `rejected` (uygulanmadı).
+- `code` yalnızca bilgi varsa gelir. Ret kodları: `invalid_op` (bozuk işlem, eksik/geçersiz `opId`, bilinmeyen `kind`, eksik `wordId`, geçersiz `direction`, çözülemeyen `answeredAt`), `op_id_conflict`, `unknown_word`, `not_found` (swipe'ta kelimenin kaydı yok), `invalid_group`, `invalid_date`, `gate_required`, `review_gate_required`, `open_group_limit`. Uygulanan işlemde: `free_group_conflict` (`group_started`, geçmiş gün); `advance_group` noop'unda `blockedReason` (`previous_not_seen`, `previous_level`, `open_group_limit`; ilerlemeyen başka durumda kod yok).
+- `progress`: kelime işlemlerinde kelimenin güncel kaydı (`GET /progress/word/:id` biçimi); reddedilen kelime işleminde de kayıt varsa gelir. Diğer işlemlerde yok.
+- Aynı `opId` ikinci kez gelirse (aynı parçada, sonraki parçada ya da önce tek tek uçtan gönderilmişse) ilk sonuç aynen döner. Reddedilen işlem kaydedilmez: kapı geçildikten sonra aynı `opId` ile yeniden gönderilirse uygulanabilir.
+- Veritabanı hatasında `500`: o ana kadar uygulananlar kayıtlıdır, aynı parçayı yeniden göndermek onları ikinci kez uygulamaz.
+- **Bugünün** tekrar cevabında kapı bir aralık (30 cevap) aşılabilir: 30 kapısı geçilmemişken 31.–60. cevap kabul, 61. `enforce`'ta `review_gate_required` (`log`'da kabul + rapor). Geçmiş günün tekrar cevabı kapıya sorulmaz.
+- `group_started`: `usageDate` bugünse `group-started` ile aynı (sayaç, küme, kapı). Geçmiş günse (en çok 7 gün önce; daha eski `invalid_date`, gelecek gün bugün sayılır) yalnızca `daily_group_unlocks`'a `offline_free` yazılır; o günün ücretsiz hakkı başka bir gruba kullanılmışsa yine yazılır, kod `free_group_conflict`.
+- `advance_group`: gövdeli `advance-group` ile aynı.
+- `daily_login`: `date` bugün ya da en çok 7 gün önce (`YYYY-MM-DD`); `created_at` o güne yazılır (seri hesabı senkronizasyon gününü girişli saymaz).
+- `user` = `GET /auth/me` yanıtındaki `user` nesnesi; `usage` = `GET /users/me/usage` yanıtı.
+
+#### `GET /sync/snapshot` bölümleri
+
+Her bölüm, adı geçen ucun yanıtını kuran kodla üretilir; tek alanlı sarmalayıcılar açılmıştır:
+
+| Alan | Karşılığı |
+|---|---|
+| `serverNow` | Sunucu saati (RFC3339, UTC) |
+| `usageDate` | Bugün (`YYYY-MM-DD`, Europe/Istanbul) |
+| `dictionaryVersion` | Sözlük sürümü: uygulanmış sözlük yaması sayısı (`dictionary_patches_applied`) |
+| `user` | `GET /auth/me` → `user` |
+| `usage` | `GET /users/me/usage` (gün dönümü uygulanmış) |
+| `progress` | Kutu 1–5'teki bütün kayıtlar, `GET /progress/word/:id` biçiminde, `wordId` sırasıyla |
+| `learnedCount` | `GET /home/learned-count` → `learnedCount` (kutu 6) |
+| `levels` | `{"A1": GET /map/levels/A1/groups, ..., "C2": ...}`, altı seviye |
+| `openGroups` | `GET /map/open-groups` |
+| `cards` | İlerlemesi olan her grubun (kelimenin sözlükteki grubu) ve işaretçideki grupla sonraki grubun kartları, `GET /dictionary/words` biçiminde, seviye/grup/sıra sırasıyla. `dictionaryVersion` sorgusu sunucununkiyle aynıysa `[]` |
+| `stats` | `GET /stats/summary`; tek fark: anlık görüntü yeni rozetleri yazmaz, `newlyEarnedBadges` her zaman `[]` (bildirim bir sonraki `/stats/summary`'de çıkar) |
+| `loginDates` | `GET /stats/login-dates` → `dates` |
+
+**Sözlük sürümü:** yayındaki sözlük yalnızca yamalarla (`seed/dictionary_patches`) değiştiği için her yeni yama sürümü bir artırır ve istemci kartları yeniden indirir. Sözlüğü yama dışında (elle SQL, `import-dictionary`) değiştirmek sürümü **artırmaz**; istemcilerin önbelleği eski kalır. Kart metnini her zaman yamayla düzelt.
+
+### Açılışta AutoMigrate'in uygulayacağı veritabanı değişikliği
+
+| Tablo | Değişiklik | Not |
+|---|---|---|
+| `applied_ops` | Yeni: `user_id uuid`, `op_id uuid` (PK ikisi), `kind`, `applied_at`, `result jsonb`, `review_day date NULL`; `applied_at` index'i | Kimlikli işlemin ilk sonucu; işlemle aynı transaction'da yazılır. Kullanıcı silinince CASCADE. 30 günden eski satırlar saatlik temizlikte silinir (log: `uygulanmış işlem temizliği: N satır silindi`) |
+| `daily_group_unlocks` | Yeni: `user_id`, `usage_date date`, `level`, `grp`, `via` (`free`/`ad`/`nofill`/`offline_free`, CHECK), `created_at`; UNIQUE (`user_id`, `usage_date`, `level`, `grp`) | Grup açılışlarının günlük geçmişi. Kullanıcı silinince CASCADE; temizlenmez (satır başına birkaç yüz bayt, kullanıcı başına günde birkaç satır). `nofill` şimdilik yazılmaz: yayındaki istemci no-fill geçişinden sonra da `group-unlocked-by-ad` çağırır |
+
+Var olan tablolara dokunulmaz. Yayından önce açılmış bugünkü grupların satırı yoktur; aynı gruba yeniden girişte (`group-started`/`by-ad` yeniden çağrılınca) tamamlanır.
+
+### Davranış ve izleme
+
+Yeni rapor nedenleri (`gate_violation ...` satırları ve `log` kipinde Sentry uyarısı; `off`'ta raporlanmaz):
+
+- `kind=learn reason=past_day_not_unlocked`: geçmiş günün öğrenme cevabı, grubun o gün açıldığına dair kayıt olmadan geldi. `enforce`'ta `gate_required` ile reddedilir.
+- `kind=review reason=past_day_review_overshoot answers_today=N`: geçmiş bir günün tekrar cevapları 120'yi aştı (sayım kimlikli cevaplardan, `applied_ops.review_day`). Yalnızca raporlanır, reddedilmez.
+- `kind=learn reason=offline_free_group_conflict`: çevrimdışı geçmiş günde ücretsiz açılan grup, o günün ücretsiz hakkı başka gruba kullanılmışken geldi. Yalnızca raporlanır.
+
+Kabul edilen taviz (sözleşme): saatini geri alan bir istemci geçmiş gün kuralıyla tekrar kapısını atlatabilir (en çok 7 gün geriye); bu durum `past_day_review_overshoot` ile görünür.
+
+**Refresh token:** rotasyonda yeni refresh token eskisinden türetilir (JWT gizli anahtarıyla HMAC). `JWT_SECRET` değişirse tolerans içindeki yeniden deneme aynı token'ı üretemez ve eski davranışa (yeni çift) düşer; oturumlar düşmez.
+
+### Yayın sırası
+
+1. Yedek al (PostgreSQL → Backups → Backup Now). Backend'i `GATE_ENFORCEMENT` mevcut değeriyle deploy et. Açılış logunda `db: migrate tamamlandı`.
+2. Doğrula (token ile): `GET /api/v1/sync/snapshot` → `200`, gövdede `dictionaryVersion` ve `levels`; `POST /api/v1/progress/sync` gövdesi `{"ops":[]}` → `200 {"results":[],...}`.
+3. Çevrimdışı modlu mobil sürümü bundan **sonra** yayınla. Eski sunucu bilinmeyen alanları yok sayar, `/progress/sync` ve `/sync/snapshot` `404` döner (istemci işlemleri tek tek uçlardan gönderir).
+
+### Geri alma
+
+Bir önceki commit'i deploy etmek şemayı bozmaz (yeni tablolar kalır, eski kod yok sayar). Yeni mobil sürüm yayındaysa: `/progress/sync` ve `/sync/snapshot` `404` döner; tek tek uçlar `opId`/`answeredAt`'i yok sayar, yani yeniden gönderilen bir cevap ikinci kez uygulanabilir (eski idempotentlik kuralları geçerli: vadesi gelmemiş kelime ilerlemez) ve geçmiş günün cevabı bugünün cevabı sayılır. Türetilmiş refresh token'lar geçerli kalır; eski sunucu tolerans içindeki yeniden denemede yine yeni bir çift verir.
