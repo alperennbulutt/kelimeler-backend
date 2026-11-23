@@ -724,6 +724,7 @@ yönlendirir. Böyle bir e-posta gelince:
    bağlanmaz, parolayı hiçbir yere kaydetmez.
 3. Coolify → kelimeler-db → Terminal'e bloğun tamamını yapıştır. Çıktı
    `UPDATE 1`, `DELETE n`, `UPDATE 1`, `COMMIT` olmalı. `UPDATE 0` hesap yok ya da
-   hesabın parola girişi yok (Google/Apple ile açılmış) demektir; hiçbir şey değişmez.
+   hesabın parola girişi yok (Google/Apple ile açılmış) demektir; hiçbir şey
+   değişmez, oturumlar da kapanmaz.
 4. Geçici parolayı yalnızca kullanıcının e-postasına yanıt olarak ilet. Sıfırlama
    kullanıcının bütün cihazlardaki oturumlarını kapatır.

@@ -21,7 +21,9 @@ const (
 	SentryRelayMaxBody = 1 << 20 // 1 MiB
 
 	// sentryRelayTimeout, Sentry'ye yapılan isteğin üst süresidir.
-	sentryRelayTimeout = 10 * time.Second
+	// SHUTDOWN_TIMEOUT varsayılanından (8 sn) kısa tutulur: Sentry yavaşken
+	// yapılan bir redeploy kapanışı aşıp süreci hatayla bitirmesin.
+	sentryRelayTimeout = 5 * time.Second
 
 	// sentryRelayMaxResponse, Sentry yanıt gövdesinden istemciye aktarılan en
 	// fazla bayt ({"id":"..."} gibi küçük bir JSON beklenir).
