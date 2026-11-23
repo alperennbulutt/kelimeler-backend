@@ -1,6 +1,24 @@
 package dto
 
+import (
+	"encoding/json"
+	"time"
+)
+
 // --- Progress ---
+
+// OpFields, cevap uçlarının (learn, unknown, swipe) isteğe bağlı çevrimdışı
+// mod alanlarıdır. İkisi de verilmezse davranış bu alanlardan önceki gibidir.
+//
+//   - OpID (UUID): işlemin kimliği. Aynı kimlik ikinci kez gelirse işlem
+//     uygulanmaz, ilk yanıt döner (applied_ops).
+//   - AnsweredAt (RFC3339): cevabın verildiği an. Sunucu onu
+//     [şimdi − 7 gün, şimdi + 5 dk] aralığına kırpar; Leitner tarihleri ve
+//     "hangi günün cevabı" kararı bu ana göre verilir.
+type OpFields struct {
+	OpID       string     `json:"opId"`
+	AnsweredAt *time.Time `json:"answeredAt"`
+}
 
 type LearnRequest struct {
 	WordID  string `json:"wordId"`
@@ -8,11 +26,58 @@ type LearnRequest struct {
 	Group   int    `json:"group"`
 	English string `json:"english"`
 	Turkish string `json:"turkish"`
+	OpFields
 }
 
 type SwipeRequest struct {
 	WordID    string `json:"wordId"`
 	Direction string `json:"direction"` // "right" | "left"
+	OpFields
+}
+
+// --- Senkronizasyon (çevrimdışı mod) ---
+
+// SyncRequest, POST /progress/sync gövdesidir. İşlemler tek tek çözülür:
+// biçimi bozuk bir işlem yalnızca kendisi reddedilir.
+type SyncRequest struct {
+	Ops []json.RawMessage `json:"ops"`
+}
+
+// SyncOp, kuyruktaki tek bir işlemdir; hangi alanların kullanıldığı Kind'a
+// bağlıdır (learn/unknown: wordId; swipe: wordId, direction; group_started:
+// level, group, usageDate; advance_group: level, group; daily_login: date).
+type SyncOp struct {
+	OpID       string     `json:"opId"`
+	Kind       string     `json:"kind"`
+	AnsweredAt *time.Time `json:"answeredAt"`
+	WordID     string     `json:"wordId"`
+	Direction  string     `json:"direction"`
+	Level      string     `json:"level"`
+	Group      int        `json:"group"`
+	UsageDate  string     `json:"usageDate"` // YYYY-MM-DD
+	Date       string     `json:"date"`      // YYYY-MM-DD
+}
+
+// SyncOpResult, bir işlemin sonucudur. Status: "applied" (uygulandı),
+// "noop" (geçerli ama hiçbir şey değiştirmedi, ör. vadesi gelmemiş kelime) ya
+// da "rejected" (uygulanmadı; neden Code'da). Code, applied/noop'ta da ek
+// bilgi taşıyabilir (ör. free_group_conflict, previous_not_seen); yoksa
+// alan gönderilmez. Progress, kelime işlemlerinde kelimenin güncel kaydıdır
+// (GET /progress/word/:id biçimi); kelime işlemi değilse ya da kayıt yoksa
+// gönderilmez.
+type SyncOpResult struct {
+	OpID     string          `json:"opId"`
+	Status   string          `json:"status"`
+	Code     string          `json:"code,omitempty"`
+	Progress json.RawMessage `json:"progress,omitempty"`
+}
+
+// SyncResponse, POST /progress/sync yanıtıdır. User, GET /auth/me
+// yanıtındaki "user" nesnesidir; Usage, GET /users/me/usage yanıtıdır.
+type SyncResponse struct {
+	Results []SyncOpResult `json:"results"`
+	User    *UserDTO       `json:"user"`
+	Usage   DailyUsageDTO  `json:"usage"`
 }
 
 // UpcomingCounts, UserWordRepository.getUpcomingCountsForBox dönüşünün karşılığı.
@@ -128,4 +193,5 @@ type OpenGroupsDTO struct {
 // kaydı olmayan kelimeye "Bilmiyorum" denendi.
 type UnknownWordRequest struct {
 	WordID string `json:"wordId"`
+	OpFields
 }

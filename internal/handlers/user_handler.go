@@ -234,60 +234,16 @@ func (h *Handlers) AdvanceGroup(c *fiber.Ctx) error {
 	}
 
 	var user models.User
-	levelChanged := false
-	blockedReason := ""
+	var adv advanceResult
 	u, err := h.txWithUserResponse(userID, &user, func(tx *gorm.DB) error {
-		if err := lockUser(tx, userID, &user); err != nil {
-			return err
-		}
-		if completed != nil && (completed.Level != user.CurrentLevel || completed.Group != user.CurrentGroup) {
-			return nil
-		}
-		if completed == nil {
-			// Karar kilitli satırdaki işaretçiyle verilir: bekleme sırasında
-			// başka bir istek işaretçiyi ilerletmiş olabilir.
-			done, err := groupCompleted(tx, userID, user.CurrentLevel, user.CurrentGroup)
-			if err != nil || !done {
-				return err
-			}
-		}
-
-		maxGroup, err := maxGroupForLevel(tx, user.CurrentLevel)
-		if err != nil {
-			return err
-		}
-		nextLevel, nextGroup, changed := services.AdvanceGroup(user.CurrentLevel, user.CurrentGroup, maxGroup)
-		if nextLevel == user.CurrentLevel && nextGroup == user.CurrentGroup {
-			return nil
-		}
-		if completed != nil {
-			leavesLevel := nextLevel != user.CurrentLevel || nextGroup < 1
-			reason, err := h.bodiedAdvanceBlocked(tx, userID, user.CurrentLevel, user.CurrentGroup, leavesLevel)
-			if err != nil || reason != "" {
-				blockedReason = reason
-				return err
-			}
-		}
-		if nextGroup >= 1 {
-			limited, err := h.openGroupLimitReached(tx, userID, nextLevel, nextGroup)
-			if err != nil {
-				return err
-			}
-			if limited {
-				blockedReason = services.LockReasonOpenGroupLimit
-				return nil
-			}
-		}
-		if err := tx.Model(&models.User{}).Where("id = ?", userID).
-			Updates(map[string]any{"current_level": nextLevel, "current_group": nextGroup}).Error; err != nil {
-			return err
-		}
-		levelChanged = changed
-		return tx.First(&user, "id = ?", userID).Error
+		var err error
+		adv, err = h.advanceGroupTx(tx, userID, completed, &user)
+		return err
 	})
 	if err != nil {
 		return err
 	}
+	levelChanged, blockedReason := adv.levelChanged, adv.blockedReason
 
 	return c.JSON(fiber.Map{
 		"user":         u,
@@ -297,6 +253,67 @@ func (h *Handlers) AdvanceGroup(c *fiber.Ctx) error {
 		// Sonradan eklendi: eski istemci tanımaz ve yok sayar.
 		"blockedReason": blockedReason,
 	})
+}
+
+// advanceResult, advanceGroupTx'in sonucudur.
+type advanceResult struct {
+	moved         bool   // işaretçi ilerledi
+	levelChanged  bool   // işaretçi başka bir seviyeye geçti
+	blockedReason string // ilerlemediyse nedeni (bkz. AdvanceGroup); yoksa ""
+}
+
+// advanceGroupTx, advance-group kararını tx içinde verir ve yazar (kurallar
+// için bkz. AdvanceGroup). completed nil ise gövdesiz (eski istemci) yoldur.
+// user, kilitli okunur ve ilerlediyse yeniden okunur.
+func (h *Handlers) advanceGroupTx(tx *gorm.DB, userID string, completed *dto.AdvanceGroupRequest, user *models.User) (advanceResult, error) {
+	var res advanceResult
+	if err := lockUser(tx, userID, user); err != nil {
+		return res, err
+	}
+	if completed != nil && (completed.Level != user.CurrentLevel || completed.Group != user.CurrentGroup) {
+		return res, nil
+	}
+	if completed == nil {
+		// Karar kilitli satırdaki işaretçiyle verilir: bekleme sırasında
+		// başka bir istek işaretçiyi ilerletmiş olabilir.
+		done, err := groupCompleted(tx, userID, user.CurrentLevel, user.CurrentGroup)
+		if err != nil || !done {
+			return res, err
+		}
+	}
+
+	maxGroup, err := maxGroupForLevel(tx, user.CurrentLevel)
+	if err != nil {
+		return res, err
+	}
+	nextLevel, nextGroup, changed := services.AdvanceGroup(user.CurrentLevel, user.CurrentGroup, maxGroup)
+	if nextLevel == user.CurrentLevel && nextGroup == user.CurrentGroup {
+		return res, nil
+	}
+	if completed != nil {
+		leavesLevel := nextLevel != user.CurrentLevel || nextGroup < 1
+		reason, err := h.bodiedAdvanceBlocked(tx, userID, user.CurrentLevel, user.CurrentGroup, leavesLevel)
+		if err != nil || reason != "" {
+			res.blockedReason = reason
+			return res, err
+		}
+	}
+	if nextGroup >= 1 {
+		limited, err := h.openGroupLimitReached(tx, userID, nextLevel, nextGroup)
+		if err != nil {
+			return res, err
+		}
+		if limited {
+			res.blockedReason = services.LockReasonOpenGroupLimit
+			return res, nil
+		}
+	}
+	if err := tx.Model(&models.User{}).Where("id = ?", userID).
+		Updates(map[string]any{"current_level": nextLevel, "current_group": nextGroup}).Error; err != nil {
+		return res, err
+	}
+	res.moved, res.levelChanged = true, changed
+	return res, tx.First(user, "id = ?", userID).Error
 }
 
 // bodiedAdvanceBlocked, gövdeli advance-group'un işaretçideki (level, grp)

@@ -40,6 +40,19 @@ const (
 	// GateReasonReviewCheckpoint: günün tekrar cevapları bir kontrol noktasına
 	// ulaşmış ve o nokta için geçiş kaydı yok.
 	GateReasonReviewCheckpoint = "review_checkpoint"
+
+	// Çevrimdışı mod (POST /progress/sync ve answeredAt'li cevaplar):
+
+	// GateReasonPastDayNotUnlocked: geçmiş bir günün öğrenme cevabı, grubun o
+	// gün açıldığına dair kayıt (daily_group_unlocks) olmadan geldi.
+	GateReasonPastDayNotUnlocked = "past_day_not_unlocked"
+	// GateReasonPastDayReviewOvershoot: geçmiş bir günün tekrar cevapları
+	// raporlama sınırını aştı. Yalnızca raporlanır, reddedilmez.
+	GateReasonPastDayReviewOvershoot = "past_day_review_overshoot"
+	// GateReasonOfflineFreeGroupConflict: çevrimdışı geçmiş günde ücretsiz
+	// açılan grup, o günün ücretsiz hakkı başka bir gruba kullanılmışken
+	// geldi. Yalnızca raporlanır, açılış yine yazılır.
+	GateReasonOfflineFreeGroupConflict = "offline_free_group_conflict"
 )
 
 // Kapı türleri: aynı kullanıcının iki türdeki ihlali ayrı sayılır.
@@ -207,6 +220,24 @@ func ReviewCheckpointForAnswer(n int) int {
 		return maxCp
 	}
 	return cp
+}
+
+// ReviewAnswerAllowedWithGrace, ReviewAnswerAllowed'ın grace cevap kadar
+// gevşetilmiş halidir: sıradaki geçilmemiş kontrol noktası en çok grace cevap
+// aşılabilir (çevrimdışı verilmiş bugünkü cevaplar). Üç kapı da geçildiyse
+// gün zaten serbesttir.
+//
+// ReviewCheckpointForAnswer 90'da durduğu için onunla hesaplanamaz: iki kapı
+// geçmiş kullanıcıda 90'ı aşan her cevap "90 kapısı" sayılır ve tolerans
+// sınırsız olurdu.
+func ReviewAnswerAllowedWithGrace(answersToday, passes, grace int) bool {
+	if passes >= MaxReviewAdCheckpoints {
+		return true
+	}
+	if passes < 0 {
+		passes = 0
+	}
+	return answersToday+1 <= (passes+1)*ReviewAdCheckpointInterval+grace
 }
 
 // ReviewAnswerAllowed, bugün answersToday tekrar cevabı verilmiş ve passes

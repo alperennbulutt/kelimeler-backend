@@ -344,3 +344,34 @@ func TestLearnDenialReason_ToleransBitinceRolloverExpired(t *testing.T) {
 		t.Error("yeni kullanıcının kümesi rollover_expired sayıldı")
 	}
 }
+
+func TestReviewAnswerAllowedWithGrace(t *testing.T) {
+	cases := []struct {
+		answers, passes, grace int
+		want                   bool
+	}{
+		{0, 0, 30, true},
+		{29, 0, 30, true},  // 30. cevap kapısız
+		{30, 0, 30, true},  // 31. cevap: tolerans içinde
+		{59, 0, 30, true},  // 60. cevap: toleransın sonu
+		{60, 0, 30, false}, // 61. cevap: bir aralıktan fazlası
+		{60, 1, 30, true},  // 30 geçildi: 61..90 olağan, 91..120 tolerans
+		{119, 2, 30, true}, // 60 geçildi: 120. cevap tolerans içinde
+		{120, 2, 30, false},
+		{500, 3, 30, true}, // üç kapı geçildi: gün serbest
+		{30, 0, 0, false},  // toleranssız: ReviewAnswerAllowed ile aynı
+	}
+	for _, c := range cases {
+		if got := ReviewAnswerAllowedWithGrace(c.answers, c.passes, c.grace); got != c.want {
+			t.Errorf("WithGrace(%d, %d, %d) = %v, beklenen %v", c.answers, c.passes, c.grace, got, c.want)
+		}
+	}
+	// Toleranssız hali, passes < 3 için ReviewAnswerAllowed ile aynıdır.
+	for passes := 0; passes < MaxReviewAdCheckpoints; passes++ {
+		for answers := 0; answers < 130; answers++ {
+			if a, b := ReviewAnswerAllowedWithGrace(answers, passes, 0), ReviewAnswerAllowed(answers, passes); a != b {
+				t.Fatalf("answers=%d passes=%d: WithGrace(…, 0) = %v, ReviewAnswerAllowed = %v", answers, passes, a, b)
+			}
+		}
+	}
+}
