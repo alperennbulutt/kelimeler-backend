@@ -21,6 +21,7 @@ import (
 	"kelimeler-backend/internal/db"
 	"kelimeler-backend/internal/handlers"
 	"kelimeler-backend/internal/middleware"
+	"kelimeler-backend/internal/models"
 	"kelimeler-backend/internal/observability"
 	"kelimeler-backend/internal/services"
 	"kelimeler-backend/internal/web"
@@ -229,6 +230,12 @@ func run() (err error) {
 		refreshTokenCleanupInterval, refreshTokenCleanupTimeout,
 		refreshTokenCleanup(database, refreshTokenCleanupRetention))
 	defer stopCleanup()
+
+	// Çevrimdışı mod: 30 günden eski uygulanmış işlem kayıtları (applied_ops).
+	stopOpsCleanup := startPeriodicCleanup(ctx, "uygulanmış işlem temizliği",
+		appliedOpsCleanupInterval, appliedOpsCleanupTimeout,
+		appliedOpsCleanup(database, models.AppliedOpRetention))
+	defer stopOpsCleanup()
 
 	return serve(ctx, app, ln, cfg.ShutdownTimeout)
 }
