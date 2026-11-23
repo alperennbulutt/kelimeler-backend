@@ -86,9 +86,9 @@ func (h *Handlers) LearnWord(c *fiber.Ctx) error {
 		Turkish: word.Turkish,
 		Box:     1,
 	}
-	services.LearnNewWord(&wp)
-
 	now := time.Now()
+	services.LearnNewWord(&wp, now)
+
 	mapState, err := h.learnMapLocked(userID, &word)
 	if err != nil {
 		return err
@@ -443,9 +443,9 @@ func (h *Handlers) MarkUnknown(c *fiber.Ctx) error {
 		Turkish: word.Turkish,
 		Box:     1,
 	}
-	services.OnLeftSwipe(&wp)
-
 	now := time.Now()
+	services.OnLeftSwipe(&wp, now)
+
 	mapState, err := h.learnMapLocked(userID, &word)
 	if err != nil {
 		return err
@@ -504,7 +504,7 @@ func (h *Handlers) Swipe(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil || req.WordID == "" {
 		return apiErr(fiber.StatusBadRequest, "invalid_request", "wordId gerekli")
 	}
-	var apply func(*models.WordProgress)
+	var apply func(*models.WordProgress, time.Time)
 	switch req.Direction {
 	case "right":
 		apply = services.OnRightSwipe
@@ -549,7 +549,7 @@ func (h *Handlers) Swipe(c *fiber.Ctx) error {
 				return err
 			}
 		}
-		apply(&wp)
+		apply(&wp, now)
 		if err := tx.Save(&wp).Error; err != nil {
 			return err
 		}
