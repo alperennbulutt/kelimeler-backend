@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -123,6 +124,29 @@ func GenerateRefreshToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// rotatedRefreshTokenLabel, rotasyonla türetilen refresh token'ın HMAC
+// girdisinin önekidir: aynı gizli anahtarla başka bir amaçla üretilen bir
+// değerle çakışmasın.
+const rotatedRefreshTokenLabel = "kelimeler-refresh-rotation-v1:"
+
+// RotatedRefreshToken, prev refresh token'ının rotasyonda yerine geçecek
+// token'ı üretir: HMAC-SHA256(gizli anahtar, etiket + prev), hex. Biçimi
+// GenerateRefreshToken'ınkiyle aynıdır (64 hex karakter).
+//
+// Halef rastgele değil prev'den türetilir: yanıtı kaybolan bir yenileme
+// aynı (artık iptal edilmiş) token'la yeniden denendiğinde sunucu yalnızca
+// hash'ini sakladığı halefi yeniden üretip AYNI token'ı döner. Rastgele
+// üretilseydi her deneme yeni bir token verir, istemci eline ilk ulaşan
+// yanıtı saklayıp ötekini kaybettiğinde oturumu yeniden kullanım tespitine
+// takılabilirdi. Halefi üretmek için prev ve gizli anahtar gerekir; prev'e
+// sahip olan zaten yenileme yapabildiği için yeni bir yetki doğmaz.
+func (s *TokenService) RotatedRefreshToken(prev string) string {
+	mac := hmac.New(sha256.New, s.secret)
+	mac.Write([]byte(rotatedRefreshTokenLabel))
+	mac.Write([]byte(prev))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // GenerateFamilyID, bir girişte açılan oturumun (refresh token ailesinin)

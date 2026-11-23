@@ -65,7 +65,7 @@ func TestQA_DevirSurenRotasyonunHalefiniDeIptalEder(t *testing.T) {
 	u, refresh := passwordAccount(t, gdb, app, "qa-devir-rotasyon")
 	old := loadRefreshToken(t, gdb, refresh)
 
-	pair, row, err := h.newTokenPair(&u, "")
+	pair, row, err := h.newTokenPair(&u, "", "")
 	if err != nil {
 		t.Fatalf("token çifti üretilemedi: %v", err)
 	}

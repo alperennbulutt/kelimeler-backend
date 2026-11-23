@@ -401,7 +401,7 @@ func TestReclaim_SurenRotasyonunHalefiniDeIptalEder(t *testing.T) {
 	a := newSquatter(t, gdb, h, app, "geri-al-rotasyon", "google")
 	old := loadRefreshToken(t, gdb, a.refreshes[0])
 
-	pair, row, err := h.newTokenPair(&a.user, "")
+	pair, row, err := h.newTokenPair(&a.user, "", "")
 	if err != nil {
 		t.Fatalf("token çifti üretilemedi: %v", err)
 	}

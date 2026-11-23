@@ -442,8 +442,10 @@ func TestRefresh_RotasyonEskiTokeniIptalEderYenisiniVerir(t *testing.T) {
 }
 
 // Sunucu yenilemeyi commit eder ama yanıt mobil ağda kaybolur; istemci aynı
-// (artık iptal edilmiş) token'la yeniden dener. Kullanıcı oturumdan düşmemeli.
-func TestRefresh_ToleransIcindeYenidenDenemeYeniCiftVerir(t *testing.T) {
+// (artık iptal edilmiş) token'la yeniden dener. Kullanıcı oturumdan düşmemeli
+// ve aynı yeni çifti almalı: iki yanıttan hangisi istemciye ulaşırsa ulaşsın
+// elindeki refresh token geçerli kalır.
+func TestRefresh_ToleransIcindeYenidenDenemeAyniCiftiVerir(t *testing.T) {
 	gdb := testDB(t)
 	u := testUser(t, gdb)
 	app := refreshApp(New(gdb, &config.Config{AppEnv: "test"}, testTokens(), nil))
@@ -456,30 +458,27 @@ func TestRefresh_ToleransIcindeYenidenDenemeYeniCiftVerir(t *testing.T) {
 	}
 	kaybolan, _ := body["refreshToken"].(string)
 
-	status, body = send(t, app, refreshRequest(eski))
-	if status != fiber.StatusOK {
-		t.Fatalf("yeniden deneme: status = %d, beklenen 200 (body: %v)", status, body)
+	for deneme := 2; deneme <= 3; deneme++ {
+		status, body = send(t, app, refreshRequest(eski))
+		if status != fiber.StatusOK {
+			t.Fatalf("%d. deneme: status = %d, beklenen 200 (body: %v)", deneme, status, body)
+		}
+		if got, _ := body["refreshToken"].(string); got != kaybolan {
+			t.Fatalf("%d. deneme başka bir refresh token verdi: %q, beklenen %q", deneme, got, kaybolan)
+		}
+		if access, _ := body["accessToken"].(string); access == "" {
+			t.Errorf("%d. deneme: accessToken yok", deneme)
+		}
+		if loadRefreshToken(t, gdb, kaybolan).RevokedAt != nil {
+			t.Fatalf("%d. deneme halefi iptal etti", deneme)
+		}
+		if n := activeRefreshTokens(t, gdb, u.ID); n != 1 {
+			t.Errorf("etkin token sayısı = %d, beklenen 1", n)
+		}
 	}
-	ikinci, _ := body["refreshToken"].(string)
-	if ikinci == "" || ikinci == kaybolan {
-		t.Fatalf("yeniden deneme yeni bir token vermedi: %q", ikinci)
-	}
-	if loadRefreshToken(t, gdb, kaybolan).RevokedAt == nil {
-		t.Error("kullanılmamış halef iptal edilmedi; aynı oturumda iki etkin token kaldı")
-	}
-	if n := activeRefreshTokens(t, gdb, u.ID); n != 1 {
-		t.Errorf("etkin token sayısı = %d, beklenen 1", n)
-	}
-
-	// İkinci yanıt da kaybolabilir: tolerans içinde bir deneme daha çalışır.
-	status, body = send(t, app, refreshRequest(eski))
-	if status != fiber.StatusOK {
-		t.Fatalf("üçüncü deneme: status = %d, beklenen 200 (body: %v)", status, body)
-	}
-	elde, _ := body["refreshToken"].(string)
 
 	// İstemci aldığı token'la olağan biçimde yeniler: halef artık kullanıldı.
-	status, body = send(t, app, refreshRequest(elde))
+	status, body = send(t, app, refreshRequest(kaybolan))
 	if status != fiber.StatusOK {
 		t.Fatalf("alınan token: status = %d, beklenen 200 (body: %v)", status, body)
 	}
@@ -495,6 +494,35 @@ func TestRefresh_ToleransIcindeYenidenDenemeYeniCiftVerir(t *testing.T) {
 	}
 	if status, _ := send(t, app, refreshRequest(guncel)); status != fiber.StatusUnauthorized {
 		t.Errorf("aile iptalinden sonra güncel token: status = %d, beklenen 401", status)
+	}
+}
+
+// Yayından önce rastgele üretilmiş (eskisinden türetilmemiş) halef: tolerans
+// içindeki deneme eski davranışla yeni bir çift alır, sonraki denemeler o
+// çifti aynen alır.
+func TestRefresh_ToleransIcindeEskiBicimHalefYeniCiftVerir(t *testing.T) {
+	gdb := testDB(t)
+	u := testUser(t, gdb)
+	app := refreshApp(New(gdb, &config.Config{AppEnv: "test"}, testTokens(), nil))
+	once, halef := testRotatedToken(t, gdb, u.ID, 5*time.Second)
+
+	status, body := send(t, app, refreshRequest(once))
+	if status != fiber.StatusOK {
+		t.Fatalf("status = %d, beklenen 200 (body: %v)", status, body)
+	}
+	yeni, _ := body["refreshToken"].(string)
+	if yeni == "" || yeni == halef {
+		t.Fatalf("refreshToken = %q, beklenen yeni bir token", yeni)
+	}
+	if loadRefreshToken(t, gdb, halef).RevokedAt == nil {
+		t.Error("kullanılmamış eski halef iptal edilmedi")
+	}
+	status, body = send(t, app, refreshRequest(once))
+	if got, _ := body["refreshToken"].(string); status != fiber.StatusOK || got != yeni {
+		t.Errorf("ikinci deneme: status = %d token = %q, beklenen 200 %q", status, got, yeni)
+	}
+	if n := activeRefreshTokens(t, gdb, u.ID); n != 1 {
+		t.Errorf("etkin token sayısı = %d, beklenen 1", n)
 	}
 }
 
@@ -616,8 +644,8 @@ func TestRefresh_EszamanliAyniTokenTekOturumBirakir(t *testing.T) {
 
 	// Token satırı kilitliyken bütün istekler onu "geçerli" okur ve kilit için
 	// sıraya girer. İlki rotasyon yapar; sonrakiler tolerans içinde yeniden
-	// deneme sayılır ve her biri bir öncekinin halefini iptal eder. Sonuçta
-	// hiçbiri çıkışa düşmez ve oturumda tek etkin token kalır.
+	// deneme sayılır ve aynı halefi alır. Sonuçta hiçbiri çıkışa düşmez ve
+	// oturumda tek etkin token kalır.
 	const n = 10
 	statuses := satirKilidiAltindaEszamanli(t, gdb, app,
 		"SELECT 1 FROM refresh_tokens WHERE token_hash = ? FOR UPDATE", auth.HashToken(token),
@@ -632,6 +660,10 @@ func TestRefresh_EszamanliAyniTokenTekOturumBirakir(t *testing.T) {
 	}
 	if got := activeRefreshTokens(t, gdb, u.ID); got != 1 {
 		t.Errorf("etkin token sayısı = %d, beklenen 1", got)
+	}
+	// Etkin token, hepsinin aldığı (eskisinden türetilmiş) haleftir.
+	if halef := loadRefreshToken(t, gdb, testTokens().RotatedRefreshToken(token)); halef.RevokedAt != nil {
+		t.Error("ortak halef iptal edilmiş")
 	}
 }
 
