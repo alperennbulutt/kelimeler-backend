@@ -54,11 +54,19 @@ func (h *Handlers) loginDays(userID string, now time.Time) (map[string]bool, err
 
 // LoginDates: GET /stats/login-dates — son 365 günün giriş tarihleri (takvim için, yeniden eskiye).
 func (h *Handlers) LoginDates(c *fiber.Ctx) error {
-	userID := middleware.UserID(c)
-	now := statsNow()
-	days, err := h.loginDays(userID, now)
+	out, err := h.loginDateList(middleware.UserID(c), statsNow())
 	if err != nil {
 		return err
+	}
+	return c.JSON(fiber.Map{"dates": out})
+}
+
+// loginDateList, GET /stats/login-dates'in "dates" listesidir: son 365 günün
+// giriş günleri, yeniden eskiye ("YYYY-MM-DD"). GET /sync/snapshot da kullanır.
+func (h *Handlers) loginDateList(userID string, now time.Time) ([]string, error) {
+	days, err := h.loginDays(userID, now)
+	if err != nil {
+		return nil, err
 	}
 
 	from, today := services.UsageDateDaysAgo(now, 365), services.UsageDateDaysAgo(now, 0)
@@ -70,13 +78,27 @@ func (h *Handlers) LoginDates(c *fiber.Ctx) error {
 		}
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(out)))
-	return c.JSON(fiber.Map{"dates": out})
+	return out, nil
 }
 
 // StatsSummary: GET /stats/summary — fetchStatsSummary portu (özet + rozet + streak, tek çağrı).
 func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
-	userID := middleware.UserID(c)
+	summary, err := h.statsSummary(middleware.UserID(c), statsNow(), true)
+	if err != nil {
+		return err
+	}
+	return c.JSON(summary)
+}
 
+// statsSummary, GET /stats/summary yanıtını kurar.
+//
+// persistBadges true ise yeni kazanılan rozetler earned_badges'e yazılır ve
+// yalnızca bu çağrıda gerçekten eklenenler newlyEarnedBadges'te döner (rozet
+// bildirimi bir kez çıkar). false ise (GET /sync/snapshot) hiçbir şey
+// yazılmaz ve newlyEarnedBadges boştur: anlık görüntü bildirimi tüketmez,
+// rozet bir sonraki GET /stats/summary'de bildirilir. badges listesindeki
+// isEarned iki durumda da aynıdır.
+func (h *Handlers) statsSummary(userID string, now time.Time, persistBadges bool) (dto.StatsSummaryDTO, error) {
 	// 1) Kutu sayıları: satırları belleğe almadan seviye × kutu kırılımı.
 	var counts []struct {
 		Level string
@@ -87,7 +109,7 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 		FROM word_progresses
 		WHERE user_id = ? AND box >= 2
 		GROUP BY level, box`, userID).Scan(&counts).Error; err != nil {
-		return err
+		return dto.StatsSummaryDTO{}, err
 	}
 	activeByLevel := map[string]int{} // box>=2
 	box6ByLevel := map[string]int{}
@@ -115,14 +137,13 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 	if err := h.DB.Where("user_id = ? AND box = 6", userID).
 		Order("last_review_date DESC NULLS LAST, id DESC").Limit(5).
 		Find(&lastFive).Error; err != nil {
-		return err
+		return dto.StatsSummaryDTO{}, err
 	}
 
 	// 3) Son 10 gün giriş verisi + streak (aynı küme, kullanım günüyle)
-	now := statsNow()
 	loggedSet, err := h.loginDays(userID, now)
 	if err != nil {
-		return err
+		return dto.StatsSummaryDTO{}, err
 	}
 	weeklyLoginData := map[string]bool{}
 	for i := 0; i < 10; i++ {
@@ -136,7 +157,7 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 	earnedBefore := map[string]bool{}
 	var earnedIDs []string
 	if err := h.DB.Model(&models.EarnedBadge{}).Where("user_id = ?", userID).Pluck("badge_id", &earnedIDs).Error; err != nil {
-		return err
+		return dto.StatsSummaryDTO{}, err
 	}
 	for _, id := range earnedIDs {
 		earnedBefore[id] = true
@@ -144,11 +165,11 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 
 	levelTotals, err := h.levelTotals()
 	if err != nil {
-		return err
+		return dto.StatsSummaryDTO{}, err
 	}
 	levelProgress, err := h.levelProgress(userID)
 	if err != nil {
-		return err
+		return dto.StatsSummaryDTO{}, err
 	}
 
 	allBadges, newlyEarned := services.ComputeBadges(services.BadgeInput{
@@ -162,9 +183,11 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 	// Yeni kazanılan rozetleri kalıcılaştır. Yalnızca bu istekte gerçekten
 	// eklenen satırlar "yeni" sayılır: eşzamanlı iki özet isteği aynı rozeti
 	// yeni görse de popup bir kez çıkar.
-	inserted, err := h.insertEarnedBadges(userID, newlyEarned, now)
-	if err != nil {
-		return err
+	inserted := map[string]bool{}
+	if persistBadges {
+		if inserted, err = h.insertEarnedBadges(userID, newlyEarned, now); err != nil {
+			return dto.StatsSummaryDTO{}, err
+		}
 	}
 
 	badgeDTOs := toBadgeDTOs(allBadges)
@@ -177,10 +200,10 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 
 	lastLearned, err := h.toLearnedWordDTOs(lastFive)
 	if err != nil {
-		return err
+		return dto.StatsSummaryDTO{}, err
 	}
 
-	return c.JSON(dto.StatsSummaryDTO{
+	return dto.StatsSummaryDTO{
 		TotalLearned:      totalLearned,
 		CurrentStreak:     streak,
 		LearnedByLevel:    activeByLevel,
@@ -195,7 +218,7 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 		TotalWordsByLevel: services.TotalWordsByLevel(levelTotals),
 		LevelTotals:       levelTotals,
 		NewlyEarnedBadges: newlyDTOs,
-	})
+	}, nil
 }
 
 // levelTotals, sözlükteki seviye başına kelime sayısıdır (önbellekli; sözlük

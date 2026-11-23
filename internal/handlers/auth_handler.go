@@ -55,19 +55,24 @@ type tokenPair struct {
 // iptaliyle aynı transaction'da yazar.
 //
 // family boşsa yeni bir oturum (token ailesi) başlatılır; rotasyon eski
-// token'ın ailesini taşır.
+// token'ın ailesini taşır. rotatedFrom, rotasyonda eski refresh token'dır:
+// yeni refresh token ondan türetilir (auth.RotatedRefreshToken), yanıtı
+// kaybolan yenilemenin yeniden denemesi aynı token'ı alır. Boşsa (giriş)
+// rastgele üretilir.
 //
 // Refresh token'ın ömrü kullanıcının o anki misafirliğine göredir
 // (GUEST_REFRESH_TOKEN_TTL / REFRESH_TOKEN_TTL); rotasyon kullanıcıyı her
 // seferinde yeniden okuduğu için kaydolan misafir olağan ömre geçer.
-func (h *Handlers) newTokenPair(user *models.User, family string) (tokenPair, *models.RefreshToken, error) {
+func (h *Handlers) newTokenPair(user *models.User, family, rotatedFrom string) (tokenPair, *models.RefreshToken, error) {
 	access, err := h.Tokens.GenerateAccessToken(user.ID, user.Email, user.TokenVersion)
 	if err != nil {
 		return tokenPair{}, nil, err
 	}
-	refresh, err := auth.GenerateRefreshToken()
-	if err != nil {
-		return tokenPair{}, nil, err
+	refresh := h.Tokens.RotatedRefreshToken(rotatedFrom)
+	if rotatedFrom == "" {
+		if refresh, err = auth.GenerateRefreshToken(); err != nil {
+			return tokenPair{}, nil, err
+		}
 	}
 	if family == "" {
 		if family, err = auth.GenerateFamilyID(); err != nil {
@@ -97,7 +102,7 @@ func (h *Handlers) authResponse(user *models.User, pair tokenPair) (*dto.AuthRes
 
 // issueTokens, access + refresh token üretir ve refresh hash'ini DB'ye yazar.
 func (h *Handlers) issueTokens(user *models.User) (*dto.AuthResponse, error) {
-	pair, row, err := h.newTokenPair(user, "")
+	pair, row, err := h.newTokenPair(user, "", "")
 	if err != nil {
 		return nil, err
 	}
@@ -270,7 +275,7 @@ func (h *Handlers) Login(c *fiber.Ctx) error {
 		return errInvalidCredentials()
 	}
 
-	pair, row, err := h.newTokenPair(&user, "")
+	pair, row, err := h.newTokenPair(&user, "", "")
 	if err != nil {
 		return err
 	}
@@ -411,7 +416,7 @@ func (h *Handlers) Guest(c *fiber.Ctx) error {
 		CurrentGroup: 1,
 		IsGuest:      true,
 	}
-	pair, row, err := h.newTokenPair(&user, "")
+	pair, row, err := h.newTokenPair(&user, "", "")
 	if err != nil {
 		return err
 	}
@@ -885,8 +890,9 @@ func revokeAllRefreshTokens(tx *gorm.DB, userID string) error {
 // refreshReuseGrace, rotasyonla iptal edilmiş bir refresh token'ın yeniden
 // kabul edildiği süredir. Sunucu yenilemeyi commit edip yanıt mobil ağda
 // kaybolursa istemci aynı (artık iptal edilmiş) token'la yeniden dener; bu
-// süre içinde ve halef hiç kullanılmamışsa yeni bir çift verilir. Süre
-// dışındaki yeniden kullanım çalınmış token belirtisidir.
+// süre içinde ve halef hiç kullanılmamışsa ilk yenilemenin refresh token'ı
+// aynen yeniden verilir (access token yeniden imzalanır). Süre dışındaki
+// yeniden kullanım çalınmış token belirtisidir.
 const refreshReuseGrace = 60 * time.Second
 
 // refreshOutcome, yenileme transaction'ının sonucudur.
@@ -905,9 +911,13 @@ const (
 // 500 döner ki istemci oturumu koruyup yeniden denesin.
 //
 // Rotasyonla iptal edilmiş bir token refreshReuseGrace içinde yeniden gelirse
-// ve halefi hiç kullanılmamışsa, halef iptal edilip yeni bir çift verilir
-// (yanıtı kaybolan yenileme). Bunun dışındaki her yeniden kullanımda token'ın
-// ailesindeki bütün token'lar iptal edilir ve 401 döner.
+// ve halefi hiç kullanılmamışsa (yanıtı kaybolan yenileme) aynı yeni çift
+// döner: refresh token eskisinden türetildiği için halefle aynıdır, hiçbir
+// şey yazılmaz. Böylece kopan bağlantıda iki yanıttan hangisi istemciye
+// ulaşırsa ulaşsın elindeki token geçerlidir. Halef bu değişiklikten önce
+// rastgele üretilmişse (yayın anındaki oturumlar) eski davranış sürer: halef
+// iptal edilip yeni bir çift verilir. Bunun dışındaki her yeniden kullanımda
+// token'ın ailesindeki bütün token'lar iptal edilir ve 401 döner.
 func (h *Handlers) Refresh(c *fiber.Ctx) error {
 	var req dto.RefreshRequest
 	if err := c.BodyParser(&req); err != nil || req.RefreshToken == "" {
@@ -941,7 +951,7 @@ func (h *Handlers) Refresh(c *fiber.Ctx) error {
 	if rt.FamilyID != nil {
 		family = *rt.FamilyID
 	}
-	pair, row, err := h.newTokenPair(&user, family)
+	pair, row, err := h.newTokenPair(&user, family, req.RefreshToken)
 	if err != nil {
 		return err
 	}
@@ -980,7 +990,9 @@ func (h *Handlers) Refresh(c *fiber.Ctx) error {
 // rotateRefreshToken, id'li token'ı kilitleyip yeniden okur ve kararı verir:
 //   - token etkinse iptal edilir, yerine row yazılır;
 //   - rotasyonla iptal edileli refreshReuseGrace olmamışsa ve halefi hiç
-//     kullanılmamışsa halef iptal edilir, yerine row yazılır;
+//     kullanılmamışsa: halef row'un kendisiyse (aynı hash, türetilmiş token)
+//     hiçbir şey yazılmaz ve aynı çift verilir; değilse halef iptal edilir,
+//     yerine row yazılır;
 //   - aksi halde token'ın ailesi iptal edilir (yeniden kullanım).
 //
 // row'un ailesi, kilitli satırın ailesine eşitlenir.
@@ -1024,6 +1036,9 @@ func rotateRefreshToken(tx *gorm.DB, id uint64, row *models.RefreshToken, now ti
 			return refreshRejected, err
 		}
 		if err == nil && successor.RevokedAt == nil {
+			if successor.TokenHash == row.TokenHash {
+				return refreshIssued, nil
+			}
 			if err := tx.Create(row).Error; err != nil {
 				return refreshRejected, err
 			}

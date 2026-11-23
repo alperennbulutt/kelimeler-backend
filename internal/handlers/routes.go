@@ -133,8 +133,14 @@ func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService, authLi
 	// Kaydı olmayan kelimeye "Bilmiyorum": kutu 1 kaydı (grup görülmüş sayılır).
 	prog.Post("/unknown", h.MarkUnknown)
 	prog.Post("/swipe", h.Swipe)
+	// Çevrimdışı kuyruğun gönderimi (en çok 200 işlem, sırayla).
+	prog.Post("/sync", h.SyncProgress)
 	prog.Get("/review/box/:box", h.ReviewWordsForBox)
 	prog.Get("/review/box/:box/counts", h.UpcomingCountsForBox)
+
+	// --- Çevrimdışı mod: anlık görüntü ---
+	snap := api.Group("/sync", guard)
+	snap.Get("/snapshot", h.SyncSnapshot)
 
 	// --- Users & günlük kullanım ---
 	users := api.Group("/users", guard)

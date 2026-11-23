@@ -134,51 +134,63 @@ func (h *Handlers) SetCurrentGroup(c *fiber.Ctx) error {
 
 	var user models.User
 	u, err := h.txWithUserResponse(userID, &user, func(tx *gorm.DB) error {
-		maxGroup, err := maxGroupForLevel(tx, req.Level)
-		if err != nil {
-			return err
-		}
-		if req.Group > maxGroup {
-			return errInvalidGroup
-		}
-		if err := lockUser(tx, userID, &user); err != nil {
-			return err
-		}
-		switch services.CompareGroupPositions(req.Level, req.Group, user.CurrentLevel, user.CurrentGroup) {
-		case -1:
-			return nil
-		case 1:
-			limited, err := h.openGroupLimitReached(tx, userID, req.Level, req.Group)
-			if err != nil {
-				return err
-			}
-			if limited {
-				return errOpenGroupLimit
-			}
-		}
-
-		updates := map[string]any{
-			"current_level": req.Level,
-			"current_group": req.Group,
-		}
-		if req.Title != nil {
-			updates["current_group_title"] = *req.Title
-		}
-		if req.Description != nil {
-			updates["current_group_description"] = *req.Description
-		}
-		if req.TotalWords != nil {
-			updates["current_group_total_words"] = *req.TotalWords
-		}
-		if err := tx.Model(&models.User{}).Where("id = ?", userID).Updates(updates).Error; err != nil {
-			return err
-		}
-		return tx.First(&user, "id = ?", userID).Error
+		_, err := h.setCurrentGroupTx(tx, userID, &req, &user)
+		return err
 	})
 	if err != nil {
 		return err
 	}
 	return c.JSON(fiber.Map{"user": u})
+}
+
+// setCurrentGroupTx, PUT /users/me/current-group'un kararını tx içinde verir
+// ve yazar (kurallar için bkz. SetCurrentGroup; seviye ve grup numarasının
+// biçimi çağıranda denetlenmiştir). user kilitli okunur ve yazıldıysa yeniden
+// okunur. moved, işaretçinin ileri taşındığını söyler: hedef işaretçinin
+// gerisindeyse hiçbir şey yazılmaz; hedef işaretçinin kendisiyse yalnızca
+// gövdedeki başlık/açıklama/kelime sayısı yazılır (moved false).
+func (h *Handlers) setCurrentGroupTx(tx *gorm.DB, userID string, req *dto.SetCurrentGroupRequest, user *models.User) (moved bool, err error) {
+	maxGroup, err := maxGroupForLevel(tx, req.Level)
+	if err != nil {
+		return false, err
+	}
+	if req.Group > maxGroup {
+		return false, errInvalidGroup
+	}
+	if err := lockUser(tx, userID, user); err != nil {
+		return false, err
+	}
+	pos := services.CompareGroupPositions(req.Level, req.Group, user.CurrentLevel, user.CurrentGroup)
+	switch pos {
+	case -1:
+		return false, nil
+	case 1:
+		limited, err := h.openGroupLimitReached(tx, userID, req.Level, req.Group)
+		if err != nil {
+			return false, err
+		}
+		if limited {
+			return false, errOpenGroupLimit
+		}
+	}
+
+	updates := map[string]any{
+		"current_level": req.Level,
+		"current_group": req.Group,
+	}
+	if req.Title != nil {
+		updates["current_group_title"] = *req.Title
+	}
+	if req.Description != nil {
+		updates["current_group_description"] = *req.Description
+	}
+	if req.TotalWords != nil {
+		updates["current_group_total_words"] = *req.TotalWords
+	}
+	if err := tx.Model(&models.User{}).Where("id = ?", userID).Updates(updates).Error; err != nil {
+		return false, err
+	}
+	return pos == 1, tx.First(user, "id = ?", userID).Error
 }
 
 // AdvanceGroup: POST /users/me/advance-group — sonraki level/grup'u sunucu hesaplar.
@@ -234,60 +246,16 @@ func (h *Handlers) AdvanceGroup(c *fiber.Ctx) error {
 	}
 
 	var user models.User
-	levelChanged := false
-	blockedReason := ""
+	var adv advanceResult
 	u, err := h.txWithUserResponse(userID, &user, func(tx *gorm.DB) error {
-		if err := lockUser(tx, userID, &user); err != nil {
-			return err
-		}
-		if completed != nil && (completed.Level != user.CurrentLevel || completed.Group != user.CurrentGroup) {
-			return nil
-		}
-		if completed == nil {
-			// Karar kilitli satırdaki işaretçiyle verilir: bekleme sırasında
-			// başka bir istek işaretçiyi ilerletmiş olabilir.
-			done, err := groupCompleted(tx, userID, user.CurrentLevel, user.CurrentGroup)
-			if err != nil || !done {
-				return err
-			}
-		}
-
-		maxGroup, err := maxGroupForLevel(tx, user.CurrentLevel)
-		if err != nil {
-			return err
-		}
-		nextLevel, nextGroup, changed := services.AdvanceGroup(user.CurrentLevel, user.CurrentGroup, maxGroup)
-		if nextLevel == user.CurrentLevel && nextGroup == user.CurrentGroup {
-			return nil
-		}
-		if completed != nil {
-			leavesLevel := nextLevel != user.CurrentLevel || nextGroup < 1
-			reason, err := h.bodiedAdvanceBlocked(tx, userID, user.CurrentLevel, user.CurrentGroup, leavesLevel)
-			if err != nil || reason != "" {
-				blockedReason = reason
-				return err
-			}
-		}
-		if nextGroup >= 1 {
-			limited, err := h.openGroupLimitReached(tx, userID, nextLevel, nextGroup)
-			if err != nil {
-				return err
-			}
-			if limited {
-				blockedReason = services.LockReasonOpenGroupLimit
-				return nil
-			}
-		}
-		if err := tx.Model(&models.User{}).Where("id = ?", userID).
-			Updates(map[string]any{"current_level": nextLevel, "current_group": nextGroup}).Error; err != nil {
-			return err
-		}
-		levelChanged = changed
-		return tx.First(&user, "id = ?", userID).Error
+		var err error
+		adv, err = h.advanceGroupTx(tx, userID, completed, &user)
+		return err
 	})
 	if err != nil {
 		return err
 	}
+	levelChanged, blockedReason := adv.levelChanged, adv.blockedReason
 
 	return c.JSON(fiber.Map{
 		"user":         u,
@@ -297,6 +265,67 @@ func (h *Handlers) AdvanceGroup(c *fiber.Ctx) error {
 		// Sonradan eklendi: eski istemci tanımaz ve yok sayar.
 		"blockedReason": blockedReason,
 	})
+}
+
+// advanceResult, advanceGroupTx'in sonucudur.
+type advanceResult struct {
+	moved         bool   // işaretçi ilerledi
+	levelChanged  bool   // işaretçi başka bir seviyeye geçti
+	blockedReason string // ilerlemediyse nedeni (bkz. AdvanceGroup); yoksa ""
+}
+
+// advanceGroupTx, advance-group kararını tx içinde verir ve yazar (kurallar
+// için bkz. AdvanceGroup). completed nil ise gövdesiz (eski istemci) yoldur.
+// user, kilitli okunur ve ilerlediyse yeniden okunur.
+func (h *Handlers) advanceGroupTx(tx *gorm.DB, userID string, completed *dto.AdvanceGroupRequest, user *models.User) (advanceResult, error) {
+	var res advanceResult
+	if err := lockUser(tx, userID, user); err != nil {
+		return res, err
+	}
+	if completed != nil && (completed.Level != user.CurrentLevel || completed.Group != user.CurrentGroup) {
+		return res, nil
+	}
+	if completed == nil {
+		// Karar kilitli satırdaki işaretçiyle verilir: bekleme sırasında
+		// başka bir istek işaretçiyi ilerletmiş olabilir.
+		done, err := groupCompleted(tx, userID, user.CurrentLevel, user.CurrentGroup)
+		if err != nil || !done {
+			return res, err
+		}
+	}
+
+	maxGroup, err := maxGroupForLevel(tx, user.CurrentLevel)
+	if err != nil {
+		return res, err
+	}
+	nextLevel, nextGroup, changed := services.AdvanceGroup(user.CurrentLevel, user.CurrentGroup, maxGroup)
+	if nextLevel == user.CurrentLevel && nextGroup == user.CurrentGroup {
+		return res, nil
+	}
+	if completed != nil {
+		leavesLevel := nextLevel != user.CurrentLevel || nextGroup < 1
+		reason, err := h.bodiedAdvanceBlocked(tx, userID, user.CurrentLevel, user.CurrentGroup, leavesLevel)
+		if err != nil || reason != "" {
+			res.blockedReason = reason
+			return res, err
+		}
+	}
+	if nextGroup >= 1 {
+		limited, err := h.openGroupLimitReached(tx, userID, nextLevel, nextGroup)
+		if err != nil {
+			return res, err
+		}
+		if limited {
+			res.blockedReason = services.LockReasonOpenGroupLimit
+			return res, nil
+		}
+	}
+	if err := tx.Model(&models.User{}).Where("id = ?", userID).
+		Updates(map[string]any{"current_level": nextLevel, "current_group": nextGroup}).Error; err != nil {
+		return res, err
+	}
+	res.moved, res.levelChanged = true, changed
+	return res, tx.First(user, "id = ?", userID).Error
 }
 
 // bodiedAdvanceBlocked, gövdeli advance-group'un işaretçideki (level, grp)
@@ -494,72 +523,114 @@ const freeGroupColumn = "groups_started_today_count"
 // istemci haritada kilitli gruba girmez.
 //
 // Gövde göndermeyen (ya da geçersiz gönderen) istemcilerde uç yalnızca sayacı
-// artırır.
+// artırır; hangi grubun açıldığı bilinmediği için günlük geçmişe
+// (daily_group_unlocks) de bir şey yazılmaz.
 func (h *Handlers) UnlockGroup(column string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		var req dto.UnlockGroupRequest
 		if err := c.BodyParser(&req); err != nil {
 			return h.incrementUsage(c, column)
 		}
-		key, ok := services.UnlockedGroupKey(req.Level, req.Group)
-		if !ok {
+		if _, ok := services.UnlockedGroupKey(req.Level, req.Group); !ok {
 			return h.incrementUsage(c, column)
 		}
 
 		userID := middleware.UserID(c)
 		now := time.Now()
 		err := h.DB.Transaction(func(tx *gorm.DB) error {
-			if err := resetUsageIfStale(tx, userID, now); err != nil {
-				return err
-			}
-			var user models.User
-			if err := lockUser(tx, userID, &user); err != nil {
-				return err
-			}
-			if slices.Contains(services.SplitUnlockedGroups(user.UnlockedGroupsToday), key) {
-				return nil
-			}
-			limited, err := h.openGroupLimitReached(tx, userID, req.Level, req.Group)
-			if err != nil {
-				return err
-			}
-			if limited {
-				if err := h.applyGate(c, services.GateViolation{
-					Kind:   services.GateKindLearn,
-					Reason: services.GateReasonOpenGroupLimit,
-					UserID: userID,
-					Level:  req.Level,
-					Group:  req.Group,
-				}, false, now, errOpenGroupLimit); err != nil {
-					return err
-				}
-			} else if column == freeGroupColumn && user.GroupsStartedTodayCount >= 1 {
-				if err := h.applyGate(c, services.GateViolation{
-					Kind:   services.GateKindLearn,
-					Reason: services.GateReasonFreeGroupReused,
-					UserID: userID,
-					Level:  req.Level,
-					Group:  req.Group,
-				}, false, now, errGateRequired); err != nil {
-					return err
-				}
-			}
-
-			// concat_ws değişken sayıda ve her tipte argüman alır; parametrenin
-			// tipi açıkça verilmezse PostgreSQL onu yalnızca değer sorgu
-			// metnine gömülü gittiğinde (basit protokol) çözebilir, hazırlanan
-			// sorguda çözemez.
-			return tx.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
-				column:                  gorm.Expr(column + " + 1"),
-				"unlocked_groups_today": gorm.Expr("concat_ws(',', NULLIF(unlocked_groups_today, ''), ?::text)", key),
-				"last_reset_date":       usageTouchedAt(now),
-			}).Error
+			_, err := h.unlockGroupTx(c, tx, userID, req.Level, req.Group, column, now)
+			return err
 		})
 		if err != nil {
 			return err
 		}
 		return h.respondUsage(c, userID)
 	}
+}
+
+// unlockGroupTx, (level, grp) grubunun bugünkü açılışını tx içinde yazar
+// (bkz. UnlockGroup; column, artırılacak sayaçtır). Grup bugün zaten
+// açıksa sayaçlar değişmez ve added false döner. Kapı reddi (enforce kipinde
+// 403 gate_required ya da open_group_limit) hata olarak döner; çağıranın
+// transaction'ı geri alınır. Grubun seviyesi ve numarası geçerli olmalıdır
+// (services.UnlockedGroupKey).
+//
+// Açılış, günlük geçmişe (daily_group_unlocks) de aynı transaction'da yazılır:
+// çevrimdışı verilmiş geçmiş günün cevapları o günün kayıtlarına göre
+// denetlenir. Grup bugün zaten açıksa da satır yoksa yazılır (bu tablodan
+// önce açılmış gruplar).
+func (h *Handlers) unlockGroupTx(c *fiber.Ctx, tx *gorm.DB, userID, level string, grp int, column string, now time.Time) (added bool, err error) {
+	key, ok := services.UnlockedGroupKey(level, grp)
+	if !ok {
+		return false, errInvalidGroup
+	}
+	via := models.UnlockViaAd
+	if column == freeGroupColumn {
+		via = models.UnlockViaFree
+	}
+	if err := resetUsageIfStale(tx, userID, now); err != nil {
+		return false, err
+	}
+	var user models.User
+	if err := lockUser(tx, userID, &user); err != nil {
+		return false, err
+	}
+	if slices.Contains(services.SplitUnlockedGroups(user.UnlockedGroupsToday), key) {
+		_, err := recordGroupUnlock(tx, userID, services.UsageDate(now), level, grp, via, now)
+		return false, err
+	}
+	limited, err := h.openGroupLimitReached(tx, userID, level, grp)
+	if err != nil {
+		return false, err
+	}
+	if limited {
+		if err := h.applyGate(c, services.GateViolation{
+			Kind:   services.GateKindLearn,
+			Reason: services.GateReasonOpenGroupLimit,
+			UserID: userID,
+			Level:  level,
+			Group:  grp,
+		}, false, now, errOpenGroupLimit); err != nil {
+			return false, err
+		}
+	} else if column == freeGroupColumn && user.GroupsStartedTodayCount >= 1 {
+		if err := h.applyGate(c, services.GateViolation{
+			Kind:   services.GateKindLearn,
+			Reason: services.GateReasonFreeGroupReused,
+			UserID: userID,
+			Level:  level,
+			Group:  grp,
+		}, false, now, errGateRequired); err != nil {
+			return false, err
+		}
+	}
+
+	// concat_ws değişken sayıda ve her tipte argüman alır; parametrenin
+	// tipi açıkça verilmezse PostgreSQL onu yalnızca değer sorgu
+	// metnine gömülü gittiğinde (basit protokol) çözebilir, hazırlanan
+	// sorguda çözemez.
+	if err := tx.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
+		column:                  gorm.Expr(column + " + 1"),
+		"unlocked_groups_today": gorm.Expr("concat_ws(',', NULLIF(unlocked_groups_today, ''), ?::text)", key),
+		"last_reset_date":       usageTouchedAt(now),
+	}).Error; err != nil {
+		return false, err
+	}
+	if _, err := recordGroupUnlock(tx, userID, services.UsageDate(now), level, grp, via, now); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// recordGroupUnlock, (level, grp) grubunun day ("YYYY-MM-DD", kullanım günü)
+// gününde via yoluyla açıldığını daily_group_unlocks'a yazar. Satır zaten
+// varsa (aynı gün aynı grup) dokunulmaz ve inserted false döner.
+func recordGroupUnlock(tx *gorm.DB, userID, day, level string, grp int, via string, now time.Time) (inserted bool, err error) {
+	res := tx.Exec(`INSERT INTO daily_group_unlocks (user_id, usage_date, level, grp, via, created_at)
+		VALUES (?, CAST(? AS date), ?, ?, ?, ?)
+		ON CONFLICT (user_id, usage_date, level, grp) DO NOTHING`,
+		userID, day, level, grp, via, now.UTC())
+	return res.RowsAffected > 0, res.Error
 }
 
 // RecordReviewAdPass: POST /users/me/usage/review-ad-pass

@@ -28,7 +28,10 @@ func nextReview(box int, from time.Time) *time.Time {
 }
 
 // AcceptsSwipe, swipe'ın kelimeye uygulanıp uygulanmayacağını söyler;
-// endOfDay bugünün bitişidir (ertesi kullanım günü 00:00, hariç).
+// endOfDay, cevabın verildiği kullanım gününün bitişidir (ertesi gün 00:00,
+// hariç). Çevrimiçi cevapta bu bugünün bitişidir; çevrimdışı verilmiş bir
+// cevapta cevabın gününün bitişidir: kelime o gün vadesi gelmişse cevap
+// geçerlidir.
 //
 //   - Kutu 1: öğrenme ekranındaki kelime, her zaman.
 //   - Kutu 2..5: yalnızca vadesi geldiyse (sonraki tekrar tarihi yok ya da
@@ -48,9 +51,8 @@ func AcceptsSwipe(wp *models.WordProgress, endOfDay time.Time) bool {
 	}
 }
 
-// LearnNewWord: yeni kelime (kutu 1 → kutu 2).
-func LearnNewWord(wp *models.WordProgress) {
-	now := time.Now()
+// LearnNewWord: yeni kelime (kutu 1 → kutu 2), now anında öğrenildi.
+func LearnNewWord(wp *models.WordProgress, now time.Time) {
 	wp.Box = 2
 	wp.LastReviewDate = &now
 	wp.NextReviewDate = nextReview(2, now)
@@ -58,9 +60,8 @@ func LearnNewWord(wp *models.WordProgress) {
 	wp.Learned = false
 }
 
-// OnRightSwipe: doğru cevap, bir üst kutuya.
-func OnRightSwipe(wp *models.WordProgress) {
-	now := time.Now()
+// OnRightSwipe: doğru cevap (now anında), bir üst kutuya.
+func OnRightSwipe(wp *models.WordProgress, now time.Time) {
 	if wp.Box >= 5 {
 		wp.Box = 6
 		wp.Learned = true
@@ -75,22 +76,18 @@ func OnRightSwipe(wp *models.WordProgress) {
 	wp.NextReviewDate = nextReview(wp.Box, now)
 }
 
-// OnLeftSwipe: yanlış cevap (bkz. onLeftSwipe).
-func OnLeftSwipe(wp *models.WordProgress) {
-	onLeftSwipe(wp, time.Now())
-}
-
-// onLeftSwipe, yanlış cevabı now anına göre uygular.
+// OnLeftSwipe, yanlış cevabı now anına göre uygular.
 //
 // Ürün kuralı: tekrardaki kelime (kutu 2 ve üstü) bir alt kutuya iner, en alt
 // kutu 2'dir (kutu 1 "henüz öğrenilmedi" demektir, yanlış cevap kelimeyi
 // oraya geri atmaz). Kelime, aradaki kutunun aralığını beklemeden ertesi
-// kullanım gününün başında (UsageLocation gece yarısı) yeniden sorulur.
+// kullanım gününün başında (UsageLocation gece yarısı) yeniden sorulur. now
+// geçmiş bir günse (çevrimdışı cevap) "ertesi gün" o günün ertesidir.
 //
 // wrongCount art arda verilen yanlış cevap sayısıdır; kutuyu etkilemez,
 // doğru cevap sıfırlar. Kutu 1'deki kelime (öğrenme ekranındaki "Bilmiyorum")
 // kutusunda kalır.
-func onLeftSwipe(wp *models.WordProgress, now time.Time) {
+func OnLeftSwipe(wp *models.WordProgress, now time.Time) {
 	wp.WrongCount++
 	wp.LastReviewDate = &now
 	if wp.Box <= 1 {

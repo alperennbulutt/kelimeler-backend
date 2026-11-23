@@ -238,10 +238,19 @@ func (h *Handlers) openGroupLimitReached(db *gorm.DB, userID, level string, grp 
 // OpenGroups: GET /map/open-groups — açık gruplar ve sınır. İstemci "yeni bir
 // grup açmak için önce açık gruplarını bitir" mesajında bunları gösterir.
 func (h *Handlers) OpenGroups(c *fiber.Ctx) error {
-	userID := middleware.UserID(c)
-	rows, err := h.listOpenGroups(h.DB, userID)
+	out, err := h.openGroupsDTO(h.DB, middleware.UserID(c))
 	if err != nil {
 		return err
+	}
+	return c.JSON(out)
+}
+
+// openGroupsDTO, GET /map/open-groups yanıtını kurar (GET /sync/snapshot da
+// kullanır).
+func (h *Handlers) openGroupsDTO(db *gorm.DB, userID string) (dto.OpenGroupsDTO, error) {
+	rows, err := h.listOpenGroups(db, userID)
+	if err != nil {
+		return dto.OpenGroupsDTO{}, err
 	}
 	groups := make([]dto.OpenGroupDTO, 0, len(rows))
 	for _, r := range rows {
@@ -252,11 +261,11 @@ func (h *Handlers) OpenGroups(c *fiber.Ctx) error {
 			RemainingInBox1: r.RemainingInBox1,
 		})
 	}
-	return c.JSON(dto.OpenGroupsDTO{
+	return dto.OpenGroupsDTO{
 		OpenGroupCount: len(groups),
 		MaxOpenGroups:  services.MaxOpenGroups,
 		OpenGroups:     groups,
-	})
+	}, nil
 }
 
 // groupProgress, (level, grp) grubunun ilerleme özetidir

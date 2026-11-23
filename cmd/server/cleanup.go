@@ -22,6 +22,14 @@ const (
 	refreshTokenCleanupTimeout   = time.Minute
 )
 
+// Uygulanmış işlem kayıtlarının (applied_ops) temizliği. Kayıtlar
+// models.AppliedOpRetention (30 gün) saklanır; saatte bir bakmak, silinecek
+// satırları küçük parçalarda tutar.
+const (
+	appliedOpsCleanupInterval = time.Hour
+	appliedOpsCleanupTimeout  = time.Minute
+)
+
 // cleanupFunc, bir temizlik turudur; silinen satır sayısını döner.
 type cleanupFunc func(ctx context.Context) (int64, error)
 
@@ -30,6 +38,13 @@ type cleanupFunc func(ctx context.Context) (int64, error)
 func refreshTokenCleanup(database *gorm.DB, retention time.Duration) cleanupFunc {
 	return func(ctx context.Context) (int64, error) {
 		return models.DeleteStaleRefreshTokens(ctx, database, retention)
+	}
+}
+
+// appliedOpsCleanup, models.DeleteOldAppliedOps'u verilen veritabanına bağlar.
+func appliedOpsCleanup(database *gorm.DB, retention time.Duration) cleanupFunc {
+	return func(ctx context.Context) (int64, error) {
+		return models.DeleteOldAppliedOps(ctx, database, retention)
 	}
 }
 

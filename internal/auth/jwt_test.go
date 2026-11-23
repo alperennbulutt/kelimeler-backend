@@ -119,3 +119,26 @@ func TestAccessToken_OturumSurumu(t *testing.T) {
 		t.Fatalf("eski token tv = %v (err %v), beklenen 0", claims, err)
 	}
 }
+
+func TestRotatedRefreshToken_BelirleyiciVeAnahtaraBagli(t *testing.T) {
+	a := NewTokenService("gizli-1", time.Minute, time.Hour)
+	b := NewTokenService("gizli-2", time.Minute, time.Hour)
+
+	prev, err := GenerateRefreshToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := a.RotatedRefreshToken(prev)
+	if next != a.RotatedRefreshToken(prev) {
+		t.Error("aynı token için iki farklı halef üretildi")
+	}
+	if len(next) != 64 || next == prev {
+		t.Errorf("halef = %q, beklenen prev'den farklı 64 hex karakter", next)
+	}
+	if next == b.RotatedRefreshToken(prev) {
+		t.Error("farklı gizli anahtar aynı halefi üretti")
+	}
+	if next == a.RotatedRefreshToken(prev+"x") {
+		t.Error("farklı token aynı halefi üretti")
+	}
+}

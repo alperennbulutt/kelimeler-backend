@@ -62,19 +62,56 @@ func (h *Handlers) GetProgressForGroup(c *fiber.Ctx) error {
 // açılmamışsa ya da haritada kilitliyse GATE_ENFORCEMENT=enforce'ta 403
 // gate_required, açık grup sınırı doluyken başlanmamış grupta 403
 // open_group_limit döner; log'da ihlal raporlanıp yazılır.
+//
+// İsteğe bağlı opId ve answeredAt (çevrimdışı mod, bkz. dto.OpFields): aynı
+// opId ikinci kez gelirse hiçbir şey yapılmaz, ilk yanıt döner. answeredAt
+// geçmiş bir güne düşüyorsa kapı o günün açılışlarına (daily_group_unlocks)
+// göre denetlenir.
 func (h *Handlers) LearnWord(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	var req dto.LearnRequest
 	if err := c.BodyParser(&req); err != nil || req.WordID == "" {
 		return apiErr(fiber.StatusBadRequest, "invalid_request", "wordId gerekli")
 	}
-
-	var word models.DictionaryWord
-	if err := h.DB.First(&word, "id = ?", req.WordID).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return apiErr(fiber.StatusNotFound, "unknown_word", "kelime sözlükte bulunamadı")
-		}
+	op, err := newOpRef(req.OpID, opKindLearn)
+	if err != nil {
 		return err
+	}
+	if done, err := h.replayWordOp(c, userID, op); done || err != nil {
+		return err
+	}
+
+	word, err := h.dictionaryWord(req.WordID)
+	if err != nil {
+		return err
+	}
+	t := resolveAnswerTime(time.Now(), req.AnsweredAt)
+	mapState, err := h.learnMapLocked(userID, word)
+	if err != nil {
+		return err
+	}
+	return h.runWordOp(c, userID, op, t.now, func(tx *gorm.DB) (wordOutcome, error) {
+		return h.applyLearn(c, tx, userID, word, mapState, t)
+	})
+}
+
+// dictionaryWord, sözlük kelimesini okur; yoksa 404 unknown_word.
+func (h *Handlers) dictionaryWord(id string) (*models.DictionaryWord, error) {
+	var word models.DictionaryWord
+	if err := h.DB.First(&word, "id = ?", id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apiErr(fiber.StatusNotFound, "unknown_word", "kelime sözlükte bulunamadı")
+		}
+		return nil, err
+	}
+	return &word, nil
+}
+
+// applyLearn, öğrenmeyi (kutu 1 ya da kayıtsız → kutu 2) tx içinde uygular;
+// kurallar için bkz. LearnWord. Kelime zaten ilerlemişse sonuç noop'tur.
+func (h *Handlers) applyLearn(c *fiber.Ctx, tx *gorm.DB, userID string, word *models.DictionaryWord, mapState learnMapState, t answerTime) (wordOutcome, error) {
+	if err := h.learnGate(c, tx, userID, word, mapState, t); err != nil {
+		return wordOutcome{}, err
 	}
 
 	wp := models.WordProgress{
@@ -86,56 +123,43 @@ func (h *Handlers) LearnWord(c *fiber.Ctx) error {
 		Turkish: word.Turkish,
 		Box:     1,
 	}
-	services.LearnNewWord(&wp)
+	services.LearnNewWord(&wp, t.at)
 
-	now := time.Now()
-	mapState, err := h.learnMapLocked(userID, &word)
-	if err != nil {
-		return err
+	// Çakışmada yalnızca kutu 1'deki satır güncellenir; diğerlerinde INSERT
+	// hiçbir satırı değiştirmez ve mevcut kayıt okunup döner.
+	res := tx.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "user_id"}, {Name: "word_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"level", "grp", "box", "last_review_date", "next_review_date",
+			"wrong_count", "learned", "english", "turkish", "updated_at",
+		}),
+		Where: clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: "word_progresses.box <= 1"}}},
+	}).Create(&wp)
+	if res.Error != nil {
+		return wordOutcome{}, res.Error
 	}
-	var resp models.WordProgress
-	err = h.DB.Transaction(func(tx *gorm.DB) error {
-		if err := h.learnGate(c, tx, userID, &word, mapState, now); err != nil {
-			return err
-		}
-
-		// Çakışmada yalnızca kutu 1'deki satır güncellenir; diğerlerinde INSERT
-		// hiçbir satırı değiştirmez ve mevcut kayıt okunup döner.
-		res := tx.Clauses(clause.OnConflict{
-			Columns: []clause.Column{{Name: "user_id"}, {Name: "word_id"}},
-			DoUpdates: clause.AssignmentColumns([]string{
-				"level", "grp", "box", "last_review_date", "next_review_date",
-				"wrong_count", "learned", "english", "turkish", "updated_at",
-			}),
-			Where: clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: "word_progresses.box <= 1"}}},
-		}).Create(&wp)
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected > 0 {
-			resp = wp
-			return nil
-		}
-		// İlerleme (kutu, tarihler, sayaçlar) korunur; yalnızca sözlükten gelen
-		// alanlar sözlük satırıyla eşitlenir. Seviyesi/grubu farklı yazılmış eski
-		// bir kayıt aksi halde ne öğrenme ekranının grup sorgusunda ne de harita
-		// tamamlanmasında görünür: kelime her seferinde yeniden sorulur ve grup
-		// hiçbir zaman tamamlanmış sayılmaz (eski kod bunu kutu 2'ye sıfırlayarak
-		// düzeltiyordu).
-		if err := tx.Model(&models.WordProgress{}).
-			Where("user_id = ? AND word_id = ? AND (level <> ? OR grp <> ? OR english <> ? OR turkish <> ?)",
-				userID, word.ID, word.Level, word.Grp, word.English, word.Turkish).
-			Updates(map[string]any{
-				"level": word.Level, "grp": word.Grp, "english": word.English, "turkish": word.Turkish,
-			}).Error; err != nil {
-			return err
-		}
-		return tx.Where("user_id = ? AND word_id = ?", userID, word.ID).First(&resp).Error
-	})
-	if err != nil {
-		return err
+	if res.RowsAffected > 0 {
+		return wordOutcome{status: opApplied, wp: wp}, nil
 	}
-	return c.JSON(&resp)
+	// İlerleme (kutu, tarihler, sayaçlar) korunur; yalnızca sözlükten gelen
+	// alanlar sözlük satırıyla eşitlenir. Seviyesi/grubu farklı yazılmış eski
+	// bir kayıt aksi halde ne öğrenme ekranının grup sorgusunda ne de harita
+	// tamamlanmasında görünür: kelime her seferinde yeniden sorulur ve grup
+	// hiçbir zaman tamamlanmış sayılmaz (eski kod bunu kutu 2'ye sıfırlayarak
+	// düzeltiyordu).
+	if err := tx.Model(&models.WordProgress{}).
+		Where("user_id = ? AND word_id = ? AND (level <> ? OR grp <> ? OR english <> ? OR turkish <> ?)",
+			userID, word.ID, word.Level, word.Grp, word.English, word.Turkish).
+		Updates(map[string]any{
+			"level": word.Level, "grp": word.Grp, "english": word.English, "turkish": word.Turkish,
+		}).Error; err != nil {
+		return wordOutcome{}, err
+	}
+	var existing models.WordProgress
+	if err := tx.Where("user_id = ? AND word_id = ?", userID, word.ID).First(&existing).Error; err != nil {
+		return wordOutcome{}, err
+	}
+	return wordOutcome{status: opNoop, wp: existing}, nil
 }
 
 // --- Reklam kapısı (sözleşme K4) ---
@@ -242,12 +266,16 @@ func (h *Handlers) learnMapLocked(userID string, word *models.DictionaryWord) (l
 // (kutu 2+) learn isteği hiçbir şey yazmaz (yinelenen istek, ikinci cihaz,
 // bayat deste) ve denetlenmez. TEST_MODE_UNLOCK_ALL kapıyı kapatır.
 //
+// Cevap geçmiş bir güne aitse (t.past, çevrimdışı mod) günlük kapı o günün
+// açılışlarıyla (daily_group_unlocks) denetlenir (bkz. pastDayLearnGate);
+// harita kilidi ve açık grup sınırı bugünkü gibi sorulur.
+//
 // Kilit sırası Swipe ile aynıdır (önce kelime satırı, sonra kullanıcı satırı);
 // aynı kelimeye eşzamanlı learn ve swipe birbirini kilitlenmede bekletmez.
 // Kullanıcı satırı paylaşımlı kilitlenir: aynı kullanıcının learn'leri
 // birbirini beklemez, ama karar ile yazım arasında "bugün açılan gruplar"
 // değişemez.
-func (h *Handlers) learnGate(c *fiber.Ctx, tx *gorm.DB, userID string, word *models.DictionaryWord, mapState learnMapState, now time.Time) error {
+func (h *Handlers) learnGate(c *fiber.Ctx, tx *gorm.DB, userID string, word *models.DictionaryWord, mapState learnMapState, t answerTime) error {
 	if h.gateMode() == config.GateOff || h.unlockAll() {
 		return nil
 	}
@@ -284,10 +312,13 @@ func (h *Handlers) learnGate(c *fiber.Ctx, tx *gorm.DB, userID string, word *mod
 				WordID: word.ID,
 				Level:  word.Level,
 				Group:  word.Grp,
-			}, false, now, errOpenGroupLimit)
+			}, false, t.now, errOpenGroupLimit)
 		}
 	}
-	return h.dailyLearnGate(c, tx, &user, word, mapState.locked, now)
+	if t.past {
+		return h.pastDayLearnGate(c, tx, userID, word, mapState.locked, t)
+	}
+	return h.dailyLearnGate(c, tx, &user, word, mapState.locked, t.now)
 }
 
 // dailyLearnGate, kelimenin grubunun bugün açılıp açılmadığını (ücretsiz hak,
@@ -359,7 +390,12 @@ func groupsLearnedToday(tx *gorm.DB, userID string, now time.Time) ([]string, er
 // kapısını tx içinde denetler. Kullanıcı satırı sayaç artırımına kadar
 // kilitli kalır: eşzamanlı cevaplar sırayla karar verir ve kontrol noktasını
 // birlikte aşamaz.
-func (h *Handlers) reviewGate(c *fiber.Ctx, tx *gorm.DB, userID string, now time.Time) error {
+//
+// graceAnswers, kapının en çok kaç cevap aşılabileceğidir: çevrimiçi
+// cevapta 0; çevrimdışı verilmiş bugünkü cevapta (POST /progress/sync) bir
+// aralık (services.ReviewAdCheckpointInterval). Tolerans içindeki cevap ihlal
+// değildir; onu da aşan cevap kipe göre raporlanır ya da reddedilir.
+func (h *Handlers) reviewGate(c *fiber.Ctx, tx *gorm.DB, userID string, now time.Time, graceAnswers int) error {
 	if h.gateMode() == config.GateOff {
 		return nil
 	}
@@ -368,27 +404,37 @@ func (h *Handlers) reviewGate(c *fiber.Ctx, tx *gorm.DB, userID string, now time
 		return err
 	}
 	state := services.GateStateAt(&user, now)
+	allowed := services.ReviewAnswerAllowed(state.ReviewAnswers, state.ReviewAdPasses)
+	if !allowed && graceAnswers > 0 {
+		allowed = services.ReviewAnswerAllowedWithGrace(state.ReviewAnswers, state.ReviewAdPasses, graceAnswers)
+	}
 	return h.applyGate(c, services.GateViolation{
 		Kind:           services.GateKindReview,
 		Reason:         services.GateReasonReviewCheckpoint,
 		UserID:         userID,
 		ReviewAnswers:  state.ReviewAnswers,
 		ReviewAdPasses: state.ReviewAdPasses,
-	}, services.ReviewAnswerAllowed(state.ReviewAnswers, state.ReviewAdPasses), now, errReviewGateRequired)
+	}, allowed, now, errReviewGateRequired)
 }
 
 // boxOneLearnGate, kutu 1'deki kelimenin sağa kaydırılmasının (öğrenme)
 // günlük grup kapısıdır; wp, tx'te kilitli okunmuş satırdır. Grup anahtarı
 // kayıttaki seviye/gruptur (learn bunları sözlükle eşitler).
-func (h *Handlers) boxOneLearnGate(c *fiber.Ctx, tx *gorm.DB, wp *models.WordProgress, now time.Time) error {
+//
+// Cevap geçmiş bir güne aitse (t.past) o günün açılışlarına bakılır.
+func (h *Handlers) boxOneLearnGate(c *fiber.Ctx, tx *gorm.DB, wp *models.WordProgress, t answerTime) error {
 	if h.gateMode() == config.GateOff || h.unlockAll() {
 		return nil
 	}
+	word := models.DictionaryWord{ID: wp.WordID, Level: wp.Level, Grp: wp.Grp}
+	if t.past {
+		return h.pastDayLearnGate(c, tx, wp.UserID, &word, false, t)
+	}
+	now := t.now
 	var user models.User
 	if err := findUser(tx.Clauses(clause.Locking{Strength: "SHARE"}), wp.UserID, &user); err != nil {
 		return err
 	}
-	word := models.DictionaryWord{ID: wp.WordID, Level: wp.Level, Grp: wp.Grp}
 	return h.dailyLearnGate(c, tx, &user, &word, false, now)
 }
 
@@ -417,21 +463,66 @@ func (h *Handlers) MarkUnknown(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil || req.WordID == "" {
 		return apiErr(fiber.StatusBadRequest, "invalid_request", "wordId gerekli")
 	}
-
-	var word models.DictionaryWord
-	if err := h.DB.First(&word, "id = ?", req.WordID).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return apiErr(fiber.StatusNotFound, "unknown_word", "kelime sözlükte bulunamadı")
-		}
+	op, err := newOpRef(req.OpID, opKindUnknown)
+	if err != nil {
+		return err
+	}
+	if done, err := h.replayWordOp(c, userID, op); done || err != nil {
 		return err
 	}
 
-	var existing []models.WordProgress
-	if err := h.DB.Where("user_id = ? AND word_id = ?", userID, word.ID).Limit(1).Find(&existing).Error; err != nil {
+	word, err := h.dictionaryWord(req.WordID)
+	if err != nil {
 		return err
+	}
+	t := resolveAnswerTime(time.Now(), req.AnsweredAt)
+	mapState, exists, err := h.unknownMapState(userID, word)
+	if err != nil {
+		return err
+	}
+	if exists && op == nil {
+		// Kimliksiz istekte kayıtlı kelime için transaction açılmaz (yayındaki
+		// istemcinin bugünkü yolu).
+		var wp models.WordProgress
+		if err := h.DB.Where("user_id = ? AND word_id = ?", userID, word.ID).First(&wp).Error; err != nil {
+			return err
+		}
+		return c.JSON(&wp)
+	}
+	return h.runWordOp(c, userID, op, t.now, func(tx *gorm.DB) (wordOutcome, error) {
+		return h.applyUnknown(c, tx, userID, word, mapState, t)
+	})
+}
+
+// unknownMapState, "Bilmiyorum" yazımından önce harita durumunu okur (bkz.
+// learnMapLocked). Kelimenin zaten kaydı varsa exists true döner ve harita
+// hiç sorulmaz: yazım olmayacaktır.
+func (h *Handlers) unknownMapState(userID string, word *models.DictionaryWord) (learnMapState, bool, error) {
+	var n int64
+	if err := h.DB.Model(&models.WordProgress{}).Where("user_id = ? AND word_id = ?", userID, word.ID).
+		Count(&n).Error; err != nil {
+		return learnMapState{}, false, err
+	}
+	if n > 0 {
+		return learnMapState{started: true}, true, nil
+	}
+	mapState, err := h.learnMapLocked(userID, word)
+	return mapState, false, err
+}
+
+// applyUnknown, kaydı olmayan kelimeye "Bilmiyorum"u tx içinde uygular (kutu
+// 1 kaydı); kurallar için bkz. MarkUnknown. Kelimenin zaten kaydı varsa
+// sonuç noop'tur ve kayıt değişmez.
+func (h *Handlers) applyUnknown(c *fiber.Ctx, tx *gorm.DB, userID string, word *models.DictionaryWord, mapState learnMapState, t answerTime) (wordOutcome, error) {
+	var existing []models.WordProgress
+	if err := tx.Where("user_id = ? AND word_id = ?", userID, word.ID).Limit(1).Find(&existing).Error; err != nil {
+		return wordOutcome{}, err
 	}
 	if len(existing) > 0 {
-		return c.JSON(&existing[0])
+		return wordOutcome{status: opNoop, wp: existing[0]}, nil
+	}
+	if err := h.learnGate(c, tx, userID, word, mapState, t); err != nil {
+		return wordOutcome{}, err
 	}
 
 	wp := models.WordProgress{
@@ -443,37 +534,24 @@ func (h *Handlers) MarkUnknown(c *fiber.Ctx) error {
 		Turkish: word.Turkish,
 		Box:     1,
 	}
-	services.OnLeftSwipe(&wp)
-
-	now := time.Now()
-	mapState, err := h.learnMapLocked(userID, &word)
-	if err != nil {
-		return err
+	services.OnLeftSwipe(&wp, t.at)
+	// Arada başka bir istek (learn ya da yinelenen unknown) kaydı
+	// yazdıysa ona dokunulmaz.
+	res := tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "user_id"}, {Name: "word_id"}},
+		DoNothing: true,
+	}).Create(&wp)
+	if res.Error != nil {
+		return wordOutcome{}, res.Error
 	}
-	var resp models.WordProgress
-	err = h.DB.Transaction(func(tx *gorm.DB) error {
-		if err := h.learnGate(c, tx, userID, &word, mapState, now); err != nil {
-			return err
-		}
-		// Arada başka bir istek (learn ya da yinelenen unknown) kaydı
-		// yazdıysa ona dokunulmaz.
-		res := tx.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "user_id"}, {Name: "word_id"}},
-			DoNothing: true,
-		}).Create(&wp)
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected > 0 {
-			resp = wp
-			return nil
-		}
-		return tx.Where("user_id = ? AND word_id = ?", userID, word.ID).First(&resp).Error
-	})
-	if err != nil {
-		return err
+	if res.RowsAffected > 0 {
+		return wordOutcome{status: opApplied, wp: wp}, nil
 	}
-	return c.JSON(&resp)
+	var current models.WordProgress
+	if err := tx.Where("user_id = ? AND word_id = ?", userID, word.ID).First(&current).Error; err != nil {
+		return wordOutcome{}, err
+	}
+	return wordOutcome{status: opNoop, wp: current}, nil
 }
 
 // Swipe: POST /progress/swipe {wordId, direction} — box matematiği sunucuda.
@@ -504,79 +582,145 @@ func (h *Handlers) Swipe(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil || req.WordID == "" {
 		return apiErr(fiber.StatusBadRequest, "invalid_request", "wordId gerekli")
 	}
-	var apply func(*models.WordProgress)
-	switch req.Direction {
-	case "right":
-		apply = services.OnRightSwipe
-	case "left":
-		apply = services.OnLeftSwipe
-	default:
+	if req.Direction != "right" && req.Direction != "left" {
 		return apiErr(fiber.StatusBadRequest, "invalid_request", "direction 'right' veya 'left' olmalı")
+	}
+	op, err := newOpRef(req.OpID, opKindSwipe)
+	if err != nil {
+		return err
+	}
+	if done, err := h.replayWordOp(c, userID, op); done || err != nil {
+		return err
+	}
+
+	t := resolveAnswerTime(time.Now(), req.AnsweredAt)
+	return h.runWordOp(c, userID, op, t.now, func(tx *gorm.DB) (wordOutcome, error) {
+		return h.applySwipe(c, tx, userID, req.WordID, req.Direction, t, 0)
+	})
+}
+
+// errProgressNotFound, cevaplanan kelimenin ilerleme kaydı olmadığını bildirir.
+var errProgressNotFound = apiErr(fiber.StatusNotFound, "not_found", "kelime ilerlemesi bulunamadı")
+
+// pastDayReviewReportThreshold, geçmiş bir günün tekrar cevabı sayısının
+// raporlandığı sınırdır (dört kapı aralığı). Aşan cevap reddedilmez; çevrimdışı
+// modda saati geri alarak tekrar kapısını atlatan istemciyi görmek içindir.
+const pastDayReviewReportThreshold = 4 * services.ReviewAdCheckpointInterval
+
+// applySwipe, swipe'ı (direction "right" | "left") tx içinde uygular; kurallar
+// için bkz. Swipe.
+//
+// Cevap t.at anında verilmiş sayılır: vade cevabın gününe göre denetlenir
+// (services.AcceptsSwipe) ve Leitner tarihleri o ana göre yazılır. Geçmiş
+// günün cevabı (t.past) bugünkü tekrar sayacına yazılmaz ve tekrar kapısına
+// sorulmaz; o günün tekrar cevapları pastDayReviewReportThreshold'u aşarsa
+// raporlanır. Kutu 1'deki sağ cevap o günün açılışlarına göre denetlenir.
+// reviewGrace, bugünkü cevapta tekrar kapısının aşılabileceği cevap sayısıdır
+// (bkz. reviewGate).
+func (h *Handlers) applySwipe(c *fiber.Ctx, tx *gorm.DB, userID, wordID, direction string, t answerTime, reviewGrace int) (wordOutcome, error) {
+	apply := services.OnLeftSwipe
+	if direction == "right" {
+		apply = services.OnRightSwipe
 	}
 
 	// İlerleme ve günlük tekrar sayacı birlikte yazılır: kelime ilerleyip cevap
 	// sayılmazsa kapı gevşer, cevap sayılıp kelime ilerlemezse aynı kelime
 	// yeniden gelir ve iki kez sayılır.
-	now := time.Now()
-	_, endOfToday := reviewDayBounds(now)
 	var wp models.WordProgress
-	err := h.DB.Transaction(func(tx *gorm.DB) error {
-		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("user_id = ? AND word_id = ?", userID, req.WordID).First(&wp).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return apiErr(fiber.StatusNotFound, "not_found", "kelime ilerlemesi bulunamadı")
-		}
-		if err != nil {
-			return err
-		}
-		if !services.AcceptsSwipe(&wp, endOfToday) {
-			return nil
-		}
-
-		// Cevabın tekrar sayılıp sayılmayacağı swipe ÖNCESİ kutuya bağlıdır;
-		// mutasyon kutuyu değiştirir (öğrenme ekranının 1 → 2 swipe'ı sonradan
-		// bakılırsa tekrar cevabı gibi görünür). Öğrenme swipe'ı (kutu 1)
-		// tekrar kapısına hiç girmez.
-		preBox := wp.Box
-		if preBox <= 1 && req.Direction == "right" {
-			if err := h.boxOneLearnGate(c, tx, &wp, now); err != nil {
-				return err
-			}
-		}
-		countsAsReview := services.CountsAsReviewAnswer(preBox)
-		if countsAsReview {
-			if err := h.reviewGate(c, tx, userID, now); err != nil {
-				return err
-			}
-		}
-		apply(&wp)
-		if err := tx.Save(&wp).Error; err != nil {
-			return err
-		}
-		if !countsAsReview {
-			return nil
-		}
-		if err := resetUsageIfStale(tx, userID, now); err != nil {
-			return err
-		}
-		if err := tx.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
-			"review_answers_today": gorm.Expr("review_answers_today + 1"),
-			"last_reset_date":      usageTouchedAt(now),
-		}).Error; err != nil {
-			return err
-		}
-		if (preBox == 6) == (wp.Box == 6) {
-			return nil
-		}
-		// Kullanıcı satırı yukarıdaki UPDATE'ten beri bu transaction'da kilitli:
-		// aynı kullanıcının eşzamanlı başka bir swipe'ı burada sayımı yapmadan
-		// önce bekler ve bu transaction'ın commit'ini görür.
-		return syncTotalLearned(tx, userID)
-	})
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("user_id = ? AND word_id = ?", userID, wordID).First(&wp).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return wordOutcome{}, errProgressNotFound
+	}
 	if err != nil {
+		return wordOutcome{}, err
+	}
+	if !services.AcceptsSwipe(&wp, t.endOfDay()) {
+		return wordOutcome{status: opNoop, wp: wp}, nil
+	}
+
+	// Cevabın tekrar sayılıp sayılmayacağı swipe ÖNCESİ kutuya bağlıdır;
+	// mutasyon kutuyu değiştirir (öğrenme ekranının 1 → 2 swipe'ı sonradan
+	// bakılırsa tekrar cevabı gibi görünür). Öğrenme swipe'ı (kutu 1)
+	// tekrar kapısına hiç girmez.
+	preBox := wp.Box
+	if preBox <= 1 && direction == "right" {
+		if err := h.boxOneLearnGate(c, tx, &wp, t); err != nil {
+			return wordOutcome{}, err
+		}
+	}
+	countsAsReview := services.CountsAsReviewAnswer(preBox)
+	if countsAsReview && !t.past {
+		if err := h.reviewGate(c, tx, userID, t.now, reviewGrace); err != nil {
+			return wordOutcome{}, err
+		}
+	}
+	apply(&wp, t.at)
+	if err := tx.Save(&wp).Error; err != nil {
+		return wordOutcome{}, err
+	}
+	out := wordOutcome{status: opApplied, wp: wp}
+	if !countsAsReview {
+		return out, nil
+	}
+	out.reviewDay = t.day()
+	if t.past {
+		if err := h.reportPastDayReviews(c, tx, userID, t); err != nil {
+			return wordOutcome{}, err
+		}
+		// Bugünkü sayaç yazılmadığı için kullanıcı satırı burada kilitlenir
+		// (bkz. aşağıdaki syncTotalLearned notu).
+		if (preBox == 6) != (wp.Box == 6) {
+			var user models.User
+			if err := lockUser(tx, userID, &user); err != nil {
+				return wordOutcome{}, err
+			}
+			return out, syncTotalLearned(tx, userID)
+		}
+		return out, nil
+	}
+	if err := resetUsageIfStale(tx, userID, t.now); err != nil {
+		return wordOutcome{}, err
+	}
+	if err := tx.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{
+		"review_answers_today": gorm.Expr("review_answers_today + 1"),
+		"last_reset_date":      usageTouchedAt(t.now),
+	}).Error; err != nil {
+		return wordOutcome{}, err
+	}
+	if (preBox == 6) == (wp.Box == 6) {
+		return out, nil
+	}
+	// Kullanıcı satırı yukarıdaki UPDATE'ten beri bu transaction'da kilitli:
+	// aynı kullanıcının eşzamanlı başka bir swipe'ı burada sayımı yapmadan
+	// önce bekler ve bu transaction'ın commit'ini görür.
+	return out, syncTotalLearned(tx, userID)
+}
+
+// reportPastDayReviews, geçmiş günün (t) tekrar cevapları bu cevapla
+// pastDayReviewReportThreshold'u aşıyorsa raporlar; reddetmez. Sayım,
+// kimlikli (opId) cevapların kayıtlarındandır (applied_ops.review_day).
+// GATE_ENFORCEMENT=off'ta sorulmaz.
+func (h *Handlers) reportPastDayReviews(c *fiber.Ctx, tx *gorm.DB, userID string, t answerTime) error {
+	if h.gateMode() == config.GateOff {
+		return nil
+	}
+	var n int64
+	if err := tx.Model(&models.AppliedOp{}).
+		Where("user_id = ? AND review_day = CAST(? AS date)", userID, t.day()).
+		Count(&n).Error; err != nil {
 		return err
 	}
-	return c.JSON(&wp)
+	if n+1 <= pastDayReviewReportThreshold {
+		return nil
+	}
+	h.reportOnly(c, services.GateViolation{
+		Kind:          services.GateKindReview,
+		Reason:        services.GateReasonPastDayReviewOvershoot,
+		UserID:        userID,
+		ReviewAnswers: int(n + 1),
+	}, t.now)
+	return nil
 }
 
 // syncTotalLearned, users.total_learned cache'ini count(box==6) ile eşitler.

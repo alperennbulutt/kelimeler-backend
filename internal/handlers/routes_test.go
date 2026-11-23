@@ -24,6 +24,8 @@ var ortakUclar = []string{
 	"POST /api/v1/auth/guest",
 	"POST /api/v1/auth/link/password",
 	"POST /api/v1/dictionary/words/batch",
+	"POST /api/v1/progress/sync",
+	"GET /api/v1/sync/snapshot",
 	"GET /api/v1/health",
 	"GET /api/v1/app/version-check",
 	"POST /api/v1/sentry/api/:projectId/envelope",

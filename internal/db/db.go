@@ -162,6 +162,8 @@ func migrate(gdb *gorm.DB) error {
 		&models.DailyLogin{},
 		&models.EarnedBadge{},
 		&models.DictionaryPatchApplied{},
+		&models.AppliedOp{},
+		&models.DailyGroupUnlock{},
 	); err != nil {
 		return err
 	}
