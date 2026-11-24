@@ -302,6 +302,15 @@ Yalnızca yamaların çözemeyeceği bir durumda kullan: satırlar eksik ya da b
 
 2. ve 3. adım arasında uygulama kelime gösteremez; ikisini art arda ve sakin bir saatte yap. Tabloyu boşaltıp yeniden başlatmayı unutma: seed yalnızca açılışta ve tablo boşken yüklenir.
 
+### Dil kursları: çeviri dosyaları
+
+Kartlar 14 dilde sunulur (tr en de fr es it pt ru ar az hi id ja ko; liste `internal/dictlang`). Her dilin metni `seed/dictionary_translations/<dil>.json` dosyasındadır: kelime (`w`), örnek (`e`), gerekirse anlam notu (`m`), Japoncada okunuş (`r`). İngilizcenin kelimesi ve örneği `dictionary_words`'tedir; `en.json` yalnızca anlam notlarını taşır.
+
+- Açılışta içeriği değişen dosya (SHA-256) o dilin satırlarını tek transaction'da yeniden yazar; değişmeyen dosyaya dokunulmaz. Çeviri düzeltmek için dosyayı düzenleyip deploy etmek yeter.
+- Hatalı dosya açılışı durdurmaz: o dil önceki hâliyle kalır, hata loglanır ve Sentry'ye gider. CI'da `TestDepodakiCeviriler` her dosyanın 9980 kartın tamamını taşıdığını, sözlükte olmayan kart içermediğini ve `tr.json`'daki `m`'nin kartın (yamalı) Türkçesiyle aynı olduğunu denetler.
+- Yeni kart eklenirse her dil dosyasına da eklenmelidir; eksik dil `/dictionary/languages`'ta `complete: false` görünür ve istemci onu seçtirmez.
+- İstemci kursu `X-Course` başlığıyla seçer (yoksa `en`); her kursun ilerlemesi ayrıdır. Kart metni `/dictionary/words` ve `/sync/snapshot`'a `learn`/`know` verilerek alınır; verilmezse yanıt eskisiyle aynıdır.
+
 ---
 
 ## 7) Flutter'ı production'a yönlendir

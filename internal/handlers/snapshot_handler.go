@@ -34,13 +34,46 @@ import (
 // Bölümler tek bir transaction'da okunmaz: anlık görüntü indirilirken başka
 // bir cihazdan yazım gelirse bölümler birbirinden bir cevap farklı olabilir.
 // İstemci her senkronizasyondan sonra görüntüyü yeniden indirir.
+//
+// Kurs (X-Course, bkz. requestCourse; yoksa "en", desteklenmeyen kod 400
+// invalid_course): progress, learnedCount, learnedWordIds, levels, openGroups,
+// cards ve stats istekteki kursundur. user (işaretçi dahil), usage ve
+// loginDates kullanıcı başınadır. İngilizce kursunda yanıt kurs öncesiyle
+// aynıdır; diğer kurslarda kartların hangi gruplardan geldiği için bkz.
+// snapshotCards.
+//
+// İsteğe bağlı learn ve know (GET /dictionary/words'teki gibi, bkz.
+// parsePair): verilirse her karta o dil çiftinin learn ve know nesneleri
+// eklenir; ikisi de yoksa yanıt bu parametrelerden öncekiyle bayt bayt
+// aynıdır. Biri eksik, desteklenmeyen ya da ikisi aynıysa 400
+// invalid_language.
 func (h *Handlers) SyncSnapshot(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
 	now := time.Now()
+	course, err := requestCourse(c)
+	if err != nil {
+		return err
+	}
+	pair, err := parsePair(c.Query("learn"), c.Query("know"))
+	if err != nil {
+		return err
+	}
 
 	version, err := db.DictionaryVersion(h.DB)
 	if err != nil {
 		return err
+	}
+	if pair != nil {
+		// Kartlara dil çiftinin metni eklenince önbellek çeviri dosyalarına
+		// da bağlıdır: çiftin dillerinden biri yeniden yüklendiğinde sürüm
+		// değişir ve istemcinin haveGroups'u yok sayılır (bkz.
+		// db.TranslationVersion). learn/know göndermeyen istemcinin sürümü
+		// değişmez.
+		tv, err := db.TranslationVersion(h.DB, pair.Learn, pair.Know)
+		if err != nil {
+			return err
+		}
+		version += tv
 	}
 
 	if err := resetUsageIfStale(h.DB, userID, now); err != nil {
@@ -66,48 +99,64 @@ func (h *Handlers) SyncSnapshot(c *fiber.Ctx) error {
 	}
 
 	snap.Progress = []models.WordProgress{}
-	if err := h.DB.Where("user_id = ? AND box BETWEEN 1 AND 5", userID).
+	if err := h.DB.Where("user_id = ? AND course = ? AND box BETWEEN 1 AND 5", userID, course).
 		Order("word_id").Find(&snap.Progress).Error; err != nil {
 		return err
 	}
-	if snap.LearnedCount, err = learnedCount(h.DB, userID); err != nil {
+	if snap.LearnedCount, err = learnedCount(h.DB, userID, course); err != nil {
 		return err
 	}
-	if snap.LearnedWordIDs, err = learnedWordIDs(h.DB, userID); err != nil {
+	if snap.LearnedWordIDs, err = learnedWordIDs(h.DB, userID, course); err != nil {
 		return err
 	}
 	for _, level := range services.Levels {
-		groups, err := h.computeLevelGroups(userID, level)
+		groups, err := h.computeLevelGroups(userID, course, level)
 		if err != nil {
 			return err
 		}
 		snap.Levels[level] = groups
 	}
-	if snap.OpenGroups, err = h.openGroupsDTO(h.DB, userID); err != nil {
+	if snap.OpenGroups, err = h.openGroupsDTO(h.DB, userID, course); err != nil {
 		return err
 	}
 	skip := map[string]bool{}
 	if clientHasDictionary(c.Query("dictionaryVersion"), version) {
 		skip = parseHaveGroups(c.Query("haveGroups"))
 	}
-	if snap.Cards, err = snapshotCards(h.DB, &user, skip); err != nil {
+	if snap.Cards, err = snapshotCards(h.DB, &user, course, snap.Levels, skip); err != nil {
 		return err
 	}
 	statsAt := statsNow()
-	if snap.Stats, err = h.statsSummary(userID, statsAt, false); err != nil {
+	if snap.Stats, err = h.statsSummary(userID, course, statsAt, false); err != nil {
 		return err
 	}
 	if snap.LoginDates, err = h.loginDateList(userID, statsAt); err != nil {
 		return err
 	}
-	return c.JSON(snap)
+	if pair == nil {
+		return c.JSON(snap)
+	}
+	cards, err := h.withPair(snap.Cards, *pair)
+	if err != nil {
+		return err
+	}
+	return c.JSON(pairedSnapshot{SnapshotDTO: snap, Cards: cards})
 }
 
-// learnedWordIDs, kullanıcının kutu 6'daki kelimelerinin kimlikleridir
-// (wordId sırasıyla; yoksa boş liste).
-func learnedWordIDs(gdb *gorm.DB, userID string) ([]string, error) {
+// pairedSnapshot, learn/know verilen anlık görüntüdür: cards, dil çiftinin
+// metniyle zenginleşmiş kartlardır (GET /dictionary/words?learn=&know=
+// biçimi); diğer alanlar dto.SnapshotDTO'nunkilerdir. Dıştaki Cards alanı
+// gömülü SnapshotDTO.Cards'ı gölgeler (encoding/json: sığ alan kazanır).
+type pairedSnapshot struct {
+	dto.SnapshotDTO
+	Cards []wordCard `json:"cards"`
+}
+
+// learnedWordIDs, kullanıcının kurstaki kutu 6'daki kelimelerinin
+// kimlikleridir (wordId sırasıyla; yoksa boş liste).
+func learnedWordIDs(gdb *gorm.DB, userID, course string) ([]string, error) {
 	ids := []string{}
-	err := gdb.Model(&models.WordProgress{}).Where("user_id = ? AND box = 6", userID).
+	err := gdb.Model(&models.WordProgress{}).Where("user_id = ? AND course = ? AND box = 6", userID, course).
 		Order("word_id").Pluck("word_id", &ids).Error
 	return ids, err
 }
@@ -142,6 +191,26 @@ func parseHaveGroups(raw string) map[string]bool {
 	return out
 }
 
+// nextMapGroups, haritada (levels) açık olan ilk başlanmamış grubu ve ondan
+// sonraki grubu (seviyenin son grubuysa sonraki seviyenin ilk grubu) döner;
+// açık başlanmamış grup yoksa boş.
+func nextMapGroups(levels map[string][]dto.LevelGroupDTO) []cardGroup {
+	var all []cardGroup
+	first := -1
+	for _, level := range services.Levels {
+		for _, g := range levels[level] {
+			if first < 0 && g.IsUnlocked && !g.HasStarted {
+				first = len(all)
+			}
+			all = append(all, cardGroup{level, g.GroupNumber})
+		}
+	}
+	if first < 0 {
+		return nil
+	}
+	return all[first:min(first+2, len(all))]
+}
+
 // cardGroup, kartları gönderilecek bir gruptur.
 type cardGroup struct {
 	Level string
@@ -149,19 +218,27 @@ type cardGroup struct {
 }
 
 // snapshotCards, gereken grupların kartlarını seviye, grup ve sıra sırasıyla
-// döner: kullanıcının ilerlemesi olan her grup (grup, kelimenin sözlükteki
-// grubudur), işaretçideki grup ve sonraki grup. skip'teki gruplar ("A1:3")
-// atlanır. İşaretçi "tümü tamamlandı"daysa (C2, 0) yalnızca ilerlemeli
-// gruplar gerekir.
-func snapshotCards(gdb *gorm.DB, user *models.User, skip map[string]bool) ([]models.DictionaryWord, error) {
+// döner: kullanıcının kurstaki ilerlemesi olan her grup (grup, kelimenin
+// sözlükteki grubudur), işaretçideki grup ve sonraki grup. skip'teki gruplar
+// ("A1:3") atlanır. İşaretçi "tümü tamamlandı"daysa (C2, 0) yalnızca
+// ilerlemeli gruplar gerekir.
+//
+// İşaretçi İngilizce kursunundur (bkz. pointerCourse). Diğer kurslarda
+// işaretçinin yerini kursun haritası (levels, computeLevelGroups'un
+// seviye sırasıyla sonucu) tutar: haritada açık olan ilk başlanmamış grup ve
+// ondan sonraki grup gönderilir; çevrimdışı istemci yeni grubu bunlarla
+// açabilir.
+func snapshotCards(gdb *gorm.DB, user *models.User, course string, levels map[string][]dto.LevelGroupDTO, skip map[string]bool) ([]models.DictionaryWord, error) {
 	var groups []cardGroup
 	if err := gdb.Raw(`SELECT DISTINCT dw.level AS level, dw.grp AS grp
 		FROM word_progresses wp
 		JOIN dictionary_words dw ON dw.id = wp.word_id
-		WHERE wp.user_id = ?`, user.ID).Scan(&groups).Error; err != nil {
+		WHERE wp.user_id = ? AND wp.course = ?`, user.ID, course).Scan(&groups).Error; err != nil {
 		return nil, err
 	}
-	if services.IndexOfLevel(user.CurrentLevel) >= 0 && user.CurrentGroup >= 1 {
+	if course != services.DefaultCourse {
+		groups = append(groups, nextMapGroups(levels)...)
+	} else if services.IndexOfLevel(user.CurrentLevel) >= 0 && user.CurrentGroup >= 1 {
 		groups = append(groups, cardGroup{user.CurrentLevel, user.CurrentGroup})
 		maxGroup, err := maxGroupForLevel(gdb, user.CurrentLevel)
 		if err != nil {

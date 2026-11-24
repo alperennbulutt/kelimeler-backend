@@ -172,6 +172,11 @@ func findStoredResult(db *gorm.DB, userID string, op *opRef) (res dto.SyncOpResu
 // errOpDuplicate döner: çağıranın transaction'ı (yaptığı her şeyle) geri
 // alınır ve işlem bir kez uygulanmış olur. reviewDay, işlem uygulanmış bir
 // tekrar cevabıysa cevabın günüdür, değilse "".
+//
+// Kayıt kursa bağlı değildir (anahtar user_id, op_id): opId istemcinin her
+// işlem için ürettiği bir UUID'dir ve kurslar arasında da tekildir. Aynı opId
+// başka bir kursla yeniden gelirse (istemci hatası) ilk kursun saklı sonucu
+// döner, ikinci kursta hiçbir şey uygulanmaz; işlem iki kez uygulanmaz.
 func claimOp(tx *gorm.DB, userID string, op *opRef, res dto.SyncOpResult, reviewDay string, now time.Time) error {
 	if op == nil {
 		return nil
@@ -303,15 +308,16 @@ func validUsageDate(s string) bool {
 // Cevap gece yarısından sonraki GateRolloverGrace içindeyse önceki günün
 // açılışı da sayılır (bugünkü kapının gece toleransıyla aynı kural).
 // mapLocked, haritadaki kilidi de ihlal sayar. Karar kipe göre uygulanır
-// (applyGate): enforce'ta 403 gate_required.
-func (h *Handlers) pastDayLearnGate(c *fiber.Ctx, tx *gorm.DB, userID string, word *models.DictionaryWord, mapLocked bool, t answerTime) error {
+// (applyGate): enforce'ta 403 gate_required. Açılış course kursunda
+// aranır: başka bir kursta açılan grup sayılmaz.
+func (h *Handlers) pastDayLearnGate(c *fiber.Ctx, tx *gorm.DB, userID, course string, word *models.DictionaryWord, mapLocked bool, t answerTime) error {
 	if h.gateMode() == config.GateOff || h.unlockAll() {
 		return nil
 	}
 	allowed := false
 	if _, ok := services.UnlockedGroupKey(word.Level, word.Grp); ok {
 		var err error
-		if allowed, err = groupUnlockedOn(tx, userID, word.Level, word.Grp, t.at); err != nil {
+		if allowed, err = groupUnlockedOn(tx, userID, course, word.Level, word.Grp, t.at); err != nil {
 			return err
 		}
 	}
@@ -329,18 +335,18 @@ func (h *Handlers) pastDayLearnGate(c *fiber.Ctx, tx *gorm.DB, userID string, wo
 	}, allowed, t.now, errGateRequired)
 }
 
-// groupUnlockedOn, (level, grp) grubunun at'ın kullanım gününde açılmış
-// olup olmadığını söyler; at gün başından GateRolloverGrace içindeyse önceki
-// günün açılışı da sayılır.
-func groupUnlockedOn(tx *gorm.DB, userID, level string, grp int, at time.Time) (bool, error) {
+// groupUnlockedOn, course kursunun (level, grp) grubunun at'ın kullanım
+// gününde açılmış olup olmadığını söyler; at gün başından GateRolloverGrace
+// içindeyse önceki günün açılışı da sayılır.
+func groupUnlockedOn(tx *gorm.DB, userID, course, level string, grp int, at time.Time) (bool, error) {
 	days := []string{services.UsageDate(at)}
 	if at.Sub(services.UsageDayStart(at)) < services.GateRolloverGrace {
 		days = append(days, services.UsageDateDaysAgo(at, 1))
 	}
 	var found bool
 	err := tx.Raw(`SELECT EXISTS (SELECT 1 FROM daily_group_unlocks
-		WHERE user_id = ? AND level = ? AND grp = ? AND usage_date IN (CAST(? AS date), CAST(? AS date)))`,
-		userID, level, grp, days[0], days[len(days)-1]).Scan(&found).Error
+		WHERE user_id = ? AND course = ? AND level = ? AND grp = ? AND usage_date IN (CAST(? AS date), CAST(? AS date)))`,
+		userID, course, level, grp, days[0], days[len(days)-1]).Scan(&found).Error
 	return found, err
 }
 

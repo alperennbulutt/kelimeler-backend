@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -82,8 +83,13 @@ func (h *Handlers) loginDateList(userID string, now time.Time) ([]string, error)
 }
 
 // StatsSummary: GET /stats/summary — fetchStatsSummary portu (özet + rozet + streak, tek çağrı).
+// Özet istekteki kursundur (bkz. requestCourse, statsSummary).
 func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
-	summary, err := h.statsSummary(middleware.UserID(c), statsNow(), true)
+	course, err := requestCourse(c)
+	if err != nil {
+		return err
+	}
+	summary, err := h.statsSummary(middleware.UserID(c), course, statsNow(), true)
 	if err != nil {
 		return err
 	}
@@ -98,7 +104,18 @@ func (h *Handlers) StatsSummary(c *fiber.Ctx) error {
 // yazılmaz ve newlyEarnedBadges boştur: anlık görüntü bildirimi tüketmez,
 // rozet bir sonraki GET /stats/summary'de bildirilir. badges listesindeki
 // isEarned iki durumda da aynıdır.
-func (h *Handlers) statsSummary(userID string, now time.Time, persistBadges bool) (dto.StatsSummaryDTO, error) {
+//
+// Kutu sayıları, seviye ilerlemesi ve son öğrenilenler kursundur; giriş
+// günleri ve streak kullanıcı başınadır.
+//
+// Rozetler (earned_badges) kullanıcı başınadır. Seviye rozetleri haritada
+// önceki seviyenin tamamlandığı sayılır (bkz. isLevelDone, yalnızca İngilizce
+// kursunda): İngilizce dışı bir kurs seviye rozeti YAZMAZ ve önceden
+// kazanılmış seviye rozetlerini kazanılmış göstermez; orada seviye rozeti o
+// kursun ilerlemesiyle o an hesaplanır. Diğer rozetler kursun sayılarıyla
+// hesaplanır ve kullanıcıya yazılır (bir kez kazanılan rozet her kursta
+// kazanılmış görünür).
+func (h *Handlers) statsSummary(userID, course string, now time.Time, persistBadges bool) (dto.StatsSummaryDTO, error) {
 	// 1) Kutu sayıları: satırları belleğe almadan seviye × kutu kırılımı.
 	var counts []struct {
 		Level string
@@ -107,8 +124,8 @@ func (h *Handlers) statsSummary(userID string, now time.Time, persistBadges bool
 	}
 	if err := h.DB.Raw(`SELECT level, box, COUNT(*) AS n
 		FROM word_progresses
-		WHERE user_id = ? AND box >= 2
-		GROUP BY level, box`, userID).Scan(&counts).Error; err != nil {
+		WHERE user_id = ? AND course = ? AND box >= 2
+		GROUP BY level, box`, userID, course).Scan(&counts).Error; err != nil {
 		return dto.StatsSummaryDTO{}, err
 	}
 	activeByLevel := map[string]int{} // box>=2
@@ -134,7 +151,7 @@ func (h *Handlers) statsSummary(userID string, now time.Time, persistBadges bool
 
 	// 2) Son öğrenilen 5 kelime (box==6, lastReviewDate desc)
 	var lastFive []models.WordProgress
-	if err := h.DB.Where("user_id = ? AND box = 6", userID).
+	if err := h.DB.Where("user_id = ? AND course = ? AND box = 6", userID, course).
 		Order("last_review_date DESC NULLS LAST, id DESC").Limit(5).
 		Find(&lastFive).Error; err != nil {
 		return dto.StatsSummaryDTO{}, err
@@ -160,6 +177,9 @@ func (h *Handlers) statsSummary(userID string, now time.Time, persistBadges bool
 		return dto.StatsSummaryDTO{}, err
 	}
 	for _, id := range earnedIDs {
+		if course != services.DefaultCourse && isLevelBadge(id) {
+			continue
+		}
 		earnedBefore[id] = true
 	}
 
@@ -167,7 +187,7 @@ func (h *Handlers) statsSummary(userID string, now time.Time, persistBadges bool
 	if err != nil {
 		return dto.StatsSummaryDTO{}, err
 	}
-	levelProgress, err := h.levelProgress(userID)
+	levelProgress, err := h.levelProgress(userID, course)
 	if err != nil {
 		return dto.StatsSummaryDTO{}, err
 	}
@@ -179,6 +199,9 @@ func (h *Handlers) statsSummary(userID string, now time.Time, persistBadges bool
 		LearnedCount:     totalLearned,
 		CurrentStreak:    streak,
 	}, earnedBefore)
+	if course != services.DefaultCourse {
+		newlyEarned = slices.DeleteFunc(newlyEarned, isLevelBadge)
+	}
 
 	// Yeni kazanılan rozetleri kalıcılaştır. Yalnızca bu istekte gerçekten
 	// eklenen satırlar "yeni" sayılır: eşzamanlı iki özet isteği aynı rozeti
@@ -244,10 +267,16 @@ func (h *Handlers) levelTotals() (map[string]int, error) {
 	})
 }
 
-// levelProgress, kullanıcının box>=2 kelimelerini sözlükteki seviyesine göre
-// sayar. Seviye rozeti bununla levelTotals'ı karşılaştırır; haritanın grup
-// tamamlama ölçütüyle (her kelime ilerlemeli ve kutu 1'de değil) aynıdır.
-func (h *Handlers) levelProgress(userID string) (map[string]int, error) {
+// isLevelBadge, seviye tamamlama rozeti mi söyler (bkz. services.ComputeBadges).
+func isLevelBadge(id string) bool {
+	return strings.HasPrefix(id, "level_")
+}
+
+// levelProgress, kullanıcının kurstaki box>=2 kelimelerini sözlükteki
+// seviyesine göre sayar. Seviye rozeti bununla levelTotals'ı karşılaştırır;
+// haritanın grup tamamlama ölçütüyle (her kelime ilerlemeli ve kutu 1'de
+// değil) aynıdır.
+func (h *Handlers) levelProgress(userID, course string) (map[string]int, error) {
 	var rows []struct {
 		Level string
 		N     int
@@ -255,8 +284,8 @@ func (h *Handlers) levelProgress(userID string) (map[string]int, error) {
 	if err := h.DB.Raw(`SELECT dw.level, COUNT(*) AS n
 		FROM word_progresses wp
 		JOIN dictionary_words dw ON dw.id = wp.word_id
-		WHERE wp.user_id = ? AND wp.box >= 2
-		GROUP BY dw.level`, userID).Scan(&rows).Error; err != nil {
+		WHERE wp.user_id = ? AND wp.course = ? AND wp.box >= 2
+		GROUP BY dw.level`, userID, course).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make(map[string]int, len(rows))
@@ -300,9 +329,13 @@ const (
 
 // LearnedWords: GET /stats/learned-words?level=&limit=&offset= — sayfalı öğrenilmiş kelimeler.
 // limit 1..200 aralığına çekilir (verilmezse 25); sıralama sabittir, sayfalar
-// eşit tarihli kelimelerde kaymaz.
+// eşit tarihli kelimelerde kaymaz. Kelimeler istekteki kursundur.
 func (h *Handlers) LearnedWords(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
+	course, err := requestCourse(c)
+	if err != nil {
+		return err
+	}
 	level := c.Query("level")
 	limit, _ := strconv.Atoi(c.Query("limit"))
 	offset, _ := strconv.Atoi(c.Query("offset"))
@@ -315,7 +348,7 @@ func (h *Handlers) LearnedWords(c *fiber.Ctx) error {
 	// Her sorgu kendi zincirini kurar: gorm zincirini Count'tan sonra yeniden
 	// kullanmak koşulları/seçimi bir sonraki sorguya taşıyabilir.
 	learned := func() *gorm.DB {
-		q := h.DB.Model(&models.WordProgress{}).Where("user_id = ? AND box = 6", userID)
+		q := h.DB.Model(&models.WordProgress{}).Where("user_id = ? AND course = ? AND box = 6", userID, course)
 		if level != "" {
 			q = q.Where("level = ?", level)
 		}

@@ -9,25 +9,34 @@ import (
 	"gorm.io/gorm"
 )
 
-// LearnedCount: GET /home/learned-count — otoriter count(box==6).
+// LearnedCount: GET /home/learned-count — kursun otoriter count(box==6)'ı
+// (users.total_learned ise bütün kursların toplamıdır, bkz. syncTotalLearned).
 func (h *Handlers) LearnedCount(c *fiber.Ctx) error {
-	cnt, err := learnedCount(h.DB, middleware.UserID(c))
+	course, err := requestCourse(c)
+	if err != nil {
+		return err
+	}
+	cnt, err := learnedCount(h.DB, middleware.UserID(c), course)
 	if err != nil {
 		return err
 	}
 	return c.JSON(fiber.Map{"learnedCount": cnt})
 }
 
-// learnedCount, kullanıcının kutu 6'daki (öğrenilmiş) kelime sayısıdır.
-func learnedCount(db *gorm.DB, userID string) (int64, error) {
+// learnedCount, kullanıcının kurstaki kutu 6'daki (öğrenilmiş) kelime sayısıdır.
+func learnedCount(db *gorm.DB, userID, course string) (int64, error) {
 	var cnt int64
-	err := db.Model(&models.WordProgress{}).Where("user_id = ? AND box = 6", userID).Count(&cnt).Error
+	err := db.Model(&models.WordProgress{}).Where("user_id = ? AND course = ? AND box = 6", userID, course).Count(&cnt).Error
 	return cnt, err
 }
 
 // CurrentGroup: GET /home/current-group — home_repository.getCurrentGroupProgress (fallback'larla).
+// İşaretçi İngilizce kursunundur (bkz. pointerCourse).
 func (h *Handlers) CurrentGroup(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
+	if _, err := pointerCourse(c); err != nil {
+		return err
+	}
 	var user models.User
 	if err := findUser(h.DB, userID, &user); err != nil {
 		return err

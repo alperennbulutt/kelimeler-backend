@@ -133,6 +133,24 @@ func UnlockedGroupKey(level string, group int) (key string, ok bool) {
 	return level + ":" + strconv.Itoa(group), true
 }
 
+// DefaultCourse, kurs belirtmeyen isteklerin kursudur: İngilizce. Kurs
+// öncesi bütün ilerleme ve yayındaki eski istemci bu kurstadır.
+const DefaultCourse = "en"
+
+// CourseUnlockedGroupKey, kursun bir grubunun "bugün açılan gruplar"
+// kümesindeki anahtarıdır. İngilizce kursunda anahtar eskisiyle aynıdır
+// ("A1:3"; eski istemci ve önceki günlerin kayıtları bu biçimdedir); diğer
+// kurslarda kurs koduyla öneklenir ("de/A1:3"). Böylece bir kursta açılan
+// grup başka bir kursun aynı grubunu açmaz. course doğrulanmış olmalıdır
+// (bkz. dictlang.Supported); seviye/grup kuralları UnlockedGroupKey'inkidir.
+func CourseUnlockedGroupKey(course, level string, group int) (key string, ok bool) {
+	key, ok = UnlockedGroupKey(level, group)
+	if !ok || course == DefaultCourse || course == "" {
+		return key, ok
+	}
+	return course + "/" + key, true
+}
+
 // SplitUnlockedGroups, virgülle ayrılmış kümeyi anahtar listesine çevirir.
 // Boş küme için nil değil boş dilim döner: JSON'da null yerine [] görünmelidir.
 func SplitUnlockedGroups(raw string) []string {

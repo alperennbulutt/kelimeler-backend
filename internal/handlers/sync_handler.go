@@ -67,10 +67,26 @@ const codeFreeGroupConflict = "free_group_conflict"
 // Kapı kararları GATE_ENFORCEMENT kipine tek tek uçlardaki gibi uyar: log'da
 // ihlal raporlanıp uygulanır, enforce'ta reddedilir.
 //
+// Kurs: bütün işlemler istekteki kursta uygulanır (X-Course, bkz.
+// requestCourse; yoksa "en", desteklenmeyen kod 400 invalid_course ve hiçbir
+// işlem uygulanmaz). İstemci her kursun kuyruğunu o kursun başlığıyla ayrı
+// istekte gönderir. Kelime işlemleri o kursun kaydına yazılır, group_started
+// açılışı o kursun anahtarıyla yazılır (bkz. services.CourseUnlockedGroupKey).
+// İşaretçi işlemleri (advance_group, set_current_group) İngilizce kursunun
+// işaretçisini taşır (bkz. pointerCourse); başka kursta işaretçiye dokunmadan
+// noop olarak onaylanır (kod course_not_supported) ve kaydedilir: kuyruk
+// takılmaz, aynı opId yeniden gelirse aynı sonuç döner. daily_login kursa
+// bağlı değildir. İşlem kimlikleri (applied_ops) kursa bağlı değildir (bkz.
+// claimOp).
+//
 // Yanıt: {"results":[{opId,status,code?,progress?}], "user": GET /auth/me'nin
 // "user"ı, "usage": GET /users/me/usage}.
 func (h *Handlers) SyncProgress(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
+	course, err := requestCourse(c)
+	if err != nil {
+		return err
+	}
 	var req dto.SyncRequest
 	if err := c.BodyParser(&req); err != nil {
 		return apiErr(fiber.StatusBadRequest, "invalid_request", "ops gerekli")
@@ -82,7 +98,7 @@ func (h *Handlers) SyncProgress(c *fiber.Ctx) error {
 
 	results := make([]dto.SyncOpResult, 0, len(req.Ops))
 	for _, raw := range req.Ops {
-		res, err := h.syncOp(c, userID, raw)
+		res, err := h.syncOp(c, userID, course, raw)
 		if err != nil {
 			return err
 		}
@@ -106,7 +122,7 @@ func (h *Handlers) SyncProgress(c *fiber.Ctx) error {
 // syncOp, tek bir işlemi çözer ve uygular. Dönen hata yalnızca isteği
 // bitirecek (veritabanı) hatasıdır; istemci kaynaklı her sorun bir rejected
 // sonucudur.
-func (h *Handlers) syncOp(c *fiber.Ctx, userID string, raw json.RawMessage) (dto.SyncOpResult, error) {
+func (h *Handlers) syncOp(c *fiber.Ctx, userID, course string, raw json.RawMessage) (dto.SyncOpResult, error) {
 	var op dto.SyncOp
 	if err := json.Unmarshal(raw, &op); err != nil {
 		// Alanlardan biri bozuk (ör. answeredAt): yanıtta eşlenebilsin diye
@@ -128,7 +144,7 @@ func (h *Handlers) syncOp(c *fiber.Ctx, userID string, raw json.RawMessage) (dto
 	res, found, err := findStoredResult(h.DB, userID, ref)
 	if err == nil && !found {
 		t := resolveAnswerTime(time.Now(), op.AnsweredAt)
-		res, err = h.applySyncOp(c, userID, &op, ref, t)
+		res, err = h.applySyncOp(c, userID, course, &op, ref, t)
 		if errors.Is(err, errOpDuplicate) {
 			// Aynı opId eşzamanlı bir istekte uygulandı; bu transaction geri
 			// alındı.
@@ -141,7 +157,7 @@ func (h *Handlers) syncOp(c *fiber.Ctx, userID string, raw json.RawMessage) (dto
 	if code, ok := isClientRejection(err); ok {
 		res = rejectedResult(op.OpID, code)
 		if isWordOp(op.Kind) && op.WordID != "" {
-			if res.Progress, err = currentProgress(h.DB, userID, op.WordID); err != nil {
+			if res.Progress, err = currentProgress(h.DB, userID, course, op.WordID); err != nil {
 				return dto.SyncOpResult{}, err
 			}
 		}
@@ -169,10 +185,10 @@ func rejectedResult(opID, code string) dto.SyncOpResult {
 	return dto.SyncOpResult{OpID: opID, Status: opRejected, Code: code}
 }
 
-// currentProgress, kelimenin güncel kaydını döner; kayıt yoksa nil.
-func currentProgress(db *gorm.DB, userID, wordID string) (json.RawMessage, error) {
+// currentProgress, kelimenin kurstaki güncel kaydını döner; kayıt yoksa nil.
+func currentProgress(db *gorm.DB, userID, course, wordID string) (json.RawMessage, error) {
 	var rows []models.WordProgress
-	if err := db.Where("user_id = ? AND word_id = ?", userID, wordID).Limit(1).Find(&rows).Error; err != nil {
+	if err := db.Where("user_id = ? AND course = ? AND word_id = ?", userID, course, wordID).Limit(1).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	if len(rows) == 0 {
@@ -182,26 +198,26 @@ func currentProgress(db *gorm.DB, userID, wordID string) (json.RawMessage, error
 }
 
 // applySyncOp, işlemi türüne göre kendi transaction'ında uygular ve kaydını
-// (applied_ops) aynı transaction'da yazar.
-func (h *Handlers) applySyncOp(c *fiber.Ctx, userID string, op *dto.SyncOp, ref *opRef, t answerTime) (dto.SyncOpResult, error) {
+// (applied_ops) aynı transaction'da yazar. İşlem course kursunda uygulanır.
+func (h *Handlers) applySyncOp(c *fiber.Ctx, userID, course string, op *dto.SyncOp, ref *opRef, t answerTime) (dto.SyncOpResult, error) {
 	switch op.Kind {
 	case opKindLearn, opKindUnknown, opKindSwipe:
-		return h.syncWordOp(c, userID, op, ref, t)
+		return h.syncWordOp(c, userID, course, op, ref, t)
 	case opKindGroupStarted:
-		return h.syncGroupStarted(c, userID, op, ref, t)
+		return h.syncGroupStarted(c, userID, course, op, ref, t)
 	case opKindAdvanceGroup:
-		return h.syncAdvanceGroup(userID, op, ref, t)
+		return h.syncAdvanceGroup(userID, course, op, ref, t)
 	case opKindDailyLogin:
 		return h.syncDailyLogin(userID, op, ref, t)
 	case opKindSetGroup:
-		return h.syncSetCurrentGroup(userID, op, ref, t)
+		return h.syncSetCurrentGroup(userID, course, op, ref, t)
 	}
 	return dto.SyncOpResult{}, errInvalidOp
 }
 
 // syncWordOp, learn / unknown / swipe işlemini tek tek uçlarla aynı kurallarla
 // uygular. Fark: bugünün tekrar cevabında kapı bir aralık aşılabilir.
-func (h *Handlers) syncWordOp(c *fiber.Ctx, userID string, op *dto.SyncOp, ref *opRef, t answerTime) (dto.SyncOpResult, error) {
+func (h *Handlers) syncWordOp(c *fiber.Ctx, userID, course string, op *dto.SyncOp, ref *opRef, t answerTime) (dto.SyncOpResult, error) {
 	if op.WordID == "" {
 		return dto.SyncOpResult{}, errInvalidOp
 	}
@@ -212,31 +228,31 @@ func (h *Handlers) syncWordOp(c *fiber.Ctx, userID string, op *dto.SyncOp, ref *
 		if err != nil {
 			return dto.SyncOpResult{}, err
 		}
-		mapState, err := h.learnMapLocked(userID, word)
+		mapState, err := h.learnMapLocked(userID, course, word)
 		if err != nil {
 			return dto.SyncOpResult{}, err
 		}
 		apply = func(tx *gorm.DB) (wordOutcome, error) {
-			return h.applyLearn(c, tx, userID, word, mapState, t)
+			return h.applyLearn(c, tx, userID, course, word, mapState, t)
 		}
 	case opKindUnknown:
 		word, err := h.dictionaryWord(op.WordID)
 		if err != nil {
 			return dto.SyncOpResult{}, err
 		}
-		mapState, _, err := h.unknownMapState(userID, word)
+		mapState, _, err := h.unknownMapState(userID, course, word)
 		if err != nil {
 			return dto.SyncOpResult{}, err
 		}
 		apply = func(tx *gorm.DB) (wordOutcome, error) {
-			return h.applyUnknown(c, tx, userID, word, mapState, t)
+			return h.applyUnknown(c, tx, userID, course, word, mapState, t)
 		}
 	case opKindSwipe:
 		if op.Direction != "right" && op.Direction != "left" {
 			return dto.SyncOpResult{}, errInvalidOp
 		}
 		apply = func(tx *gorm.DB) (wordOutcome, error) {
-			return h.applySwipe(c, tx, userID, op.WordID, op.Direction, t, services.ReviewAdCheckpointInterval)
+			return h.applySwipe(c, tx, userID, course, op.WordID, op.Direction, t, services.ReviewAdCheckpointInterval)
 		}
 	}
 
@@ -261,7 +277,11 @@ func (h *Handlers) syncWordOp(c *fiber.Ctx, userID string, op *dto.SyncOp, ref *
 // zaten ücretsiz açılmışsa açılış yine yazılır, sonuç kodu
 // free_group_conflict olur ve durum raporlanır. Bugünden sonraki gün (saat
 // kayması) bugün sayılır.
-func (h *Handlers) syncGroupStarted(c *fiber.Ctx, userID string, op *dto.SyncOp, ref *opRef, t answerTime) (dto.SyncOpResult, error) {
+//
+// Grup course kursunun grubudur (anahtarı ve açılış kaydı kursludur). Günün
+// ücretsiz hakkı kullanıcı başınadır: geçmiş günde başka bir kursta ücretsiz
+// açılan grup da çakışma sayılır.
+func (h *Handlers) syncGroupStarted(c *fiber.Ctx, userID, course string, op *dto.SyncOp, ref *opRef, t answerTime) (dto.SyncOpResult, error) {
 	if _, ok := services.UnlockedGroupKey(op.Level, op.Group); !ok {
 		return dto.SyncOpResult{}, errInvalidGroup
 	}
@@ -284,7 +304,7 @@ func (h *Handlers) syncGroupStarted(c *fiber.Ctx, userID string, op *dto.SyncOp,
 	err := h.DB.Transaction(func(tx *gorm.DB) error {
 		res = dto.SyncOpResult{Status: opNoop}
 		if day == today {
-			added, err := h.unlockGroupTx(c, tx, userID, op.Level, op.Group, freeGroupColumn, t.now)
+			added, err := h.unlockGroupTx(c, tx, userID, course, op.Level, op.Group, freeGroupColumn, t.now)
 			if err != nil {
 				return err
 			}
@@ -292,11 +312,11 @@ func (h *Handlers) syncGroupStarted(c *fiber.Ctx, userID string, op *dto.SyncOp,
 				res.Status = opApplied
 			}
 		} else {
-			conflict, err := freeGroupUsedOn(tx, userID, day, op.Level, op.Group)
+			conflict, err := freeGroupUsedOn(tx, userID, day, course, op.Level, op.Group)
 			if err != nil {
 				return err
 			}
-			inserted, err := recordGroupUnlock(tx, userID, day, op.Level, op.Group, models.UnlockViaOfflineFree, t.now)
+			inserted, err := recordGroupUnlock(tx, userID, course, day, op.Level, op.Group, models.UnlockViaOfflineFree, t.now)
 			if err != nil {
 				return err
 			}
@@ -319,29 +339,36 @@ func (h *Handlers) syncGroupStarted(c *fiber.Ctx, userID string, op *dto.SyncOp,
 	return res, err
 }
 
-// freeGroupUsedOn, day gününün ücretsiz hakkının (level, grp) dışında bir
-// gruba kullanılıp kullanılmadığını söyler.
-func freeGroupUsedOn(tx *gorm.DB, userID, day, level string, grp int) (bool, error) {
+// freeGroupUsedOn, day gününün ücretsiz hakkının course kursunun (level, grp)
+// grubu dışında bir gruba (herhangi bir kursta) kullanılıp kullanılmadığını
+// söyler: hak kullanıcı başınadır.
+func freeGroupUsedOn(tx *gorm.DB, userID, day, course, level string, grp int) (bool, error) {
 	var used bool
 	err := tx.Raw(`SELECT EXISTS (SELECT 1 FROM daily_group_unlocks
 		WHERE user_id = ? AND usage_date = CAST(? AS date) AND via IN (?, ?)
-		  AND NOT (level = ? AND grp = ?))`,
-		userID, day, models.UnlockViaFree, models.UnlockViaOfflineFree, level, grp).Scan(&used).Error
+		  AND NOT (course = ? AND level = ? AND grp = ?))`,
+		userID, day, models.UnlockViaFree, models.UnlockViaOfflineFree, course, level, grp).Scan(&used).Error
 	return used, err
 }
 
 // syncAdvanceGroup, gövdeli POST /users/me/advance-group ile aynıdır: işaretçi
 // tam o gruptaysa ve grup görülmüşse ilerler (applied); değilse noop, kod
 // blockedReason (boş olabilir).
-func (h *Handlers) syncAdvanceGroup(userID string, op *dto.SyncOp, ref *opRef, t answerTime) (dto.SyncOpResult, error) {
+//
+// İşaretçi İngilizce kursunundur: başka kursta işlem işaretçiye dokunmadan
+// noop olarak onaylanır (bkz. pointerOpIgnored).
+func (h *Handlers) syncAdvanceGroup(userID, course string, op *dto.SyncOp, ref *opRef, t answerTime) (dto.SyncOpResult, error) {
 	if services.IndexOfLevel(op.Level) < 0 || op.Group < 1 {
 		return dto.SyncOpResult{}, errInvalidGroup
+	}
+	if course != services.DefaultCourse {
+		return h.pointerOpIgnored(userID, ref, t)
 	}
 	completed := &dto.AdvanceGroupRequest{Level: op.Level, Group: op.Group}
 	var res dto.SyncOpResult
 	err := h.DB.Transaction(func(tx *gorm.DB) error {
 		var user models.User
-		adv, err := h.advanceGroupTx(tx, userID, completed, &user)
+		adv, err := h.advanceGroupTx(tx, userID, course, completed, &user)
 		if err != nil {
 			return err
 		}
@@ -361,15 +388,21 @@ func (h *Handlers) syncAdvanceGroup(userID string, op *dto.SyncOp, ref *opRef, t
 // işlem kaydedilmez; sınır açılınca aynı opId yeniden gönderilirse
 // uygulanabilir). İşlem başlık, açıklama ve kelime sayısı taşımaz: onlar
 // grubun bilgisidir, işaretçi taşınırken sunucudaki değerleri kalır.
-func (h *Handlers) syncSetCurrentGroup(userID string, op *dto.SyncOp, ref *opRef, t answerTime) (dto.SyncOpResult, error) {
+//
+// İşaretçi İngilizce kursunundur: başka kursta işlem işaretçiye dokunmadan
+// noop olarak onaylanır (bkz. pointerOpIgnored).
+func (h *Handlers) syncSetCurrentGroup(userID, course string, op *dto.SyncOp, ref *opRef, t answerTime) (dto.SyncOpResult, error) {
 	if services.IndexOfLevel(op.Level) < 0 || op.Group < 1 {
 		return dto.SyncOpResult{}, errInvalidGroup
+	}
+	if course != services.DefaultCourse {
+		return h.pointerOpIgnored(userID, ref, t)
 	}
 	req := &dto.SetCurrentGroupRequest{Level: op.Level, Group: op.Group}
 	var res dto.SyncOpResult
 	err := h.DB.Transaction(func(tx *gorm.DB) error {
 		var user models.User
-		moved, err := h.setCurrentGroupTx(tx, userID, req, &user)
+		moved, err := h.setCurrentGroupTx(tx, userID, course, req, &user)
 		if err != nil {
 			return err
 		}
@@ -377,6 +410,20 @@ func (h *Handlers) syncSetCurrentGroup(userID string, op *dto.SyncOp, ref *opRef
 		if moved {
 			res.Status = opApplied
 		}
+		return claimOp(tx, userID, ref, res, "", t.now)
+	})
+	return res, err
+}
+
+// pointerOpIgnored, İngilizce dışı bir kursta gelen işaretçi işleminin
+// (advance_group, set_current_group) sonucudur: "kaldığın grup" işaretçisi
+// İngilizce kursunun olduğundan (bkz. pointerCourse) hiçbir şey yazılmaz;
+// işlem noop ve kod course_not_supported ile onaylanır ve kaydedilir.
+// Reddedilseydi kaydedilmezdi ve istemci kuyruğu her senkronizasyonda aynı
+// işlemi yeniden gönderirdi; aynı opId yeniden gelirse aynı sonuç döner.
+func (h *Handlers) pointerOpIgnored(userID string, ref *opRef, t answerTime) (dto.SyncOpResult, error) {
+	res := dto.SyncOpResult{Status: opNoop, Code: errCourseNotSupported.Code}
+	err := h.DB.Transaction(func(tx *gorm.DB) error {
 		return claimOp(tx, userID, ref, res, "", t.now)
 	})
 	return res, err

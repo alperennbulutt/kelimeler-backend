@@ -117,8 +117,15 @@ func (h *Handlers) txWithUserResponse(userID string, user *models.User, fn func(
 // başlanmamış bir gruba yapılamaz: 403 open_group_limit döner ve hiçbir alan
 // değişmez. Dürüst istemci haritada kilitli gruba girmez; istemci bu ucun
 // hatasını yok sayar (işaretçi yalnızca "kaldığın yer"dir).
+//
+// İşaretçi İngilizce kursunundur (bkz. pointerCourse): başka bir kursla
+// gelen istek 400 course_not_supported döner.
 func (h *Handlers) SetCurrentGroup(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
+	course, err := pointerCourse(c)
+	if err != nil {
+		return err
+	}
 	var req dto.SetCurrentGroupRequest
 	if err := c.BodyParser(&req); err != nil {
 		return apiErr(fiber.StatusBadRequest, "invalid_request", "geçersiz istek")
@@ -134,7 +141,7 @@ func (h *Handlers) SetCurrentGroup(c *fiber.Ctx) error {
 
 	var user models.User
 	u, err := h.txWithUserResponse(userID, &user, func(tx *gorm.DB) error {
-		_, err := h.setCurrentGroupTx(tx, userID, &req, &user)
+		_, err := h.setCurrentGroupTx(tx, userID, course, &req, &user)
 		return err
 	})
 	if err != nil {
@@ -148,8 +155,10 @@ func (h *Handlers) SetCurrentGroup(c *fiber.Ctx) error {
 // biçimi çağıranda denetlenmiştir). user kilitli okunur ve yazıldıysa yeniden
 // okunur. moved, işaretçinin ileri taşındığını söyler: hedef işaretçinin
 // gerisindeyse hiçbir şey yazılmaz; hedef işaretçinin kendisiyse yalnızca
-// gövdedeki başlık/açıklama/kelime sayısı yazılır (moved false).
-func (h *Handlers) setCurrentGroupTx(tx *gorm.DB, userID string, req *dto.SetCurrentGroupRequest, user *models.User) (moved bool, err error) {
+// gövdedeki başlık/açıklama/kelime sayısı yazılır (moved false). course,
+// açık grup sınırının sayıldığı kurstur; işaretçi İngilizce kursunun
+// olduğundan çağıranlar services.DefaultCourse verir (bkz. pointerCourse).
+func (h *Handlers) setCurrentGroupTx(tx *gorm.DB, userID, course string, req *dto.SetCurrentGroupRequest, user *models.User) (moved bool, err error) {
 	maxGroup, err := maxGroupForLevel(tx, req.Level)
 	if err != nil {
 		return false, err
@@ -165,7 +174,7 @@ func (h *Handlers) setCurrentGroupTx(tx *gorm.DB, userID string, req *dto.SetCur
 	case -1:
 		return false, nil
 	case 1:
-		limited, err := h.openGroupLimitReached(tx, userID, req.Level, req.Group)
+		limited, err := h.openGroupLimitReached(tx, userID, course, req.Level, req.Group)
 		if err != nil {
 			return false, err
 		}
@@ -227,8 +236,15 @@ func (h *Handlers) setCurrentGroupTx(tx *gorm.DB, userID string, req *dto.SetCur
 // İki yolda da kullanıcı satırı kilitlenir: eşzamanlı istekler aynı işaretçiyi
 // okuyup birbirinin yazdığını ezmez. C2'nin son grubu bitince işaretçi
 // "tümü tamamlandı"da (C2, grup 0) kalır, başa sarılmaz.
+//
+// İşaretçi İngilizce kursunundur (bkz. pointerCourse): başka bir kursla
+// gelen istek 400 course_not_supported döner.
 func (h *Handlers) AdvanceGroup(c *fiber.Ctx) error {
 	userID := middleware.UserID(c)
+	course, err := pointerCourse(c)
+	if err != nil {
+		return err
+	}
 	var completed *dto.AdvanceGroupRequest
 	if len(c.Body()) > 0 {
 		var req dto.AdvanceGroupRequest
@@ -240,7 +256,7 @@ func (h *Handlers) AdvanceGroup(c *fiber.Ctx) error {
 		}
 	}
 	if completed == nil {
-		if err := h.awaitPointerGroupCompleted(userID); err != nil {
+		if err := h.awaitPointerGroupCompleted(userID, course); err != nil {
 			return err
 		}
 	}
@@ -249,7 +265,7 @@ func (h *Handlers) AdvanceGroup(c *fiber.Ctx) error {
 	var adv advanceResult
 	u, err := h.txWithUserResponse(userID, &user, func(tx *gorm.DB) error {
 		var err error
-		adv, err = h.advanceGroupTx(tx, userID, completed, &user)
+		adv, err = h.advanceGroupTx(tx, userID, course, completed, &user)
 		return err
 	})
 	if err != nil {
@@ -276,8 +292,10 @@ type advanceResult struct {
 
 // advanceGroupTx, advance-group kararını tx içinde verir ve yazar (kurallar
 // için bkz. AdvanceGroup). completed nil ise gövdesiz (eski istemci) yoldur.
-// user, kilitli okunur ve ilerlediyse yeniden okunur.
-func (h *Handlers) advanceGroupTx(tx *gorm.DB, userID string, completed *dto.AdvanceGroupRequest, user *models.User) (advanceResult, error) {
+// user, kilitli okunur ve ilerlediyse yeniden okunur. course, kararların
+// verildiği ilerlemenin kursudur; işaretçi İngilizce kursunun olduğundan
+// çağıranlar services.DefaultCourse verir (bkz. pointerCourse).
+func (h *Handlers) advanceGroupTx(tx *gorm.DB, userID, course string, completed *dto.AdvanceGroupRequest, user *models.User) (advanceResult, error) {
 	var res advanceResult
 	if err := lockUser(tx, userID, user); err != nil {
 		return res, err
@@ -288,7 +306,7 @@ func (h *Handlers) advanceGroupTx(tx *gorm.DB, userID string, completed *dto.Adv
 	if completed == nil {
 		// Karar kilitli satırdaki işaretçiyle verilir: bekleme sırasında
 		// başka bir istek işaretçiyi ilerletmiş olabilir.
-		done, err := groupCompleted(tx, userID, user.CurrentLevel, user.CurrentGroup)
+		done, err := groupCompleted(tx, userID, course, user.CurrentLevel, user.CurrentGroup)
 		if err != nil || !done {
 			return res, err
 		}
@@ -304,14 +322,14 @@ func (h *Handlers) advanceGroupTx(tx *gorm.DB, userID string, completed *dto.Adv
 	}
 	if completed != nil {
 		leavesLevel := nextLevel != user.CurrentLevel || nextGroup < 1
-		reason, err := h.bodiedAdvanceBlocked(tx, userID, user.CurrentLevel, user.CurrentGroup, leavesLevel)
+		reason, err := h.bodiedAdvanceBlocked(tx, userID, course, user.CurrentLevel, user.CurrentGroup, leavesLevel)
 		if err != nil || reason != "" {
 			res.blockedReason = reason
 			return res, err
 		}
 	}
 	if nextGroup >= 1 {
-		limited, err := h.openGroupLimitReached(tx, userID, nextLevel, nextGroup)
+		limited, err := h.openGroupLimitReached(tx, userID, course, nextLevel, nextGroup)
 		if err != nil {
 			return res, err
 		}
@@ -335,11 +353,11 @@ func (h *Handlers) advanceGroupTx(tx *gorm.DB, userID string, completed *dto.Adv
 // seviyeden çıkılıyorsa seviye de tamamlanmış olmalıdır (previous_level).
 // İkisi birden eksikse neden previous_not_seen'dir. TEST_MODE_UNLOCK_ALL'da
 // haritada kilit olmadığı için ikisi de sorulmaz.
-func (h *Handlers) bodiedAdvanceBlocked(tx *gorm.DB, userID, level string, grp int, leavesLevel bool) (string, error) {
+func (h *Handlers) bodiedAdvanceBlocked(tx *gorm.DB, userID, course, level string, grp int, leavesLevel bool) (string, error) {
 	if h.unlockAll() {
 		return "", nil
 	}
-	seen, err := groupSeen(tx, userID, level, grp)
+	seen, err := groupSeen(tx, userID, course, level, grp)
 	if err != nil {
 		return "", err
 	}
@@ -349,7 +367,7 @@ func (h *Handlers) bodiedAdvanceBlocked(tx *gorm.DB, userID, level string, grp i
 	if !leavesLevel {
 		return "", nil
 	}
-	done, err := isLevelDone(tx, userID, level)
+	done, err := isLevelDone(tx, userID, course, level)
 	if err != nil || done {
 		return "", err
 	}
@@ -373,7 +391,7 @@ var (
 // AdvanceGroup'un transaction'ında verilir; bu bekleme transaction'ın dışında
 // ve kilitsizdir (kilit tutarak beklemek, beklenen learn'ün kullanıcı satırı
 // kilidini bekletirdi).
-func (h *Handlers) awaitPointerGroupCompleted(userID string) error {
+func (h *Handlers) awaitPointerGroupCompleted(userID, course string) error {
 	deadline := time.Now().Add(legacyAdvanceSettle)
 	for {
 		var user models.User
@@ -383,7 +401,7 @@ func (h *Handlers) awaitPointerGroupCompleted(userID string) error {
 		if services.IndexOfLevel(user.CurrentLevel) < 0 || services.IsAllLevelsCompleted(user.CurrentLevel, user.CurrentGroup) {
 			return nil
 		}
-		done, err := groupCompleted(h.DB, userID, user.CurrentLevel, user.CurrentGroup)
+		done, err := groupCompleted(h.DB, userID, course, user.CurrentLevel, user.CurrentGroup)
 		if err != nil || done || !time.Now().Before(deadline) {
 			return err
 		}
@@ -525,8 +543,18 @@ const freeGroupColumn = "groups_started_today_count"
 // Gövde göndermeyen (ya da geçersiz gönderen) istemcilerde uç yalnızca sayacı
 // artırır; hangi grubun açıldığı bilinmediği için günlük geçmişe
 // (daily_group_unlocks) de bir şey yazılmaz.
+//
+// Grup istekteki kursun grubudur (bkz. requestCourse): kümeye kurslu anahtar
+// yazılır (İngilizce "A1:3", diğer kurslar "de/A1:3"; bkz.
+// services.CourseUnlockedGroupKey), günlük geçmişe kursla yazılır ve açık grup
+// sınırı o kursta sayılır. Sayaçlar (ücretsiz hak, reklamla açılış) kullanıcı
+// başınadır: günde bir ücretsiz grup bütün kurslar için birdir.
 func (h *Handlers) UnlockGroup(column string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
+		course, err := requestCourse(c)
+		if err != nil {
+			return err
+		}
 		var req dto.UnlockGroupRequest
 		if err := c.BodyParser(&req); err != nil {
 			return h.incrementUsage(c, column)
@@ -537,8 +565,8 @@ func (h *Handlers) UnlockGroup(column string) fiber.Handler {
 
 		userID := middleware.UserID(c)
 		now := time.Now()
-		err := h.DB.Transaction(func(tx *gorm.DB) error {
-			_, err := h.unlockGroupTx(c, tx, userID, req.Level, req.Group, column, now)
+		err = h.DB.Transaction(func(tx *gorm.DB) error {
+			_, err := h.unlockGroupTx(c, tx, userID, course, req.Level, req.Group, column, now)
 			return err
 		})
 		if err != nil {
@@ -559,8 +587,11 @@ func (h *Handlers) UnlockGroup(column string) fiber.Handler {
 // çevrimdışı verilmiş geçmiş günün cevapları o günün kayıtlarına göre
 // denetlenir. Grup bugün zaten açıksa da satır yoksa yazılır (bu tablodan
 // önce açılmış gruplar).
-func (h *Handlers) unlockGroupTx(c *fiber.Ctx, tx *gorm.DB, userID, level string, grp int, column string, now time.Time) (added bool, err error) {
-	key, ok := services.UnlockedGroupKey(level, grp)
+//
+// Grup course kursunun grubudur: anahtar kursludur
+// (services.CourseUnlockedGroupKey), açık grup sınırı o kursta sayılır.
+func (h *Handlers) unlockGroupTx(c *fiber.Ctx, tx *gorm.DB, userID, course, level string, grp int, column string, now time.Time) (added bool, err error) {
+	key, ok := services.CourseUnlockedGroupKey(course, level, grp)
 	if !ok {
 		return false, errInvalidGroup
 	}
@@ -576,10 +607,10 @@ func (h *Handlers) unlockGroupTx(c *fiber.Ctx, tx *gorm.DB, userID, level string
 		return false, err
 	}
 	if slices.Contains(services.SplitUnlockedGroups(user.UnlockedGroupsToday), key) {
-		_, err := recordGroupUnlock(tx, userID, services.UsageDate(now), level, grp, via, now)
+		_, err := recordGroupUnlock(tx, userID, course, services.UsageDate(now), level, grp, via, now)
 		return false, err
 	}
-	limited, err := h.openGroupLimitReached(tx, userID, level, grp)
+	limited, err := h.openGroupLimitReached(tx, userID, course, level, grp)
 	if err != nil {
 		return false, err
 	}
@@ -616,20 +647,21 @@ func (h *Handlers) unlockGroupTx(c *fiber.Ctx, tx *gorm.DB, userID, level string
 	}).Error; err != nil {
 		return false, err
 	}
-	if _, err := recordGroupUnlock(tx, userID, services.UsageDate(now), level, grp, via, now); err != nil {
+	if _, err := recordGroupUnlock(tx, userID, course, services.UsageDate(now), level, grp, via, now); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-// recordGroupUnlock, (level, grp) grubunun day ("YYYY-MM-DD", kullanım günü)
-// gününde via yoluyla açıldığını daily_group_unlocks'a yazar. Satır zaten
-// varsa (aynı gün aynı grup) dokunulmaz ve inserted false döner.
-func recordGroupUnlock(tx *gorm.DB, userID, day, level string, grp int, via string, now time.Time) (inserted bool, err error) {
-	res := tx.Exec(`INSERT INTO daily_group_unlocks (user_id, usage_date, level, grp, via, created_at)
-		VALUES (?, CAST(? AS date), ?, ?, ?, ?)
-		ON CONFLICT (user_id, usage_date, level, grp) DO NOTHING`,
-		userID, day, level, grp, via, now.UTC())
+// recordGroupUnlock, course kursunun (level, grp) grubunun day ("YYYY-MM-DD",
+// kullanım günü) gününde via yoluyla açıldığını daily_group_unlocks'a yazar.
+// Satır zaten varsa (aynı gün aynı kursta aynı grup) dokunulmaz ve inserted
+// false döner.
+func recordGroupUnlock(tx *gorm.DB, userID, course, day, level string, grp int, via string, now time.Time) (inserted bool, err error) {
+	res := tx.Exec(`INSERT INTO daily_group_unlocks (user_id, usage_date, course, level, grp, via, created_at)
+		VALUES (?, CAST(? AS date), ?, ?, ?, ?, ?)
+		ON CONFLICT (user_id, usage_date, course, level, grp) DO NOTHING`,
+		userID, day, course, level, grp, via, now.UTC())
 	return res.RowsAffected > 0, res.Error
 }
 
