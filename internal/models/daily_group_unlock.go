@@ -9,12 +9,20 @@ import "time"
 //
 // usage_date bir "date" kolonudur; PreferSimpleProtocol yüzünden gün
 // "YYYY-MM-DD" metni olarak yazılır (CAST(? AS date), bkz. services.UsageDate).
+//
+// Açılış kursludur (Course, bkz. WordProgress.Course): bir kursta açılan grup
+// başka bir kursun aynı grubunu açmaz. users.unlocked_groups_today'deki
+// anahtarın ("A1:3", "de/A1:3"; services.CourseUnlockedGroupKey) satır
+// karşılığı (course, level, grp)'dir. Kurs öncesi satırlar 'en'dir. Tekil
+// index'in adı kurs eklenirken değişti (eskisi uq_daily_group_unlock, db.migrate
+// siler).
 type DailyGroupUnlock struct {
 	ID        uint64    `gorm:"primaryKey"`
-	UserID    string    `gorm:"type:uuid;not null;uniqueIndex:uq_daily_group_unlock,priority:1"`
-	UsageDate time.Time `gorm:"type:date;not null;uniqueIndex:uq_daily_group_unlock,priority:2"`
-	Level     string    `gorm:"not null;uniqueIndex:uq_daily_group_unlock,priority:3"`
-	Grp       int       `gorm:"column:grp;not null;uniqueIndex:uq_daily_group_unlock,priority:4"`
+	UserID    string    `gorm:"type:uuid;not null;uniqueIndex:uq_daily_group_unlock_course,priority:1"`
+	UsageDate time.Time `gorm:"type:date;not null;uniqueIndex:uq_daily_group_unlock_course,priority:2"`
+	Course    string    `gorm:"not null;default:'en';uniqueIndex:uq_daily_group_unlock_course,priority:3"`
+	Level     string    `gorm:"not null;uniqueIndex:uq_daily_group_unlock_course,priority:4"`
+	Grp       int       `gorm:"column:grp;not null;uniqueIndex:uq_daily_group_unlock_course,priority:5"`
 	// Via, grubun nasıl açıldığıdır (UnlockVia...).
 	Via       string    `gorm:"not null;check:chk_daily_group_unlock_via,via IN ('free','ad','nofill','offline_free')"`
 	CreatedAt time.Time `gorm:"not null"`

@@ -104,6 +104,17 @@ func applyDictionaryPatches(database *gorm.DB, dir string) {
 	}
 }
 
+// applyDictionaryTranslations, değişen çeviri dosyalarını yükler (bkz.
+// db.ApplyDictionaryTranslations). Yamalar gibi başarısızlık açılışı
+// durdurmaz: o dil önceki hâliyle (ya da hiç yüklenmemişse eksik) kalır,
+// /dictionary/languages onu complete=false gösterir.
+func applyDictionaryTranslations(database *gorm.DB, dir string) {
+	if _, err := db.ApplyDictionaryTranslations(database, dir); err != nil {
+		log.Printf("hata: %v", err)
+		observability.CaptureError(err)
+	}
+}
+
 // run, sunucuyu kurar ve SIGTERM/SIGINT gelene kadar çalıştırır.
 func run() (err error) {
 	cfg := config.Load()
@@ -165,6 +176,7 @@ func run() (err error) {
 		log.Printf("uyarı: sözlük yüklenemedi, kelimeler gösterilemeyecek: %v", err)
 	}
 	applyDictionaryPatches(database, filepath.Join(cfg.SeedDir, "dictionary_patches"))
+	applyDictionaryTranslations(database, filepath.Join(cfg.SeedDir, "dictionary_translations"))
 
 	tokens := auth.NewTokenService(cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL).
 		WithGuestRefreshTTL(cfg.GuestRefreshTokenTTL)
@@ -394,7 +406,8 @@ func corsConfig(cfg *config.Config) (corsCfg cors.Config, ok bool) {
 		return cors.Config{
 			AllowOrigins: strings.Join(cfg.CORSAllowedOrigins, ","),
 			AllowHeaders: "Origin, Content-Type, Accept, Authorization, " +
-				observability.AppVersionHeader + ", " + observability.AppPlatformHeader,
+				observability.AppVersionHeader + ", " + observability.AppPlatformHeader + ", " +
+				handlers.CourseHeader,
 			AllowMethods: "GET, POST, PUT, PATCH, DELETE, OPTIONS",
 		}, true
 	}

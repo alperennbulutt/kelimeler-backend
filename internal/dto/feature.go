@@ -135,14 +135,18 @@ type ReviewAdPassRequest struct {
 // DailyUsageDTO alanlarında omitempty yoktur: istemci bir alanın yokluğunu
 // "sunucu bu sayacı tutmuyor" diye yorumlar, 0 ve boş dizi de gönderilmelidir.
 type DailyUsageDTO struct {
-	GroupsStartedTodayCount int      `json:"groupsStartedTodayCount"`
-	GroupsUnlockedByAdToday int      `json:"groupsUnlockedByAdToday"`
-	ReviewAdPassCountToday  int      `json:"reviewAdPassCountToday"`
-	ReviewAnswersToday      int      `json:"reviewAnswersToday"`
-	UnlockedGroupsToday     []string `json:"unlockedGroupsToday"` // "SEVIYE:GRUP", ör. "A1:3"
-	NoFillPassesToday       int      `json:"noFillPassesToday"`
-	NoFillPassesRemaining   int      `json:"noFillPassesRemaining"`
-	LastResetDate           int64    `json:"lastResetDate"`
+	GroupsStartedTodayCount int `json:"groupsStartedTodayCount"`
+	GroupsUnlockedByAdToday int `json:"groupsUnlockedByAdToday"`
+	ReviewAdPassCountToday  int `json:"reviewAdPassCountToday"`
+	ReviewAnswersToday      int `json:"reviewAnswersToday"`
+	// Bugün açılan gruplar, bütün kurslarınki birlikte. İngilizce kursunun
+	// anahtarı "SEVIYE:GRUP"tur (ör. "A1:3"; eski biçim), diğer kurslarınki
+	// kurs koduyla öneklenir: "KURS/SEVIYE:GRUP" (ör. "de/A1:3"). Bkz.
+	// services.CourseUnlockedGroupKey.
+	UnlockedGroupsToday   []string `json:"unlockedGroupsToday"`
+	NoFillPassesToday     int      `json:"noFillPassesToday"`
+	NoFillPassesRemaining int      `json:"noFillPassesRemaining"`
+	LastResetDate         int64    `json:"lastResetDate"`
 }
 
 type CurrentGroupDTO struct {

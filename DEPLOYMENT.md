@@ -218,7 +218,7 @@ Doğrula:
 
 - İlk açılışın deploy logunda `db: seed tamamlandı, 9980 kelime yüklendi` satırı ve ardından her yama için `db: sözlük yaması <ad> uygulandı (...)` satırı var. Yeni kurulumda seed yamaların değerlerini zaten taşıdığından bu satır `0 kart değişti` der. Canlıdaki mevcut sözlükte `0001_kritik_ve_a1` ilk kez uygulanırken `136 kart, 136 kart değişti` beklenir; `uyarı:` satırı çıkmamalı.
 
-> **İlk deploy'da 8 yama birden uygulanır** (toplam 5534 kart; sözlüğün yarısından fazlası değişir). **Öncesinde mutlaka yedek al:** PostgreSQL kaynağı → Backups → **Backup Now**, satır "Success" olmalı. Yama geri alınabilir ama tek adımda geri dönüşün yolu bu yedektir. Logda sırasıyla şu satırlar beklenir (`N ilerleme satırının metni eşitlendi` kullanıcı sayısına göre değişir), hiçbir `uyarı:` satırı çıkmamalı:
+> **İlk deploy'da 9 yama birden uygulanır** (toplam 5536 kart; sözlüğün yarısından fazlası değişir). **Öncesinde mutlaka yedek al:** PostgreSQL kaynağı → Backups → **Backup Now**, satır "Success" olmalı. Yama geri alınabilir ama tek adımda geri dönüşün yolu bu yedektir. Logda sırasıyla şu satırlar beklenir (`N ilerleme satırının metni eşitlendi` kullanıcı sayısına göre değişir), hiçbir `uyarı:` satırı çıkmamalı:
 >
 > | Yama | Beklenen log |
 > |---|---|
@@ -230,8 +230,9 @@ Doğrula:
 > | `0006_c2` | `1144 kart, 1144 kart değişti` |
 > | `0007_tur2_kalanlar` | `8 kart, 8 kart değişti` |
 > | `0008_a1_amerikan` | `2 kart, 2 kart değişti` |
+> | `0009_etkilemek_ayrimi` | `2 kart, 2 kart değişti` |
 >
-> Sonra `SELECT name, words, updated FROM dictionary_patches_applied ORDER BY name;` 8 satır döner. İçeriği değişen kartlarda kullanıcının ilerlemesi (kutu, tarihler) o karta bağlı kalır, kartta artık yeni kelime görünür (aşağıda "Kullanıcı ilerlemesi").
+> Sonra `SELECT name, words, updated FROM dictionary_patches_applied ORDER BY name;` 9 satır döner. İçeriği değişen kartlarda kullanıcının ilerlemesi (kutu, tarihler) o karta bağlı kalır, kartta artık yeni kelime görünür (aşağıda "Kullanıcı ilerlemesi").
 - `https://<domain>/api/v1/health` yanıtında `"dictionaryWords":9980` görünüyor. Yamalar kart eklemez ya da silmez, bu sayı değişmez.
 - PostgreSQL terminalinde: `SELECT name, words, updated, applied_at FROM dictionary_patches_applied ORDER BY name;`
 
@@ -301,6 +302,15 @@ Yalnızca yamaların çözemeyeceği bir durumda kullan: satırlar eksik ya da b
 3. Application'ı yeniden başlat; boş tabloyu görünce yeni seed'i yükler. Kayıtlı yamalar yeniden uygulanmaz; seed onların değerlerini zaten taşımalıdır (`TestRepoYamalari_SeedIleUyumlu`).
 
 2. ve 3. adım arasında uygulama kelime gösteremez; ikisini art arda ve sakin bir saatte yap. Tabloyu boşaltıp yeniden başlatmayı unutma: seed yalnızca açılışta ve tablo boşken yüklenir.
+
+### Dil kursları: çeviri dosyaları
+
+Kartlar 14 dilde sunulur (tr en de fr es it pt ru ar az hi id ja ko; liste `internal/dictlang`). Her dilin metni `seed/dictionary_translations/<dil>.json` dosyasındadır: kelime (`w`), örnek (`e`), gerekirse anlam notu (`m`), Japoncada okunuş (`r`). İngilizcenin kelimesi ve örneği `dictionary_words`'tedir; `en.json` yalnızca anlam notlarını taşır.
+
+- Açılışta içeriği değişen dosya (SHA-256) o dilin satırlarını tek transaction'da yeniden yazar; değişmeyen dosyaya dokunulmaz. Çeviri düzeltmek için dosyayı düzenleyip deploy etmek yeter.
+- Hatalı dosya açılışı durdurmaz: o dil önceki hâliyle kalır, hata loglanır ve Sentry'ye gider. CI'da `TestDepodakiCeviriler` her dosyanın 9980 kartın tamamını taşıdığını, sözlükte olmayan kart içermediğini ve `tr.json`'daki `m`'nin kartın (yamalı) Türkçesiyle aynı olduğunu denetler.
+- Yeni kart eklenirse her dil dosyasına da eklenmelidir; eksik dil `/dictionary/languages`'ta `complete: false` görünür ve istemci onu seçtirmez.
+- İstemci kursu `X-Course` başlığıyla seçer (yoksa `en`); her kursun ilerlemesi ayrıdır. Kart metni `/dictionary/words` ve `/sync/snapshot`'a `learn`/`know` verilerek alınır; verilmezse yanıt eskisiyle aynıdır.
 
 ---
 

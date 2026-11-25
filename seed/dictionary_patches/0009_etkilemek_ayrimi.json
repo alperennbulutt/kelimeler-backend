@@ -1,0 +1,35 @@
+{
+  "description": "Sözlük: aynı gruptaki affect/influence kartlarının Türkçe anlamlarına ayırıcı not (2 kart). Dil kursları uzman incelemesi, 2. tur. Kart id'leri, seviye, grup ve sıra değişmez.",
+  "changes": [
+    {
+      "id": "B1_1_2",
+      "old": {
+        "english": "affect",
+        "turkish": "etkilemek",
+        "example": "The weather affects my mood."
+      },
+      "new": {
+        "english": "affect",
+        "turkish": "etkilemek (değişikliğe yol açmak)",
+        "example": "The weather affects my mood."
+      },
+      "kind": "anlam_ayrimi",
+      "reason": "affect ve influence aynı grupta (B1_1) ikisi de 'etkilemek'; Türkçe bilen öğrenci iki kartı ayıramıyordu. affect: bir şeyde değişikliğe yol açmak."
+    },
+    {
+      "id": "B1_1_31",
+      "old": {
+        "english": "influence",
+        "turkish": "etkilemek",
+        "example": "Music influences people deeply."
+      },
+      "new": {
+        "english": "influence",
+        "turkish": "etkilemek (yönlendirmek, nüfuz etmek)",
+        "example": "Music influences people deeply."
+      },
+      "kind": "anlam_ayrimi",
+      "reason": "affect ve influence aynı grupta (B1_1) ikisi de 'etkilemek'; influence: birinin düşüncesini ya da davranışını yönlendirmek."
+    }
+  ]
+}

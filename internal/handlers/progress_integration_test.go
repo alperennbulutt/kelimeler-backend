@@ -868,7 +868,7 @@ func TestLearnWord_SeviyesiFarkliEskiKayitIlerlemesiKorunarakDuzeltilir(t *testi
 		t.Errorf("sözlük alanları = %s:%d %q, beklenen A1:1 %q", wp.Level, wp.Grp, wp.English, words[1].English)
 	}
 
-	groups, err := h.computeLevelGroups(u.ID, "A1")
+	groups, err := h.computeLevelGroups(u.ID, services.DefaultCourse, "A1")
 	if err != nil {
 		t.Fatal(err)
 	}

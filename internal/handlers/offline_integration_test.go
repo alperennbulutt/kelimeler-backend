@@ -492,7 +492,7 @@ func TestSync_GroupStarted(t *testing.T) {
 	gdb, u, app := newOfflineTest(t, config.GateEnforce)
 	bugun := services.UsageDate(time.Now())
 	dunGun := services.UsageDate(dun())
-	if _, err := recordGroupUnlock(gdb, u.ID, dunGun, "A1", 1, models.UnlockViaFree, time.Now()); err != nil {
+	if _, err := recordGroupUnlock(gdb, u.ID, services.DefaultCourse, dunGun, "A1", 1, models.UnlockViaFree, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 

@@ -122,6 +122,7 @@ func RegisterRoutes(api fiber.Router, h *Handlers, ts *auth.TokenService, authLi
 
 	// --- Dictionary ---
 	dict := api.Group("/dictionary", guard)
+	dict.Get("/languages", h.GetLanguages)
 	dict.Get("/words", h.GetWordsForGroup)
 	dict.Post("/words/batch", h.GetWordsByIds)
 

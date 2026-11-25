@@ -14,6 +14,7 @@ import (
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	gormlogger "gorm.io/gorm/logger"
 )
 
@@ -164,11 +165,60 @@ func migrate(gdb *gorm.DB) error {
 		&models.DictionaryPatchApplied{},
 		&models.AppliedOp{},
 		&models.DailyGroupUnlock{},
+		&models.DictionaryTranslation{},
+		&models.DictionaryTranslationFile{},
 	); err != nil {
+		return err
+	}
+	if err := dropLegacyIndexes(gdb); err != nil {
 		return err
 	}
 
 	log.Println("db: migrate tamamlandı")
+	return nil
+}
+
+// legacyIndexes, kurs (course) kolonu eklenmeden önceki index'lerdir. Yerlerini
+// kursu içeren yeni adlı index'ler aldı (bkz. models.WordProgress,
+// models.DailyGroupUnlock); AutoMigrate aynı adlı var olan bir index'in
+// kolonlarını değiştirmediği için yeni adlar gerekti.
+//
+// Tekil olanlar mutlaka silinmelidir: uq_user_word (user_id, word_id) kaldıkça
+// aynı kart ikinci bir kursta öğrenilemez, uq_daily_group_unlock (user_id,
+// usage_date, level, grp) kaldıkça aynı grup aynı gün ikinci bir kursta
+// açılamaz (her yazım tekillik ihlaliyle düşer). word_progresses'in diğer üçü
+// yalnızca gereksizdir (sorgular artık kursla daralır); her yazımda boşuna
+// güncellenmesinler diye onlar da silinir.
+var legacyIndexes = []string{
+	"uq_user_word",
+	"idx_wp_user_box",
+	"idx_wp_user_level_box",
+	"idx_wp_user_box_next",
+	"uq_daily_group_unlock",
+}
+
+// dropLegacyIndexes, eski index'leri siler.
+//
+// AutoMigrate'ten SONRA çalışır: course kolonları (NOT NULL DEFAULT 'en'; var
+// olan satırlar 'en' olur, PostgreSQL 11+ tabloyu yeniden yazmaz) ve yeni
+// tekil index'ler o sırada kurulmuştur. Eski tekil index yenisinden önce
+// silinmez; arada tekillik korumasız kalmaz. Var olan satırlar eski anahtarda
+// zaten tekil olduğundan (ve hepsi 'en' olduğundan) yeni index veriyle
+// çakışamaz.
+//
+// İdempotenttir (DROP INDEX IF EXISTS). Index'ler mevcut şemada (AutoMigrate'in
+// kullandığı current_schema()) aranır: search_path'te sonraki bir şemadaki
+// (ör. testlerin geçici şeması açıkken public) aynı adlı index'e dokunulmaz.
+func dropLegacyIndexes(gdb *gorm.DB) error {
+	var schema string
+	if err := gdb.Raw(`SELECT current_schema()`).Scan(&schema).Error; err != nil {
+		return fmt.Errorf("şema okunamadı: %w", err)
+	}
+	for _, name := range legacyIndexes {
+		if err := gdb.Exec(`DROP INDEX IF EXISTS ?`, clause.Table{Name: schema + "." + name}).Error; err != nil {
+			return fmt.Errorf("eski index %s silinemedi: %w", name, err)
+		}
+	}
 	return nil
 }
 
